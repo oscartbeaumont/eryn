@@ -3,7 +3,7 @@ import { capture } from "./analytics";
 import { fetchModels, fetchSetup, saveGuild, type AvailableGuild, type Guild, type ModelOption, type SetupData } from "./api";
 import { installUrl } from "./discord";
 import { ModelSelect } from "./ModelSelect";
-import { A, buttonClass, Chip, Footer, Header, Kicker, Notice } from "./ui";
+import { A, buttonClass, Chip, Footer, Header, Kicker, Notice, SecretInput } from "./ui";
 
 /** A guild Eryn cannot run in yet, because it has no key of its own. */
 function needsKey(guild: Guild): boolean {
@@ -314,14 +314,7 @@ function GuildCard(props: {
 						<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
 							{props.guild.configured ? "New key — blank keeps the current one" : "OpenCode Go API key"}
 						</span>
-						<input
-							type="password"
-							name="api_key"
-							placeholder="oc_sk_…"
-							autocomplete="off"
-							spellcheck={false}
-							class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
-						/>
+						<SecretInput name="api_key" placeholder="oc_sk_…" />
 					</label>
 				</Show>
 

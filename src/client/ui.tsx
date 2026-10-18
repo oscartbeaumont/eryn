@@ -225,3 +225,59 @@ export function Field(props: { label: string; hint?: string; children: any }) {
 		</div>
 	);
 }
+
+/** An eye, crossed out when the value is currently hidden. */
+function EyeIcon(props: { hidden?: boolean }) {
+	return (
+		<svg
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="1.6"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			class="size-4"
+			aria-hidden="true"
+		>
+			<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" />
+			<circle cx="12" cy="12" r="2.6" />
+			<Show when={props.hidden}>
+				<path d="M4 4l16 16" />
+			</Show>
+		</svg>
+	);
+}
+
+/**
+ * A secret field with a reveal toggle.
+ *
+ * Worth having anywhere a credential is pasted: a mistyped character in a key
+ * is invisible until a request fails much later, and the failure gives no hint
+ * that the key itself was the problem.
+ */
+export function SecretInput(props: { name: string; placeholder?: string; autocomplete?: string }) {
+	const [visible, setVisible] = createSignal(false);
+	const label = () => (visible() ? "Hide the key" : "Show the key");
+	return (
+		<div class="relative">
+			<input
+				type={visible() ? "text" : "password"}
+				name={props.name}
+				placeholder={props.placeholder}
+				autocomplete={props.autocomplete ?? "off"}
+				spellcheck={false}
+				class="w-full border border-line-strong bg-bg py-3 pl-3 pr-12 font-mono text-sm text-fg outline-none focus:border-fg"
+			/>
+			<button
+				type="button"
+				aria-label={label()}
+				aria-pressed={visible() ? "true" : "false"}
+				title={label()}
+				class="absolute inset-y-0 right-0 grid w-11 cursor-pointer place-items-center text-faint transition-colors hover:text-fg"
+				onClick={() => setVisible(!visible())}
+			>
+				<EyeIcon hidden={!visible()} />
+			</button>
+		</div>
+	);
+}
