@@ -168,7 +168,7 @@ export default function ConsoleMcp() {
 		<>
 			<Header account={session()?.account} />
 			<main class="flex-1">
-				<section class="mx-auto w-[min(1080px,92vw)] py-12">
+				<section class="mx-auto w-[min(820px,92vw)] py-12">
 					<Kicker>MCP</Kicker>
 					<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">
 						Eryn as an MCP server
@@ -187,7 +187,7 @@ export default function ConsoleMcp() {
 						<Notice kind={status().kind === "error" ? "error" : "ok"}>{status().message}</Notice>
 					</Show>
 
-					<div class="grid max-w-[820px] gap-4">
+					<div class="grid gap-4">
 						<div class="border border-line bg-surface p-6">
 							<div class="mb-4 flex items-center gap-3">
 								<span class="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">Endpoint</span>
@@ -241,7 +241,7 @@ export default function ConsoleMcp() {
 					</div>
 
 					<h2 class="mb-4 mt-12 font-mono text-[15px] font-semibold">Tools</h2>
-					<div class="max-w-[820px] divide-y divide-line border border-line bg-surface">
+					<div class="divide-y divide-line border border-line bg-surface">
 						<For each={TOOLS}>
 							{(tool) => (
 								<div class="flex items-start gap-4 px-5 py-4">
@@ -271,7 +271,7 @@ export default function ConsoleMcp() {
 						These grant the MCP access to an account. The endpoints are built and reachable; the tools behind them
 						land in a later change, so the buttons are parked.
 					</p>
-					<div class="max-w-[820px] divide-y divide-line border border-line bg-surface">
+					<div class="divide-y divide-line border border-line bg-surface">
 						<For each={INTEGRATIONS}>
 							{(integration) => (
 								<div class="flex flex-wrap items-center gap-4 px-5 py-4 opacity-45">

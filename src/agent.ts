@@ -39,9 +39,28 @@ const LOCATION = "/eryn";
 const SESSION_PREFIX = "opencode:session:";
 const DEFAULT_TURN_TIMEOUT_SECONDS = 900;
 const DEFAULT_MCP_URL = "https://eryn.otbeaumont.me/mcp";
+/** The provider every guild's OpenCode Go key is for. */
+const PROVIDER = "opencode-go";
 
 function log(message: string): void {
 	console.log(`[eryn:session] ${message}`);
+}
+
+/** A model the console can offer, normalised for the dropdown. */
+interface ModelOption {
+	/** The `provider/model` reference the registry accepts, e.g. `opencode-go/kimi-k3`. */
+	id: string;
+	name: string;
+	provider: string;
+	status: string;
+	enabled: boolean;
+}
+
+interface ModelsRequest {
+	guildId: string;
+	apiKey: string;
+	model?: string;
+	github?: { installationId?: string; repo?: string };
 }
 
 interface PromptRequest {
@@ -142,6 +161,8 @@ export class ErynSession extends DurableObject<Env> {
 	private readonly sessions = new Map<string, string>();
 	/** The minted MCP bearer token, reused for the object's lifetime. */
 	private mcpToken: Promise<string | undefined> | undefined;
+	/** The model catalogue for the current host, fetched at most once per host. */
+	private models: ModelOption[] | undefined;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -189,13 +210,28 @@ export class ErynSession extends DurableObject<Env> {
 					model,
 					default_agent: "build",
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
-					providers: { "opencode-go": { settings: { apiKey } } },
 					mcp: await this.mcpConfig(),
 				},
 				plugins,
+			}).then(async (host) => {
+				// The key is supplied as an integration credential, not as
+				// `providers.<id>.settings.apiKey`. That config field is accepted by
+				// the schema but never reaches provider activation, so a provider
+				// configured that way stays invisible: its models do not resolve and
+				// no request can be made against it. The integration store is the
+				// channel the registry actually reads, it lives in this object's own
+				// database, and that keeps a guild's key inside the guild's object.
+				await host.integration.connect.key({
+					integrationID: PROVIDER,
+					key: apiKey,
+					location: { directory: LOCATION },
+				});
+				return host;
 			});
 			this.host = { promise, apiKey, model, github: githubKey };
 			this.consuming = undefined;
+			// A different credential or model means a different catalogue.
+			this.models = undefined;
 			void promise
 				.then((host) => this.startConsuming(host))
 				.catch((error) => log(`could not start the event stream: ${describeError(error)}`));
@@ -267,10 +303,61 @@ export class ErynSession extends DurableObject<Env> {
 			const body = (await request.json().catch(() => ({}))) as { threadId?: string };
 			return Response.json({ stopped: await this.interrupt(body.threadId) });
 		}
+		if (request.method === "POST" && pathname === "/session/models") {
+			return await this.modelsResponse(request);
+		}
 		if (request.method === "GET" && pathname === "/session/status") {
 			return Response.json({ guildId: this.guildId, busy: this.runs.size > 0 });
 		}
 		return Response.json({ error: "not found" }, { status: 404 });
+	}
+
+	// --- Model catalogue --------------------------------------------------------
+
+	/**
+	 * The models this guild's key can reach.
+	 *
+	 * Read from the embedded OpenCode server rather than by reimplementing
+	 * provider discovery: the SDK already knows how a provider publishes its
+	 * catalogue, which entries are enabled, and what each one is called, so this
+	 * is a single call. The catalogue is cached for the life of the host, so a
+	 * console reload does not pay for it twice.
+	 */
+	private async modelsResponse(request: Request): Promise<Response> {
+		const body = (await request.json().catch(() => undefined)) as ModelsRequest | undefined;
+		if (!body) return Response.json({ error: "the request could not be read" }, { status: 400 });
+		if (this.guildId && body.guildId && body.guildId !== this.guildId) {
+			return Response.json({ error: "guild mismatch" }, { status: 403 });
+		}
+		if (!body.apiKey) return Response.json({ models: [] });
+		try {
+			return Response.json({ models: await this.listModels(body) });
+		} catch (error) {
+			log(`could not list models: ${describeError(error)}`);
+			return Response.json({ error: describeError(error) }, { status: 502 });
+		}
+	}
+
+	private async listModels(request: ModelsRequest): Promise<ModelOption[]> {
+		const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
+		if (!this.models) {
+			const listed = await host.model.list({ location: { directory: LOCATION } });
+			const wanted = listed.data.filter((entry) => entry.providerID === PROVIDER);
+			// The key is issued for one provider. Should the catalogue name it
+			// differently, offer everything rather than presenting an empty list.
+			const provider = wanted.length > 0 ? wanted : listed.data;
+			this.models = provider
+				.filter((entry) => entry.status !== "deprecated")
+				.map((entry) => ({
+					id: `${entry.providerID}/${entry.id}`,
+					name: entry.name,
+					provider: entry.providerID,
+					status: entry.status,
+					enabled: entry.enabled,
+				}))
+				.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
+		}
+		return this.models;
 	}
 
 	// --- A turn -----------------------------------------------------------------

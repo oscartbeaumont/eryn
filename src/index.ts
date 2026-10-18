@@ -37,7 +37,7 @@ import {
 	type ConsentRequest,
 } from "./mcp/oauth";
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
-import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
+import { getGuildKey, getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
 
 export { ErynGateway } from "./gateway";
 export { ErynSession } from "./agent";
@@ -61,6 +61,10 @@ const SetupRequestSchema = Schema.Struct({
 	api_key: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
 	github_repo: Schema.optional(Schema.String),
+});
+
+const ModelsRequestSchema = Schema.Struct({
+	guild_id: Schema.String,
 });
 
 function describe(error: unknown): string {
@@ -203,6 +207,7 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 				icon: guild.icon ?? null,
 				configured: summary.configured,
 				model: summary.model ?? DEFAULT_MODEL,
+				keyPrefix: summary.keyPrefix ?? null,
 				updatedAt: summary.updatedAt ?? null,
 				githubRepo: summary.github?.repo ?? null,
 				githubInstalled: Boolean(installationId),
@@ -273,6 +278,45 @@ function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
 		return json({ error: "Discord rate-limited that request. Wait a moment and try again." }, 429);
 	}
 	return json({ error: describe(error) }, 500);
+}
+
+/**
+ * The models a guild's key can reach, for the console's model picker.
+ *
+ * The catalogue comes from that guild's own embedded OpenCode server, so the
+ * list is exactly what a turn would be able to use and none of the provider's
+ * discovery logic is duplicated here. The key never reaches the browser: it is
+ * read from the registry and forwarded over the internal Durable Object binding.
+ */
+async function handleModels(request: HttpServerRequest.HttpServerRequest, guildId: string): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ error: "Please sign in again." }, 401);
+
+	// Re-check the guild against Discord, exactly as saving a key does.
+	const guilds = await manageableGuilds(session);
+	if (!guilds.some((guild) => guild.id === guildId && canManage(guild))) {
+		return json({ error: "You cannot manage that server." }, 403);
+	}
+
+	const config = await getGuildKey(env, guildId);
+	// Without a key there is nothing to ask the provider about, and the console
+	// keeps the picker disabled rather than showing a guess.
+	if (!config) return json({ models: [], reason: "no-key" });
+
+	const stub = env.SESSION.get(env.SESSION.idFromName(guildId));
+	const response = await stub.fetch("https://eryn/session/models", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ guildId, apiKey: config.apiKey, model: config.model, github: config.github }),
+	});
+	const body = (await response.json().catch(() => ({}))) as { models?: unknown; error?: string };
+	if (!response.ok) {
+		return json({ error: body.error ?? `The model catalogue could not be read (HTTP ${response.status}).` }, 502);
+	}
+	return json({
+		models: Array.isArray(body.models) ? body.models : [],
+		default: config.model ?? DEFAULT_MODEL,
+	});
 }
 
 // --- MCP ----------------------------------------------------------------------
@@ -457,6 +501,13 @@ const Routes = Layer.mergeAll(
 			const form = yield* HttpServerRequest.schemaBodyJson(SetupRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
 			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleSetupPost(request, form).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/models", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(ModelsRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleModels(request, form.guild_id).catch((error) => setupFailure(error)));
 		}),
 	),
 	HttpRouter.add("GET", "/auth/discord", (request) =>

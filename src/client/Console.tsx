@@ -1,17 +1,9 @@
 import { createSignal, For, Show } from "solid-js";
 import { capture } from "./analytics";
-import { fetchSetup, saveGuild, type AvailableGuild, type Guild, type SetupData } from "./api";
+import { fetchModels, fetchSetup, saveGuild, type AvailableGuild, type Guild, type ModelOption, type SetupData } from "./api";
 import { installUrl } from "./discord";
+import { ModelSelect } from "./ModelSelect";
 import { A, buttonClass, Chip, Footer, Header, Kicker, Notice } from "./ui";
-
-const MODELS = [
-	"opencode-go/deepseek-v4.1-flash",
-	"opencode-go/deepseek-v4-pro",
-	"opencode-go/kimi-k3",
-	"opencode-go/glm-5.3",
-	"opencode-go/gpt-6-luna",
-	"opencode-go/claude-haiku-5-5",
-];
 
 interface NoticeState {
 	kind: "ok" | "error";
@@ -48,7 +40,7 @@ export default function Console() {
 		<>
 			<Header account={data()?.account} />
 			<main class="flex-1">
-				<section class="mx-auto w-[min(1080px,92vw)] py-12">
+				<section class="mx-auto w-[min(820px,92vw)] py-12">
 					<Show when={notice()}>{(current) => <Notice kind={current().kind}>{current().message}</Notice>}</Show>
 
 					<Show when={data()} fallback={<p class="font-mono text-sm text-faint">Loading…</p>}>
@@ -58,9 +50,6 @@ export default function Console() {
 								<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">
 									Your servers
 								</h1>
-								<datalist id="models">
-									<For each={MODELS}>{(model) => <option value={model} />}</For>
-								</datalist>
 
 								<Show
 									when={(loaded().guilds ?? []).length > 0}
@@ -70,7 +59,7 @@ export default function Console() {
 										</p>
 									}
 								>
-									<div class="flex max-w-[820px] flex-col gap-4">
+									<div class="flex flex-col gap-4">
 										<For each={loaded().guilds ?? []}>
 											{(guild) => (
 												<GuildCard
@@ -144,7 +133,7 @@ function AddServers(props: { guilds: AvailableGuild[] }) {
 	const [open, setOpen] = createSignal(false);
 	return (
 		<Show when={props.guilds.length > 0}>
-			<div class="mt-8 max-w-[820px]">
+			<div class="mt-8">
 				<button
 					type="button"
 					class={buttonClass.ghost}
@@ -192,6 +181,31 @@ function GuildCard(props: {
 	onResult: (kind: NoticeState["kind"], message: string) => void;
 }) {
 	const [busy, setBusy] = createSignal(false);
+	const [model, setModel] = createSignal(props.guild.model);
+	/** Set while the key field is revealed for a server that already has one. */
+	const [replacing, setReplacing] = createSignal(false);
+	const [models, setModels] = createSignal<ModelOption[]>([]);
+	const [catalogue, setCatalogue] = createSignal<"loading" | "ready" | "error">("loading");
+	const [catalogueError, setCatalogueError] = createSignal<string>();
+
+	/**
+	 * The catalogue comes from this server's own OpenCode instance, so it is
+	 * exactly the set a turn could use. Without a key there is nothing to ask,
+	 * so the picker stays disabled rather than making something up.
+	 */
+	async function loadModels() {
+		if (!props.guild.configured) return;
+		setCatalogue("loading");
+		try {
+			const result = await fetchModels(props.guild.id);
+			setModels(result.models);
+			setCatalogue("ready");
+		} catch (error) {
+			setCatalogueError(error instanceof Error ? error.message : String(error));
+			setCatalogue("error");
+		}
+	}
+	void loadModels();
 
 	async function onSubmit(event: SubmitEvent) {
 		event.preventDefault();
@@ -203,10 +217,10 @@ function GuildCard(props: {
 				action: "save",
 				guildId: props.guild.id,
 				apiKey: String(formData.get("api_key") ?? ""),
-				model: String(formData.get("model") ?? ""),
+				model: model(),
 				githubRepo: String(formData.get("github_repo") ?? ""),
 			});
-			capture("server_key_saved", { model: String(formData.get("model") ?? "") });
+			capture("server_key_saved", { model: model() });
 			props.onResult("ok", result.message ?? "Saved.");
 		} catch (error) {
 			props.onResult("error", error instanceof Error ? error.message : String(error));
@@ -216,7 +230,7 @@ function GuildCard(props: {
 	}
 
 	async function onRemove() {
-		if (!confirm("Remove the key for this server?")) return;
+		if (!confirm("Remove the key for this server? Eryn will stop running here until a new one is added.")) return;
 		setBusy(true);
 		try {
 			const result = await saveGuild({ action: "remove", guildId: props.guild.id });
@@ -229,39 +243,80 @@ function GuildCard(props: {
 		}
 	}
 
+	/** One line under the picker explaining what the list currently is. */
+	function catalogueHint(): string {
+		if (!props.guild.configured) return "Add an OpenCode Go key to load the models it can reach.";
+		if (catalogue() === "loading") return "Loading models from this server's OpenCode instance…";
+		if (catalogue() === "error") return `Could not load models: ${catalogueError()}`;
+		if (models().length === 0) return "This key reported no models. You can still type a reference.";
+		return `${models().length} models available to this key. Search, or type any provider/model reference.`;
+	}
+
 	return (
 		<div class="border border-line bg-surface p-6">
 			<div class="mb-5 flex items-center gap-3.5">
 				<GuildAvatar guild={props.guild} />
 				<div class="font-semibold">{props.guild.name}</div>
-				<Chip on={props.guild.configured}>{props.guild.configured ? "Configured" : "No key"}</Chip>
+				<Chip on={props.guild.configured}>{props.guild.configured ? "Key set" : "Key required"}</Chip>
 			</div>
 
 			<form onSubmit={onSubmit}>
-				<label class="mb-3.5 block">
-					<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
-						OpenCode Go API key{props.guild.configured ? " — blank keeps current" : ""}
-					</span>
-					<input
-						type="password"
-						name="api_key"
-						placeholder="sk-…"
-						autocomplete="off"
-						spellcheck={false}
-						class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
-					/>
-				</label>
+				<Show
+					when={props.guild.configured}
+					fallback={
+						<div class="mb-5 border border-dashed border-line-strong px-4 py-3.5">
+							<div class="font-mono text-[11px] uppercase tracking-[0.12em] text-faint">OpenCode Go API key</div>
+							<p class="mt-1 text-sm text-muted">
+								Required. Eryn runs inference on your own key — nothing is billed to the operator.
+							</p>
+						</div>
+					}
+				>
+					<div class="mb-5 flex flex-wrap items-center gap-4 border border-line-strong bg-bg px-4 py-3.5">
+						<div class="min-w-0">
+							<div class="font-mono text-[11px] uppercase tracking-[0.12em] text-faint">OpenCode Go API key</div>
+							<div class="mt-1 font-mono text-sm text-fg">
+								{props.guild.keyPrefix ? `${props.guild.keyPrefix}…` : "set"}
+							</div>
+						</div>
+						<div class="ml-auto flex flex-wrap gap-2">
+							<button type="button" class={buttonClass.ghost} onClick={() => setReplacing(!replacing())} disabled={busy()}>
+								{replacing() ? "Cancel" : "Replace"}
+							</button>
+							<button type="button" class={buttonClass.danger} onClick={() => void onRemove()} disabled={busy()}>
+								Clear
+							</button>
+						</div>
+					</div>
+				</Show>
+
+				<Show when={!props.guild.configured || replacing()}>
+					<label class="mb-3.5 block">
+						<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+							{props.guild.configured ? "New key — blank keeps the current one" : "OpenCode Go API key"}
+						</span>
+						<input
+							type="password"
+							name="api_key"
+							placeholder="oc_sk_…"
+							autocomplete="off"
+							spellcheck={false}
+							class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+						/>
+					</label>
+				</Show>
 
 				<label class="mb-3.5 block">
 					<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Model</span>
-					<input
-						type="text"
+					<ModelSelect
 						name="model"
-						value={props.guild.model}
-						list="models"
-						spellcheck={false}
-						class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+						value={model()}
+						models={models()}
+						disabled={!props.guild.configured}
+						placeholder={props.guild.configured ? "Search models…" : "Add a key first"}
+						onInput={setModel}
 					/>
+					<span class="mt-2 block text-xs text-faint">{catalogueHint()}</span>
 				</label>
 
 				<Show
@@ -294,13 +349,8 @@ function GuildCard(props: {
 
 				<div class="flex flex-wrap items-center gap-3">
 					<button type="submit" class={buttonClass.primary} disabled={busy()}>
-						{props.guild.configured ? "Update key" : "Save key"}
+						{props.guild.configured ? "Save changes" : "Save key"}
 					</button>
-					<Show when={props.guild.configured}>
-						<button type="button" class={buttonClass.danger} onClick={() => void onRemove()} disabled={busy()}>
-							Remove key
-						</button>
-					</Show>
 				</div>
 			</form>
 		</div>

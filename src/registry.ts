@@ -31,6 +31,11 @@ interface StoredGuild extends Sealed {
 	configuredBy?: string;
 	updatedAt: number;
 	github?: GitHubBinding;
+	/**
+	 * The first characters of the key, kept in the clear purely so the console
+	 * can show which key is configured. The rest only ever exists encrypted.
+	 */
+	keyPrefix?: string;
 }
 
 /** Per-guild GitHub App installation and default repository. */
@@ -45,7 +50,12 @@ export interface GuildSummary {
 	configuredBy?: string;
 	updatedAt?: number;
 	github?: GitHubBinding;
+	/** Only ever the start of the key; the remainder is never returned. */
+	keyPrefix?: string;
 }
+
+/** How much of a key to show when identifying which one is configured. */
+const KEY_PREFIX_LENGTH = 18;
 
 export interface CachedGuilds {
 	guilds: unknown[];
@@ -99,6 +109,8 @@ export class ErynRegistry extends DurableObject<Env> {
 				model,
 				configuredBy: body.configuredBy ?? existing?.configuredBy,
 				updatedAt: Date.now(),
+				// Replaced with the key, kept when a save leaves it blank.
+				keyPrefix: apiKey ? apiKey.slice(0, KEY_PREFIX_LENGTH) : existing?.keyPrefix,
 				...(github.installationId || github.repo ? { github } : {}),
 			});
 			return json({ ok: true });
@@ -127,6 +139,7 @@ export class ErynRegistry extends DurableObject<Env> {
 							configuredBy: stored.configuredBy,
 							updatedAt: stored.updatedAt,
 							github: stored.github,
+							keyPrefix: stored.keyPrefix,
 						}
 					: { configured: false, github: stored?.github };
 			return json(summary);

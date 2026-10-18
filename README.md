@@ -247,7 +247,18 @@ redirect URI, so sign-in only works against the deployed origin.
 
 1. Install Eryn from the landing page's **Install** button.
 2. Open `https://eryn.otbeaumont.me/console` and sign in with Discord.
-3. Pick the server, paste an OpenCode Go API key, choose a model, and save.
+3. Pick the server, paste an OpenCode Go API key, and save.
+4. Choose a model from the picker — a searchable list of what that key can
+   actually reach.
+
+The card makes the key's state explicit: **Key required** with an input when
+there is none, and **Key set** showing the key's prefix with **Replace** and
+**Clear** buttons when there is. The model picker is disabled until a key is
+configured, because there is nothing to ask the provider without one, and its
+list is filled from that server's own OpenCode instance rather than a hardcoded
+set — the same catalogue a turn would resolve against, so it cannot drift from
+what the agent can use. Any `provider/model` reference can still be typed by
+hand.
 
 The setup page lists only servers the user can manage
 (`MANAGE_GUILD`/`ADMINISTRATOR`/owner), and every save re-checks that permission
@@ -276,6 +287,26 @@ against Discord. Removing a key takes effect for new turns immediately.
 Each guild's key is stored in `ErynRegistry` encrypted with AES-GCM under
 `ENCRYPTION_KEY`. The plaintext is read only by the gateway, over the internal
 Durable Object binding, and passed to the guild's object for that turn.
+
+Only the first characters of a key are kept in the clear, and only so the
+console can show which key is configured. Everything else exists solely as
+ciphertext, and the API never returns more than that prefix.
+
+### How the key reaches OpenCode
+
+It is delivered as an **integration credential**, not as provider config:
+
+```ts
+await host.integration.connect.key({ integrationID: "opencode-go", key: apiKey, location })
+```
+
+This matters. `providers["opencode-go"].settings.apiKey` is accepted by the
+config schema but never reaches provider activation, so a provider configured
+that way stays invisible — its models do not resolve and every request fails
+with `Model unavailable`. The integration store is the channel the provider
+registry actually reads. It also lives in the guild object's own database, so
+the credential is scoped to that guild's object rather than to an environment
+variable shared by whatever else the isolate is running.
 
 ## Known limits
 

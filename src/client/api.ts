@@ -6,10 +6,29 @@ export interface Guild {
 	icon: string | null;
 	configured: boolean;
 	model: string;
+	/** The start of the configured key, or null when none is set. */
+	keyPrefix: string | null;
 	updatedAt: number | null;
 	githubRepo: string | null;
 	githubInstalled: boolean;
 	githubInstallUrl: string | null;
+}
+
+/** A model the guild's key can reach, as reported by its own OpenCode server. */
+export interface ModelOption {
+	/** The `provider/model` reference to store, e.g. `opencode-go/kimi-k3`. */
+	id: string;
+	name: string;
+	provider: string;
+	status: string;
+	enabled: boolean;
+}
+
+export interface ModelsResult {
+	models: ModelOption[];
+	default?: string;
+	reason?: string;
+	error?: string;
 }
 
 /** A manageable server Eryn is not installed in yet. */
@@ -73,6 +92,20 @@ export function fetchSession(): Promise<SessionState> {
 
 export function fetchConfig(): Promise<ClientConfig> {
 	return request<ClientConfig>("/api/config");
+}
+
+/**
+ * Ask the guild's own OpenCode server which models its key can reach.
+ *
+ * The key stays on the backend: it is read from the registry and used over the
+ * internal Durable Object binding, so the browser never sees it.
+ */
+export function fetchModels(guildId: string): Promise<ModelsResult> {
+	return request<ModelsResult>("/api/models", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ guild_id: guildId }),
+	});
 }
 
 export function saveGuild(input: SaveGuildInput): Promise<ApiResult> {
