@@ -6,8 +6,7 @@
 /** The default model when a guild does not choose one. */
 export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
-/** Eryn's public Discord application id (equal to the bot user id). */
-export const CLIENT_ID = "1561290858668494959";
+export { CLIENT_ID } from "./discord-ids";
 
 /** Models must stay on the OpenCode Go provider, which is what the key is for. */
 const MODEL_PATTERN = /^opencode-go\/[A-Za-z0-9._-]+$/;

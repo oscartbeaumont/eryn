@@ -1,12 +1,10 @@
 /**
  * The Eryn Worker entry point.
  *
- * HTTP is an Effect `HttpRouter` built once at module scope and adapted to the
- * Workers `fetch` handler. It serves the public site: the landing page, the
- * Discord sign-in, and the setup pages where a guild admin links their own
- * OpenCode Go key. Discord traffic never touches this surface — the gateway and
- * per-thread agents live in Durable Objects, and the editor credential registry
- * is reachable only through the Durable Object binding.
+ * The UI is a client-only Solid app (built by Vite into static assets and
+ * served by Cloudflare); this Worker is the API and auth surface behind it:
+ * Discord OAuth, the GitHub App install callback, and the JSON endpoints the
+ * setup page calls. It never renders HTML.
  */
 
 import { env } from "cloudflare:workers";
@@ -17,7 +15,6 @@ import { randomToken, sign, verify } from "./crypto";
 import { discordRest } from "./discord/api";
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
 import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
-import { landingPage, noticeHtml, setupPage, signInPage, type SetupGuild } from "./views";
 
 export { ErynGateway } from "./gateway";
 export { ErynSession } from "./agent";
@@ -35,16 +32,7 @@ interface Session {
 	exp: number;
 }
 
-/** Fields submitted by the setup form. */
-interface SetupForm {
-	action: string;
-	guild_id: string;
-	api_key?: string;
-	model?: string;
-	github_repo?: string;
-}
-
-const SetupFormSchema = Schema.Struct({
+const SetupRequestSchema = Schema.Struct({
 	action: Schema.String,
 	guild_id: Schema.String,
 	api_key: Schema.optional(Schema.String),
@@ -56,44 +44,13 @@ function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** A full HTML notice as an Effect HTTP response. */
-function notice(title: string, message: string, status = 200): HttpServerResponse.HttpServerResponse {
-	return HttpServerResponse.setStatus(status)(HttpServerResponse.html(noticeHtml(title, message)));
-}
-
-/** A friendly page for the common Discord failure, or a generic one. */
-function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
-	if (error instanceof DiscordApiError && error.status === 429) {
-		return notice(
-			"Discord is busy",
-			"Discord rate-limited that request. Wait a few seconds, then refresh this page.",
-			429,
-		);
-	}
-	return notice("Setup failed", describe(error), 500);
-}
-
-/**
- * The guilds manageable by the signed-in user. Discord rate-limits the
- * bearer-token guild route, so the result is cached for a few minutes and only
- * fetched when the cache is cold.
- */
-async function manageableGuilds(session: Session): Promise<DiscordGuild[]> {
-	const cached = await getUserGuilds(env, session.uid).catch(() => undefined);
-	if (cached) return cached;
-	const fetched = await listUserGuilds(session.token);
-	await putUserGuilds(env, session.uid, fetched).catch(() => undefined);
-	return fetched;
+function json(body: unknown, status = 200): HttpServerResponse.HttpServerResponse {
+	return HttpServerResponse.setStatus(status)(HttpServerResponse.jsonUnsafe(body));
 }
 
 /** Cookie defaults; `secure` is dropped only for a local http origin. */
 function cookieOptions(origin: string) {
-	return {
-		httpOnly: true,
-		secure: origin.startsWith("https:"),
-		sameSite: "lax" as const,
-		path: "/",
-	};
+	return { httpOnly: true, secure: origin.startsWith("https:"), sameSite: "lax" as const, path: "/" };
 }
 
 async function readSession(request: HttpServerRequest.HttpServerRequest): Promise<Session | undefined> {
@@ -102,28 +59,32 @@ async function readSession(request: HttpServerRequest.HttpServerRequest): Promis
 	return session;
 }
 
-function noticeFromQuery(url: URL): { kind: "ok" | "error"; message: string } | undefined {
-	const ok = url.searchParams.get("ok");
-	if (ok) return { kind: "ok", message: ok };
-	const error = url.searchParams.get("error");
-	if (error) return { kind: "error", message: error };
-	return undefined;
+/** The guilds manageable by the signed-in user, cached briefly to spare Discord's rate limit. */
+async function manageableGuilds(session: Session): Promise<DiscordGuild[]> {
+	const cached = await getUserGuilds(env, session.uid).catch(() => undefined);
+	if (cached) return cached;
+	const fetched = await listUserGuilds(session.token);
+	await putUserGuilds(env, session.uid, fetched).catch(() => undefined);
+	return fetched;
 }
 
-// --- Handlers -----------------------------------------------------------------
+// --- Auth ---------------------------------------------------------------------
+
+function authError(origin: string, message: string): HttpServerResponse.HttpServerResponse {
+	return HttpServerResponse.redirect(`${origin}/setup?error=${encodeURIComponent(message)}`);
+}
 
 async function handleDiscordAuth(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const origin = new URL(request.originalUrl).origin;
-	if (!env.DISCORD_CLIENT_SECRET) {
-		return notice("Not configured", "Discord sign-in is not configured on this deployment.", 503);
-	}
+	if (!env.DISCORD_CLIENT_SECRET) return authError(origin, "Discord sign-in is not configured.");
 	const state = randomToken(16);
 	const value = await sign({ state }, env.SESSION_SECRET);
-	const response = HttpServerResponse.redirect(authorizeUrl({ origin, clientId: CLIENT_ID, state }));
-	return HttpServerResponse.setCookieUnsafe(response, STATE_COOKIE, value, {
-		...cookieOptions(origin),
-		expires: new Date(Date.now() + STATE_TTL_MS),
-	});
+	return HttpServerResponse.setCookieUnsafe(
+		HttpServerResponse.redirect(authorizeUrl({ origin, clientId: CLIENT_ID, state })),
+		STATE_COOKIE,
+		value,
+		{ ...cookieOptions(origin), expires: new Date(Date.now() + STATE_TTL_MS) },
+	);
 }
 
 async function handleDiscordCallback(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
@@ -134,9 +95,8 @@ async function handleDiscordCallback(request: HttpServerRequest.HttpServerReques
 	const expected = await verify<{ state: string }>(request.cookies?.[STATE_COOKIE], env.SESSION_SECRET);
 	const clientSecret = env.DISCORD_CLIENT_SECRET;
 	if (!code || !state || !expected || expected.state !== state || !clientSecret) {
-		return notice("Sign-in failed", "That Discord sign-in could not be verified. Please try again.", 400);
+		return authError(origin, "That Discord sign-in could not be verified.");
 	}
-
 	const token = await exchangeCode({ origin, clientId: CLIENT_ID, clientSecret, code });
 	const account = await currentUser(token.access_token);
 	const session: Session = {
@@ -145,116 +105,106 @@ async function handleDiscordCallback(request: HttpServerRequest.HttpServerReques
 		token: token.access_token,
 		exp: Date.now() + SESSION_TTL_MS,
 	};
-	const value = await sign(session, env.SESSION_SECRET);
 	const response = HttpServerResponse.setCookieUnsafe(
 		HttpServerResponse.redirect("/setup"),
 		SESSION_COOKIE,
-		value,
+		await sign(session, env.SESSION_SECRET),
 		{ ...cookieOptions(origin), expires: new Date(session.exp) },
 	);
 	return HttpServerResponse.expireCookieUnsafe(STATE_COOKIE, cookieOptions(origin))(response);
 }
 
-async function handleLogout(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
+function handleLogout(request: HttpServerRequest.HttpServerRequest): HttpServerResponse.HttpServerResponse {
 	const origin = new URL(request.originalUrl).origin;
-	return HttpServerResponse.expireCookieUnsafe(SESSION_COOKIE, cookieOptions(origin))(
-		HttpServerResponse.redirect("/"),
-	);
+	return HttpServerResponse.expireCookieUnsafe(SESSION_COOKIE, cookieOptions(origin))(HttpServerResponse.redirect("/"));
 }
 
 /** Capture the installation id GitHub sends after the App is installed. */
-async function handleGitHubCallback(
-	request: HttpServerRequest.HttpServerRequest,
-): Promise<HttpServerResponse.HttpServerResponse> {
+async function handleGitHubCallback(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const url = new URL(request.originalUrl);
 	const installationId = url.searchParams.get("installation_id");
-	const state = await verify<{ guild: string; exp: number }>(
-		url.searchParams.get("state") ?? undefined,
-		env.SESSION_SECRET,
-	);
+	const state = await verify<{ guild: string; exp: number }>(url.searchParams.get("state") ?? undefined, env.SESSION_SECRET);
 	if (!installationId || !state || state.exp < Date.now()) {
-		return notice("GitHub setup failed", "That GitHub installation could not be verified.", 400);
+		return authError(url.origin, "That GitHub installation could not be verified.");
 	}
 	await setGuildInstallation(env, state.guild, installationId);
 	return HttpServerResponse.redirect(`/setup?ok=${encodeURIComponent("GitHub connected.")}`);
 }
 
+// --- API ----------------------------------------------------------------------
+
+function handleSession(request: HttpServerRequest.HttpServerRequest): Effect.Effect<HttpServerResponse.HttpServerResponse, never, HttpServerRequest.HttpServerRequest> {
+	return Effect.gen(function* () {
+		const session = yield* Effect.promise(() => readSession(request));
+		return session ? json({ signedIn: true, account: { id: session.uid, name: session.name } }) : json({ signedIn: false });
+	});
+}
+
 async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
-	const url = new URL(request.originalUrl);
-	const notice = noticeFromQuery(url);
 	const session = await readSession(request);
-	if (!session) return HttpServerResponse.html(signInPage({ notice }));
+	if (!session) return json({ signedIn: false });
 
 	const userGuilds = await manageableGuilds(session);
 	const manageable = userGuilds.filter(canManage);
 	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
 	const slug = env.GITHUB_APP_SLUG?.trim();
-	const guilds: SetupGuild[] = await Promise.all(
+
+	const guilds = await Promise.all(
 		manageable.map(async (guild) => {
 			const summary = await getGuildSummary(env, guild.id);
 			const installationId = summary.github?.installationId;
 			return {
 				id: guild.id,
 				name: guild.name,
-				icon: guild.icon,
+				icon: guild.icon ?? null,
 				installed: installed.has(guild.id),
 				configured: summary.configured,
-				model: summary.model,
-				updatedAt: summary.updatedAt,
-				githubRepo: summary.github?.repo,
+				model: summary.model ?? DEFAULT_MODEL,
+				updatedAt: summary.updatedAt ?? null,
+				githubRepo: summary.github?.repo ?? null,
 				githubInstalled: Boolean(installationId),
 				githubInstallUrl:
 					slug && !installationId
 						? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(
 								await sign({ guild: guild.id, exp: Date.now() + 600_000 }, env.SESSION_SECRET),
 							)}`
-						: undefined,
+						: null,
 			};
 		}),
 	);
-	// Configured servers first, then installed ones, then the rest by name.
 	guilds.sort(
-		(a, b) =>
-			Number(b.configured) - Number(a.configured) ||
-			Number(b.installed) - Number(a.installed) ||
-			a.name.localeCompare(b.name),
+		(a, b) => Number(b.configured) - Number(a.configured) || Number(b.installed) - Number(a.installed) || a.name.localeCompare(b.name),
 	);
 
-	return HttpServerResponse.html(
-		setupPage({
-			account: { id: session.uid, name: session.name },
-			guilds,
-			notice,
-			githubConfigured: Boolean(env.GITHUB_APP_ID?.trim() && env.GITHUB_APP_PRIVATE_KEY?.trim() && slug),
-		}),
-	);
+	return json({
+		signedIn: true,
+		account: { id: session.uid, name: session.name },
+		githubConfigured: Boolean(env.GITHUB_APP_ID?.trim() && env.GITHUB_APP_PRIVATE_KEY?.trim() && slug),
+		guilds,
+	});
 }
 
 async function handleSetupPost(
 	request: HttpServerRequest.HttpServerRequest,
-	form: SetupForm,
+	form: Schema.Schema.Type<typeof SetupRequestSchema>,
 ): Promise<HttpServerResponse.HttpServerResponse> {
 	const session = await readSession(request);
-	if (!session) return HttpServerResponse.redirect("/setup");
+	if (!session) return json({ error: "Please sign in again." }, 401);
 
 	// Re-check the guild against Discord rather than trusting the submitted id.
 	const guilds = await manageableGuilds(session);
 	if (!guilds.some((guild) => guild.id === form.guild_id && canManage(guild))) {
-		return HttpServerResponse.redirect(`/setup?error=${encodeURIComponent("You cannot manage that server.")}`);
+		return json({ error: "You cannot manage that server." }, 403);
 	}
 
 	if (form.action === "remove") {
 		await removeGuild(env, form.guild_id);
-		return HttpServerResponse.redirect(`/setup?ok=${encodeURIComponent("The key was removed.")}`);
+		return json({ ok: true, message: "The key was removed." });
 	}
 
 	const model = form.model?.trim() || DEFAULT_MODEL;
-	if (!isValidModel(model)) {
-		return HttpServerResponse.redirect(
-			`/setup?error=${encodeURIComponent("The model must be an opencode-go/<model> reference.")}`,
-		);
-	}
+	if (!isValidModel(model)) return json({ error: "The model must be an opencode-go/<model> reference." }, 400);
 
 	try {
 		await putGuild(env, form.guild_id, {
@@ -264,45 +214,43 @@ async function handleSetupPost(
 			githubRepo: form.github_repo,
 		});
 	} catch (error) {
-		return HttpServerResponse.redirect(`/setup?error=${encodeURIComponent(describe(error))}`);
+		return json({ error: describe(error) }, 400);
 	}
-	return HttpServerResponse.redirect(`/setup?ok=${encodeURIComponent("The key was saved.")}`);
+	return json({ ok: true, message: "Saved." });
+}
+
+/** A JSON error for the common Discord failure, or a generic one. */
+function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
+	if (error instanceof DiscordApiError && error.status === 429) {
+		return json({ error: "Discord rate-limited that request. Wait a moment and try again." }, 429);
+	}
+	return json({ error: describe(error) }, 500);
 }
 
 // --- Routes -------------------------------------------------------------------
 
 const Routes = Layer.mergeAll(
-	HttpRouter.add("GET", "/", HttpServerResponse.html(landingPage())),
 	HttpRouter.add("GET", "/health", HttpServerResponse.jsonUnsafe({ ok: true, service: "eryn" })),
-	HttpRouter.add("GET", "/auth/discord", (request) =>
-		Effect.promise(() =>
-			handleDiscordAuth(request).catch((error) =>
-				notice("Sign-in failed", describe(error), 500),
-			),
-		),
-	),
-	HttpRouter.add("GET", "/auth/callback", (request) =>
-		Effect.promise(() =>
-			handleDiscordCallback(request).catch((error) =>
-				notice("Sign-in failed", describe(error), 400),
-			),
-		),
-	),
-	HttpRouter.add("GET", "/auth/logout", (request) => Effect.promise(() => handleLogout(request))),
-	HttpRouter.add("GET", "/github/callback", (request) =>
-		Effect.promise(() => handleGitHubCallback(request).catch((error) => setupFailure(error))),
-	),
-	HttpRouter.add("GET", "/setup", (request) =>
+	HttpRouter.add("GET", "/api/session", (request) => handleSession(request)),
+	HttpRouter.add("GET", "/api/setup", (request) =>
 		Effect.promise(() => handleSetupGet(request).catch((error) => setupFailure(error))),
 	),
-	HttpRouter.add("POST", "/setup", (request) =>
+	HttpRouter.add("POST", "/api/setup", (request) =>
 		Effect.gen(function* () {
-			const form = yield* HttpServerRequest.schemaBodyUrlParams(SetupFormSchema).pipe(
-				Effect.orElseSucceed(() => undefined),
-			);
-			if (!form) return notice("Setup failed", "The form could not be read.", 400);
+			const form = yield* HttpServerRequest.schemaBodyJson(SetupRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleSetupPost(request, form).catch((error) => setupFailure(error)));
 		}),
+	),
+	HttpRouter.add("GET", "/auth/discord", (request) =>
+		Effect.promise(() => handleDiscordAuth(request).catch((error) => json({ error: describe(error) }, 500))),
+	),
+	HttpRouter.add("GET", "/auth/callback", (request) =>
+		Effect.promise(() => handleDiscordCallback(request).catch((error) => setupFailure(error))),
+	),
+	HttpRouter.add("GET", "/auth/logout", (request) => Effect.sync(() => handleLogout(request))),
+	HttpRouter.add("GET", "/github/callback", (request) =>
+		Effect.promise(() => handleGitHubCallback(request).catch((error) => setupFailure(error))),
 	),
 ).pipe(Layer.provide(HttpServer.layerServices));
 
@@ -318,9 +266,8 @@ async function wake(env: Env): Promise<void> {
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const response = await app.handler(request);
-		if (request.method === "GET") {
-			const { pathname } = new URL(request.url);
-			if (pathname === "/" || pathname === "/health") ctx.waitUntil(wake(env).catch(() => undefined));
+		if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+			ctx.waitUntil(wake(env).catch(() => undefined));
 		}
 		return response;
 	},

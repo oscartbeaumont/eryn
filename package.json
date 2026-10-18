@@ -9,18 +9,23 @@
     "dev": "cf dev",
     "build": "cf build",
     "deploy": "cf deploy",
-    "typecheck": "cf workers types && tsc"
+    "typecheck": "cf workers types && tsc && tsc -p tsconfig.client.json"
   },
   "dependencies": {
     "@opencode/client": "2.0.32",
+    "@opencode/plugin": "2.0.32",
     "@opencode/sdk": "2.0.32",
     "effect": "4.0.1",
-    "just-bash": "3.6.0",
-    "@opencode/plugin": "2.0.32"
+    "just-bash": "3.6.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",
+    "@solidjs/vite-plugin": "3.0.0-next.50",
+    "@solidjs/web": "2.0.0-rc.15",
+    "@tailwindcss/vite": "^4.3.3",
     "cf": "^1.0.0-beta.18",
+    "solid-js": "2.0.0-rc.15",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.0"
   }

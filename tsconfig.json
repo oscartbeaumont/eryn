@@ -18,5 +18,8 @@
 		"src",
 		"cloudflare.config.ts",
 		".cloudflare/types"
+	],
+	"exclude": [
+		"src/client"
 	]
 }

@@ -10,6 +10,12 @@ export default defineConfig({
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
 		triggers: [triggers.scheduled({ schedule: "* * * * *" })],
+		// The Solid SPA is served as static assets; unknown paths fall back to
+		// index.html, while API and auth routes go straight to the Worker.
+		assets: {
+			notFoundHandling: "single-page-application",
+			runWorkerFirst: ["/api/*", "/auth/*", "/github/*", "/health"],
+		},
 		env: {
 			// Durable Objects: one singleton gateway, one session per thread, one registry.
 			GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "ErynGateway" }),
