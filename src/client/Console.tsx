@@ -5,6 +5,11 @@ import { installUrl } from "./discord";
 import { ModelSelect } from "./ModelSelect";
 import { A, buttonClass, Chip, Footer, Header, Kicker, Notice } from "./ui";
 
+/** A guild Eryn cannot run in yet, because it has no key of its own. */
+function needsKey(guild: Guild): boolean {
+	return !guild.configured;
+}
+
 interface NoticeState {
 	kind: "ok" | "error";
 	message: string;
@@ -50,6 +55,17 @@ export default function Console() {
 								<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">
 									Your servers
 								</h1>
+
+								<Show when={(loaded().guilds ?? []).filter(needsKey).length}>
+									{(count) => (
+										<p class="mb-7 border border-danger/45 px-4 py-3.5 text-sm text-muted">
+											<strong class="font-semibold text-danger">
+												{count()} {count() === 1 ? "server is" : "servers are"} offline.
+											</strong>{" "}
+											Eryn cannot answer there until an OpenCode Go API key is added.
+										</p>
+									)}
+								</Show>
 
 								<Show
 									when={(loaded().guilds ?? []).length > 0}
@@ -257,17 +273,20 @@ function GuildCard(props: {
 			<div class="mb-5 flex items-center gap-3.5">
 				<GuildAvatar guild={props.guild} />
 				<div class="font-semibold">{props.guild.name}</div>
-				<Chip on={props.guild.configured}>{props.guild.configured ? "Key set" : "Key required"}</Chip>
+				<Chip tone={props.guild.configured ? "ok" : "danger"}>
+					{props.guild.configured ? "Ready" : "Offline"}
+				</Chip>
 			</div>
 
 			<form onSubmit={onSubmit}>
 				<Show
 					when={props.guild.configured}
 					fallback={
-						<div class="mb-5 border border-dashed border-line-strong px-4 py-3.5">
-							<div class="font-mono text-[11px] uppercase tracking-[0.12em] text-faint">OpenCode Go API key</div>
+						<div class="mb-5 border border-dashed border-danger/45 px-4 py-3.5">
+							<div class="font-mono text-[11px] uppercase tracking-[0.12em] text-danger">Not ready</div>
 							<p class="mt-1 text-sm text-muted">
-								Required. Eryn runs inference on your own key — nothing is billed to the operator.
+								Eryn is offline in this server and will not answer until a key is added. Inference runs on
+								your own OpenCode Go key, so nothing is billed to the operator.
 							</p>
 						</div>
 					}

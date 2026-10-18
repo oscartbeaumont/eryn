@@ -148,8 +148,18 @@ export function Footer() {
 	);
 }
 
-export function Chip(props: { on?: boolean; children: any }) {
-	const tone = props.on ? "border-transparent bg-ok text-invert-fg" : "border-line-strong text-muted";
+/**
+ * A small status pill. `tone` overrides the on/off default so a state that needs
+ * attention, such as a server Eryn cannot run in, reads as a problem rather
+ * than just as "not enabled".
+ */
+export function Chip(props: { on?: boolean; tone?: "ok" | "muted" | "danger"; children: any }) {
+	const tone =
+		props.tone === "danger"
+			? "border-danger/55 text-danger"
+			: props.tone === "ok" || (props.tone === undefined && props.on)
+				? "border-transparent bg-ok text-invert-fg"
+				: "border-line-strong text-muted";
 	return (
 		<span class={`ml-auto whitespace-nowrap border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${tone}`}>
 			{props.children}
