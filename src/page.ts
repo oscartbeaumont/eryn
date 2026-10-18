@@ -6,6 +6,21 @@
  * follow the visitor's light or dark preference.
  */
 
+/** Eryn's public Discord application id (equal to the bot user id). */
+const CLIENT_ID = "1561290858668494959";
+
+/** Bot permissions requested on install. */
+const PERMISSIONS = [
+	1n << 10n, // View Channels
+	1n << 11n, // Send Messages
+	1n << 16n, // Read Message History
+	1n << 34n, // Create Public Threads
+	1n << 38n, // Send Messages in Threads
+].reduce((all, permission) => all | permission, 0n);
+
+/** Discord OAuth2 install link: invite the bot and let it register commands. */
+const INSTALL_URL = `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=${PERMISSIONS}`;
+
 export function landingPage(): string {
 	return `<!doctype html>
 <html lang="en">
@@ -126,7 +141,8 @@ export function landingPage(): string {
 	<p class="lede">Mention <strong>@eryn</strong> in a server and it opens a thread for the request, runs it, and streams the answer as it is written. Reply in the thread and the agent keeps going in the same session — no re-explaining.</p>
 	<pre><code>@eryn refactor the parser and add tests for the edge cases</code></pre>
 	<div class="actions">
-		<a class="button primary" href="https://github.com/oscartbeaumont/eryn">View source</a>
+		<a class="button primary" href="${INSTALL_URL}" target="_blank" rel="noreferrer">Install</a>
+		<a class="button ghost" href="https://github.com/oscartbeaumont/eryn" target="_blank" rel="noreferrer">View source</a>
 		<a class="button ghost" href="/health">Health</a>
 	</div>
 	<ul class="features">
