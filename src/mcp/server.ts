@@ -13,11 +13,27 @@
  * OAuth plumbing end to end without needing any account.
  */
 
+import { env } from "cloudflare:workers";
 import { Context, Effect, Layer } from "effect";
 import { McpProtocol, McpSchema, McpServer } from "effect/ai";
 
 /** The public path the server is mounted at. Mirrors `MCP_PATH` in `./oauth`. */
 export const MCP_PATH = "/mcp";
+
+const DEFAULT_ORIGIN = "https://eryn.otbeaumont.me";
+
+/**
+ * Origins allowed to call the endpoint from a browser.
+ *
+ * `layerHttp` rejects any request carrying an `Origin` header that is not
+ * listed here, so this has to include Eryn's own console — otherwise the
+ * console's self-test would be refused by its own server. Non-browser clients
+ * (OpenCode, Claude, Cursor) send no `Origin` at all and are unaffected.
+ */
+function allowedOrigins(): ReadonlyArray<string> {
+	const configured = env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "");
+	return configured && configured !== DEFAULT_ORIGIN ? [configured, DEFAULT_ORIGIN] : [DEFAULT_ORIGIN];
+}
 
 export const INSTRUCTIONS = [
 	"Eryn is a personal agent. Its MCP tools are intentionally small:",
@@ -125,6 +141,7 @@ export const mcpServer = Layer.merge(
 		version: "1.0.0",
 		instructions: INSTRUCTIONS,
 		path: MCP_PATH,
+		allowedOrigins: allowedOrigins(),
 		protocols: [
 			McpProtocol.v2026_07_28,
 			McpProtocol.v2025_11_25,

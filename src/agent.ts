@@ -30,6 +30,7 @@ import { workspacePlugin } from "./opencode/workspace";
 import { createGitHub } from "./github";
 import { githubPlugin } from "./opencode/github";
 import { mintInternalToken } from "./mcp/access";
+import { MCP_PATH } from "./mcp/oauth";
 
 const MODEL = DEFAULT_MODEL;
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
@@ -207,16 +208,24 @@ export class ErynSession extends DurableObject<Env> {
 	 * The MCP server Eryn hosts, wired in with a locally minted token so the
 	 * cloud agent needs no OAuth round trip. It is the same public, protected
 	 * endpoint any harness can use.
+	 *
+	 * Deliberately fail-safe: if the token cannot be minted the MCP is simply
+	 * omitted, because an agent that cannot reach its own MCP is far better than
+	 * an agent that cannot answer at all.
 	 */
 	private mcpConfig(): Promise<Configuration["mcp"]> {
 		this.mcpToken ??= (async () => {
 			const secret = this.env.SESSION_SECRET?.trim();
 			if (!secret) return undefined;
 			return await mintInternalToken(secret);
-		})();
+		})().catch((error) => {
+			log(`could not mint an MCP token, the MCP will be omitted: ${describeError(error)}`);
+			this.mcpToken = undefined;
+			return undefined;
+		});
 		return this.mcpToken.then((token) => {
 			if (!token) return undefined;
-			const url = this.env.MCP_INTERNAL_URL?.trim() || `${this.publicOrigin()}/mcp`;
+			const url = this.env.MCP_INTERNAL_URL?.trim() || `${this.publicOrigin()}${MCP_PATH}`;
 			return {
 				servers: {
 					eryn: {
@@ -233,7 +242,7 @@ export class ErynSession extends DurableObject<Env> {
 	}
 
 	private publicOrigin(): string {
-		return this.env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") || DEFAULT_MCP_URL.slice(0, -"/mcp".length);
+		return this.env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") || DEFAULT_MCP_URL.slice(0, -MCP_PATH.length);
 	}
 
 	async fetch(request: Request): Promise<Response> {

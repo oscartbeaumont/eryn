@@ -20,6 +20,13 @@ import { randomToken, sign, verify } from "../crypto";
 /** The single scope the MCP currently exposes. Discord/GitHub will add their own. */
 export const MCP_SCOPE = "mcp";
 
+/**
+ * Scopes the authorization server can grant. Today there is one global scope;
+ * when the Discord and GitHub tools land, their scopes are added here and to
+ * the consent screen, which is the only place a scope becomes meaningful.
+ */
+export const SUPPORTED_SCOPES: ReadonlyArray<string> = [MCP_SCOPE];
+
 const ACCESS_TTL_MS = 60 * 60 * 1_000;
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const CODE_TTL_MS = 5 * 60 * 1_000;

@@ -22,17 +22,26 @@ const TOOLS = [
 	},
 ];
 
-/** Integrations that need an account before their tools can exist. */
+/**
+ * Integrations that need an account before their tools can exist.
+ *
+ * They are wired end to end — the OAuth server, the scope mechanism, and the
+ * tool registry all accommodate them — and deliberately parked: flipping
+ * `enabled` (and adding the matching tool) is the whole change. Until then the
+ * rows render greyed out so nobody wonders where the buttons are.
+ */
 const INTEGRATIONS = [
 	{
 		name: "Discord",
 		description: "Read channels, post updates, and search a server's history.",
 		link: "Sign in with Discord",
+		enabled: false,
 	},
 	{
 		name: "GitHub",
 		description: "Read issues, open branches, and raise pull requests.",
 		link: "Install the GitHub App",
+		enabled: false,
 	},
 ];
 
@@ -249,9 +258,7 @@ export default function ConsoleMcp() {
 										<div class="font-mono text-sm font-semibold">{integration.name}</div>
 										<p class="mt-1 text-sm text-muted">{integration.description}</p>
 									</div>
-									<span class="ml-auto whitespace-nowrap border border-line-strong px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted">
-										Coming soon
-									</span>
+									<Chip on={integration.enabled}>{integration.enabled ? "Enabled" : "Coming soon"}</Chip>
 								</div>
 							)}
 						</For>

@@ -19,6 +19,7 @@
 import { base64url } from "../crypto";
 import {
 	MCP_SCOPE,
+	SUPPORTED_SCOPES,
 	mintCode,
 	mintClient,
 	mintTokens,
@@ -63,7 +64,7 @@ export function protectedResourceMetadata(base: string): Record<string, unknown>
 	return {
 		resource: resourceUrl(base),
 		authorization_servers: [base],
-		scopes_supported: [MCP_SCOPE],
+		scopes_supported: SUPPORTED_SCOPES,
 		bearer_methods_supported: ["header"],
 		resource_name: "Eryn MCP",
 		resource_documentation: `${base}/console/mcp`,
@@ -76,7 +77,7 @@ export function authorizationServerMetadata(base: string): Record<string, unknow
 		authorization_endpoint: `${base}${AUTHORIZE_PATH}`,
 		token_endpoint: `${base}${TOKEN_PATH}`,
 		registration_endpoint: `${base}${REGISTER_PATH}`,
-		scopes_supported: [MCP_SCOPE],
+		scopes_supported: SUPPORTED_SCOPES,
 		response_types_supported: ["code"],
 		response_modes_supported: ["query"],
 		grant_types_supported: ["authorization_code", "refresh_token"],
@@ -205,12 +206,17 @@ export async function inspectAuthorization(
 	if (resource && resource !== resourceUrl(base)) {
 		throw new OAuthError("invalid_target", `This server only protects ${resourceUrl(base)}.`);
 	}
+	const requested = (params.scope?.trim() || client.scope || MCP_SCOPE).split(/\s+/).filter(Boolean);
+	const scope = requested.filter((value) => SUPPORTED_SCOPES.includes(value));
+	if (scope.length === 0) {
+		throw new OAuthError("invalid_scope", `Requested scope must be one of: ${SUPPORTED_SCOPES.join(", ")}.`);
+	}
 	return {
 		clientId: params.client_id,
 		client,
 		redirectUri: params.redirect_uri,
 		state: params.state,
-		scope: params.scope?.trim() || client.scope || MCP_SCOPE,
+		scope: scope.join(" "),
 		resource,
 		codeChallenge: params.code_challenge,
 	};
@@ -287,7 +293,12 @@ export async function exchangeAuthorizationCode(
 		throw new OAuthError("invalid_target", "The code was issued for a different resource.");
 	}
 	const tokens = await mintTokens(
-		{ sub: record.sub, scope: [record.scope || MCP_SCOPE], clientId, resource: record.resource },
+		{
+			sub: record.sub,
+			scope: record.scope.split(/\s+/).filter(Boolean).length ? record.scope.split(/\s+/).filter(Boolean) : [MCP_SCOPE],
+			clientId,
+			resource: record.resource,
+		},
 		secret,
 	);
 	return {
