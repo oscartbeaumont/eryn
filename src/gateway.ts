@@ -264,21 +264,32 @@ export class ErynGateway extends DurableObject<Env> {
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const stub = this.sessionStub(guildId);
-			const response = await stub.fetch("https://eryn/session/prompt", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					guildId,
-					threadId,
-					title,
-					text,
-					author: message.author?.username ?? "someone",
-					apiKey: config.apiKey,
-					model: config.model,
-					github: config.github,
-				}),
-			});
-			if (!response.ok) log(`session prompt for ${threadId} failed with HTTP ${response.status}`);
+			try {
+				const response = await stub.fetch("https://eryn/session/prompt", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						guildId,
+						threadId,
+						title,
+						text,
+						author: message.author?.username ?? "someone",
+						apiKey: config.apiKey,
+						model: config.model,
+						github: config.github,
+					}),
+				});
+				if (response.ok) return;
+				log(`session prompt for ${threadId} failed with HTTP ${response.status}`);
+			} catch (error) {
+				log(`session prompt for ${threadId} could not be delivered: ${describeError(error)}`);
+			}
+			// The session object is gone or refused the turn, so nothing will edit
+			// the message it may have left behind. Say so rather than leaving the
+			// thread looking like the agent is still thinking.
+			await this.rest
+				.sendMessage(threadId, "I could not start that turn, so there is nothing to show. Please try again.")
+				.catch(() => undefined);
 		});
 	}
 
