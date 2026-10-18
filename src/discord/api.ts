@@ -9,9 +9,6 @@
 
 const API = "https://discord.com/api/v10";
 
-/** Discord snowflake ids are non-zero integers serialised as strings. */
-export const SNOWFLAKE = /^[1-9]\d{0,19}$/;
-
 /** Discord channel types that are already threads. */
 export const THREAD_TYPES = new Set([10, 11, 12]);
 
@@ -32,11 +29,6 @@ export interface DiscordChannelRef {
 	type: number;
 	parent_id?: string;
 	name?: string;
-}
-
-export interface DiscordChannel {
-	id: string;
-	description?: string;
 }
 
 /** The subset of a guild role this bot reads. Managed bot roles carry `tags.bot_id`. */
@@ -82,37 +74,6 @@ export function splitMessage(message: string, limit = MAX_CONTENT): string[] {
 		}
 	}
 	return chunks.length ? chunks : [""];
-}
-
-/** Keep only well-formed channel entries; ignore anything malformed. */
-export function parseChannels(raw: string | undefined): Record<string, DiscordChannel> {
-	if (!raw?.trim()) return {};
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		console.warn("[eryn] DISCORD_CHANNELS is not valid JSON; no channels are allowlisted");
-		return {};
-	}
-
-	const source =
-		parsed && typeof parsed === "object" && !Array.isArray(parsed) && "channels" in parsed
-			? (parsed as { channels?: unknown }).channels
-			: parsed;
-	if (!source || typeof source !== "object" || Array.isArray(source)) return {};
-
-	const channels: Record<string, DiscordChannel> = {};
-	for (const [name, value] of Object.entries(source)) {
-		if (!value || typeof value !== "object") continue;
-		const candidate = value as { id?: unknown; description?: unknown };
-		if (typeof candidate.id !== "string" || !SNOWFLAKE.test(candidate.id)) continue;
-		channels[name] = {
-			id: candidate.id,
-			...(typeof candidate.description === "string" ? { description: candidate.description } : {}),
-		};
-	}
-	return channels;
 }
 
 /** Seconds Discord asked us to wait, from a 429 body. Defaults to one second. */
@@ -219,6 +180,15 @@ export function discordRest(token: string) {
 		async guildRoles(guildId: string): Promise<DiscordRole[]> {
 			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
 			return Array.isArray(result) ? result : [];
+		},
+
+		/** The guilds the bot is a member of, used to show install status on setup. */
+		async guilds(): Promise<{ id: string; name: string }[]> {
+			const result = await request<{ id?: unknown; name?: unknown }[]>("GET", "/users/@me/guilds");
+			if (!Array.isArray(result)) return [];
+			return result
+				.filter((guild): guild is { id: string; name: string } => typeof guild.id === "string" && typeof guild.name === "string")
+				.map((guild) => ({ id: guild.id, name: guild.name }));
 		},
 
 		/** Acknowledge an interaction with a (by default ephemeral) message. */

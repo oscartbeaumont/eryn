@@ -20,11 +20,10 @@ import {
 	THREAD_TYPES,
 	describeError,
 	discordRest,
-	parseChannels,
-	type DiscordChannel,
 	type DiscordRest,
 } from "./discord/api";
 import { DiscordGateway, type DiscordInteraction, type DiscordMessage } from "./discord/gateway";
+import { getGuildKey, type GuildKey } from "./registry-client";
 
 const WAKE_PATH = "/wake";
 const THREAD_PREFIX = "thread:";
@@ -48,7 +47,6 @@ export class ErynGateway extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	private readonly gateway: DiscordGateway;
-	private readonly channels: Record<string, DiscordChannel>;
 	private readonly keepAliveMs: number;
 	private readonly locks = new Map<string, Promise<void>>();
 	/** Bot managed-role id per guild, resolved lazily. */
@@ -61,7 +59,6 @@ export class ErynGateway extends DurableObject<Env> {
 		super(state, env);
 		this.token = env.DISCORD_BOT_TOKEN?.trim() ?? "";
 		this.rest = discordRest(this.token);
-		this.channels = parseChannels(env.DISCORD_CHANNELS);
 		this.keepAliveMs = intFromEnv(env.DISCORD_KEEPALIVE_SECONDS, DEFAULT_KEEPALIVE_SECONDS, 20, 3_600) * 1_000;
 		this.gateway = new DiscordGateway(this.token, log, {
 			onMessage: (message) => {
@@ -144,24 +141,27 @@ export class ErynGateway extends DurableObject<Env> {
 		// Discord also creates a managed role named after the bot, and its `@`
 		// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
 		const roleId = await this.botRoleMention(message);
+		const config = await this.guildConfig(message.guild_id);
 
 		// A message inside a thread we own goes straight to that thread's session.
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) return;
-			if (!this.isAllowed(channel.id, channel.parent_id)) return;
 			const text = this.stripMention(message.content ?? "", roleId).trim();
 			if (!text) return;
 			if (STOP_TEXT.has(text.toLowerCase())) {
 				await this.stopThread(channel.id);
 				return;
 			}
-			await this.forward(channel.id, this.threadName(text), text, message);
+			if (!config) {
+				await this.requireSetup(channel.id);
+				return;
+			}
+			await this.forward(channel.id, this.threadName(text), text, message, config);
 			return;
 		}
 
 		// Otherwise require an explicit mention and open a thread for the request.
 		if (!this.isMention(message, roleId)) return;
-		if (!this.isAllowed(channel.id, channel.parent_id)) return;
 
 		const text = this.stripMention(message.content ?? "", roleId).trim();
 		const name = this.threadName(text || DEFAULT_THREAD_NAME);
@@ -181,7 +181,11 @@ export class ErynGateway extends DurableObject<Env> {
 			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
 			return;
 		}
-		await this.forward(threadId, name, text, message);
+		if (!config) {
+			await this.requireSetup(threadId);
+			return;
+		}
+		await this.forward(threadId, name, text, message, config);
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
@@ -204,14 +208,43 @@ export class ErynGateway extends DurableObject<Env> {
 
 	// --- Session object plumbing ------------------------------------------------
 
+	/** The guild's credential from the registry, or undefined when unconfigured. */
+	private async guildConfig(guildId: string): Promise<GuildKey | undefined> {
+		return await getGuildKey(this.env, guildId).catch(() => undefined);
+	}
+
+	/** Ask a server admin to connect a key before the agent can run. */
+	private async requireSetup(threadId: string): Promise<void> {
+		const origin = this.env.PUBLIC_ORIGIN?.trim() || "https://eryn.otbeaumont.me";
+		await this.rest
+			.sendMessage(
+				threadId,
+				`This server has not connected an OpenCode Go key yet, so I cannot run inference here. A server admin can add one at ${origin}/setup`,
+			)
+			.catch(() => undefined);
+	}
+
 	/** Forward a prompt and wait for the turn, serialised per thread. */
-	private forward(threadId: string, title: string, text: string, message: DiscordMessage): Promise<void> {
+	private forward(
+		threadId: string,
+		title: string,
+		text: string,
+		message: DiscordMessage,
+		config: GuildKey,
+	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const stub = this.env.SESSION.get(this.env.SESSION.idFromName(threadId));
 			const response = await stub.fetch("https://eryn/session/prompt", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ threadId, title, text, author: message.author?.username ?? "someone" }),
+				body: JSON.stringify({
+					threadId,
+					title,
+					text,
+					author: message.author?.username ?? "someone",
+					apiKey: config.apiKey,
+					model: config.model,
+				}),
 			});
 			if (!response.ok) log(`session prompt for ${threadId} failed with HTTP ${response.status}`);
 		});
@@ -285,13 +318,6 @@ export class ErynGateway extends DurableObject<Env> {
 		if (!role) return undefined;
 		this.roleCache.set(guildId, role.id);
 		return role.id;
-	}
-
-	/** With configured channels the bot is limited to them and their threads. */
-	private isAllowed(channelId: string, parentId: string | undefined): boolean {
-		const configured = Object.values(this.channels);
-		if (!configured.length) return true;
-		return configured.some((channel) => channel.id === channelId || channel.id === parentId);
 	}
 
 	/** Discord permits 100 characters in a thread name; derive one from the request. */

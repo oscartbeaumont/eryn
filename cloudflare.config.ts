@@ -11,20 +11,24 @@ export default defineConfig({
 		domains: ["eryn.otbeaumont.me"],
 		triggers: [triggers.scheduled({ schedule: "* * * * *" })],
 		env: {
-			// Durable Objects: one singleton gateway, one session per Discord thread.
+			// Durable Objects: one singleton gateway, one session per thread, one registry.
 			GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "ErynGateway" }),
 			SESSION: bindings.durableObject({ worker: "eryn", exportName: "ErynSession" }),
+			REGISTRY: bindings.durableObject({ worker: "eryn", exportName: "ErynRegistry" }),
 
-			// OpenCode Go credential for `opencode-go/deepseek-v4.1-flash`.
-			OPENCODE_API_KEY: bindings.secret(),
 			// Discord bot token. The bot is disabled when this is empty.
 			DISCORD_BOT_TOKEN: bindings.secret(),
+			// Discord application OAuth2 client secret, for the setup sign-in flow.
+			DISCORD_CLIENT_SECRET: bindings.secret(),
+			// base64url 32-byte key protecting guild credentials at rest.
+			ENCRYPTION_KEY: bindings.secret(),
+			// Random secret signing the OAuth state and session cookies.
+			SESSION_SECRET: bindings.secret(),
 
+			// Public origin used in messages linked from Discord.
+			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
 			// Optional: register `/stop` in one guild for instant availability.
 			DISCORD_GUILD_ID: bindings.text(""),
-			// Optional allowlist in the `discord` skill's shape:
-			//   {"general":{"id":"123","description":"..."}}
-			DISCORD_CHANNELS: bindings.text(""),
 			// Seconds between gateway keepalive alarms.
 			DISCORD_KEEPALIVE_SECONDS: bindings.text("60"),
 			// Seconds a single agent turn may run before it is interrupted.
@@ -33,6 +37,7 @@ export default defineConfig({
 		exports: {
 			ErynGateway: exports.durableObject({ storage: "sqlite" }),
 			ErynSession: exports.durableObject({ storage: "sqlite" }),
+			ErynRegistry: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 });

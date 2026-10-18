@@ -16,11 +16,11 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
-import { intFromEnv } from "./config";
+import { DEFAULT_MODEL, intFromEnv } from "./config";
 import { DEFAULT_THREAD_NAME, describeError, discordRest, type DiscordRest } from "./discord/api";
 import { DiscordStream } from "./discord/stream";
 
-const MODEL = "opencode-go/deepseek-v4.1-flash";
+const MODEL = DEFAULT_MODEL;
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
 const SESSION_KEY = "opencode:session";
@@ -35,6 +35,9 @@ interface PromptRequest {
 	title?: string;
 	text: string;
 	author?: string;
+	/** The guild's own OpenCode Go credential, supplied by the gateway. */
+	apiKey: string;
+	model?: string;
 }
 
 /** Accumulated assistant output for one turn, keyed by message then part. */
@@ -88,12 +91,18 @@ function renderTurn(turn: Turn): string {
 	return messages.join("\n\n").trim();
 }
 
+interface Host {
+	promise: Promise<OpenCodeWorkerd.Interface>;
+	apiKey: string;
+	model: string;
+}
+
 export class ErynSession extends DurableObject<Env> {
 	private readonly rest: DiscordRest;
-	private readonly opencode: Promise<OpenCodeWorkerd.Interface>;
 	private readonly turnTimeoutMs: number;
-	private readonly abort: AbortController;
 
+	private host: Host | undefined;
+	private abort: AbortController | undefined;
 	private sessionID: string | undefined;
 	private consuming: Promise<void> | undefined;
 	private turn: Turn | undefined;
@@ -104,30 +113,43 @@ export class ErynSession extends DurableObject<Env> {
 		this.rest = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 		this.turnTimeoutMs =
 			intFromEnv(env.DISCORD_TURN_TIMEOUT_SECONDS, DEFAULT_TURN_TIMEOUT_SECONDS, 30, 3_600) * 1_000;
-		this.abort = new AbortController();
-		this.opencode = state.blockConcurrencyWhile(() =>
-			OpenCodeWorkerd.create({
-				storage: state.storage,
+	}
+
+	/**
+	 * The embedded OpenCode host for this thread, built on first use with the
+	 * guild's own credential. A changed key or model rebuilds the host so a
+	 * rotated credential takes effect on the next turn.
+	 */
+	private hostFor(apiKey: string, model: string): Promise<OpenCodeWorkerd.Interface> {
+		if (!this.host || this.host.apiKey !== apiKey || this.host.model !== model) {
+			const previous = this.host?.promise;
+			this.abort?.abort();
+			this.abort = new AbortController();
+
+			const promise = OpenCodeWorkerd.create({
+				storage: this.ctx.storage,
 				config: {
-					model: MODEL,
+					model,
 					default_agent: "build",
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
-					providers: {
-						"opencode-go": { settings: { apiKey: env.OPENCODE_API_KEY } },
-					},
+					providers: { "opencode-go": { settings: { apiKey } } },
 				},
-			}),
-		);
-		// Consume events for the lifetime of the object so no delta is missed.
-		void this.opencode
-			.then((host) => this.startConsuming(host))
-			.catch((error) => log(`could not start the event stream: ${describeError(error)}`));
+			});
+			this.host = { promise, apiKey, model };
+			this.consuming = undefined;
+			void promise
+				.then((host) => this.startConsuming(host))
+				.catch((error) => log(`could not start the event stream: ${describeError(error)}`));
+			void previous?.then((host) => host.close()).catch(() => undefined);
+		}
+		return this.host.promise;
 	}
 
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
 		if (request.method === "POST" && pathname === "/session/prompt") {
 			const body = (await request.json()) as PromptRequest;
+			if (!body.apiKey) return Response.json({ ok: false, error: "missing api key" }, { status: 400 });
 			try {
 				await this.prompt(body);
 				return Response.json({ ok: true });
@@ -148,7 +170,7 @@ export class ErynSession extends DurableObject<Env> {
 	// --- A turn -----------------------------------------------------------------
 
 	private async prompt(request: PromptRequest): Promise<void> {
-		const host = await this.opencode;
+		const host = await this.hostFor(request.apiKey, request.model ?? MODEL);
 		const sessionID = await this.ensureSession(host, request.title ?? DEFAULT_THREAD_NAME);
 		const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 
@@ -181,9 +203,8 @@ export class ErynSession extends DurableObject<Env> {
 
 	/** Cancel the running turn, keeping the session for later messages. */
 	private async interrupt(): Promise<boolean> {
-		if (!this.turn) return false;
-		const host = await this.opencode;
-		if (!this.sessionID) return false;
+		if (!this.turn || !this.host || !this.sessionID) return false;
+		const host = await this.host.promise;
 		await host.sessions.interrupt({ sessionID: this.sessionID });
 		return true;
 	}
@@ -263,7 +284,7 @@ export class ErynSession extends DurableObject<Env> {
 	private startConsuming(host: OpenCodeWorkerd.Interface): void {
 		if (this.consuming) return;
 		this.consuming = (async () => {
-			for await (const event of host.events.subscribe({ signal: this.abort.signal })) {
+			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
 					this.handleEvent(event);
 				} catch (error) {
