@@ -15,8 +15,8 @@ import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "e
 import { CLIENT_ID, DEFAULT_MODEL, isValidModel } from "./config";
 import { randomToken, sign, verify } from "./crypto";
 import { discordRest } from "./discord/api";
-import { authorizeUrl, canManage, currentUser, exchangeCode, listUserGuilds } from "./oauth";
-import { getGuildKey, getGuildSummary, putGuild, removeGuild } from "./registry-client";
+import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
+import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild } from "./registry-client";
 import { landingPage, noticeHtml, setupPage, signInPage, type SetupGuild } from "./views";
 
 export { ErynGateway } from "./gateway";
@@ -57,6 +57,31 @@ function describe(error: unknown): string {
 /** A full HTML notice as an Effect HTTP response. */
 function notice(title: string, message: string, status = 200): HttpServerResponse.HttpServerResponse {
 	return HttpServerResponse.setStatus(status)(HttpServerResponse.html(noticeHtml(title, message)));
+}
+
+/** A friendly page for the common Discord failure, or a generic one. */
+function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
+	if (error instanceof DiscordApiError && error.status === 429) {
+		return notice(
+			"Discord is busy",
+			"Discord rate-limited that request. Wait a few seconds, then refresh this page.",
+			429,
+		);
+	}
+	return notice("Setup failed", describe(error), 500);
+}
+
+/**
+ * The guilds manageable by the signed-in user. Discord rate-limits the
+ * bearer-token guild route, so the result is cached for a few minutes and only
+ * fetched when the cache is cold.
+ */
+async function manageableGuilds(session: Session): Promise<DiscordGuild[]> {
+	const cached = await getUserGuilds(env, session.uid).catch(() => undefined);
+	if (cached) return cached;
+	const fetched = await listUserGuilds(session.token);
+	await putUserGuilds(env, session.uid, fetched).catch(() => undefined);
+	return fetched;
 }
 
 /** Cookie defaults; `secure` is dropped only for a local http origin. */
@@ -141,8 +166,8 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 	const session = await readSession(request);
 	if (!session) return HttpServerResponse.html(signInPage({ notice }));
 
-	const userGuilds = await listUserGuilds(session.token);
-	const manageable = userGuilds.filter(canManage).sort((a, b) => a.name.localeCompare(b.name));
+	const userGuilds = await manageableGuilds(session);
+	const manageable = userGuilds.filter(canManage);
 	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
 	const guilds: SetupGuild[] = await Promise.all(
@@ -159,6 +184,13 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 			};
 		}),
 	);
+	// Configured servers first, then installed ones, then the rest by name.
+	guilds.sort(
+		(a, b) =>
+			Number(b.configured) - Number(a.configured) ||
+			Number(b.installed) - Number(a.installed) ||
+			a.name.localeCompare(b.name),
+	);
 
 	return HttpServerResponse.html(setupPage({ account: { id: session.uid, name: session.name }, guilds, notice }));
 }
@@ -171,7 +203,7 @@ async function handleSetupPost(
 	if (!session) return HttpServerResponse.redirect("/setup");
 
 	// Re-check the guild against Discord rather than trusting the submitted id.
-	const guilds = await listUserGuilds(session.token);
+	const guilds = await manageableGuilds(session);
 	if (!guilds.some((guild) => guild.id === form.guild_id && canManage(guild))) {
 		return HttpServerResponse.redirect(`/setup?error=${encodeURIComponent("You cannot manage that server.")}`);
 	}
@@ -217,9 +249,7 @@ const Routes = Layer.mergeAll(
 	),
 	HttpRouter.add("GET", "/auth/logout", (request) => Effect.promise(() => handleLogout(request))),
 	HttpRouter.add("GET", "/setup", (request) =>
-		Effect.promise(() =>
-			handleSetupGet(request).catch((error) => notice("Setup failed", describe(error), 500)),
-		),
+		Effect.promise(() => handleSetupGet(request).catch((error) => setupFailure(error))),
 	),
 	HttpRouter.add("POST", "/setup", (request) =>
 		Effect.gen(function* () {
@@ -227,9 +257,7 @@ const Routes = Layer.mergeAll(
 				Effect.orElseSucceed(() => undefined),
 			);
 			if (!form) return notice("Setup failed", "The form could not be read.", 400);
-			return yield* Effect.promise(() =>
-				handleSetupPost(request, form).catch((error) => notice("Setup failed", describe(error), 400)),
-			);
+			return yield* Effect.promise(() => handleSetupPost(request, form).catch((error) => setupFailure(error)));
 		}),
 	),
 ).pipe(Layer.provide(HttpServer.layerServices));

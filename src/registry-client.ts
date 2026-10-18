@@ -3,7 +3,8 @@
  * Everything funnels through the single `ErynRegistry` instance.
  */
 
-import type { GuildSummary } from "./registry";
+import type { DiscordGuild } from "./oauth";
+import { USER_GUILDS_TTL_MS, type GuildSummary } from "./registry";
 
 export interface GuildKey {
 	apiKey: string;
@@ -46,4 +47,21 @@ export async function putGuild(
 
 export async function removeGuild(env: Env, guildId: string): Promise<void> {
 	await stub(env).fetch(`https://eryn/registry/guild/${guildId}`, { method: "DELETE" });
+}
+
+/** The cached guild list for a signed-in user, or `undefined` when stale. */
+export async function getUserGuilds(env: Env, userId: string): Promise<DiscordGuild[] | undefined> {
+	const response = await stub(env).fetch(`https://eryn/registry/user/${userId}/guilds`);
+	if (!response.ok) return undefined;
+	const body = (await response.json()) as { guilds?: unknown };
+	return Array.isArray(body.guilds) ? (body.guilds as DiscordGuild[]) : undefined;
+}
+
+/** Cache a user's guild list so `/setup` does not call Discord on every load. */
+export async function putUserGuilds(env: Env, userId: string, guilds: DiscordGuild[]): Promise<void> {
+	await stub(env).fetch(`https://eryn/registry/user/${userId}/guilds`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ guilds, expiresAt: Date.now() + USER_GUILDS_TTL_MS }),
+	});
 }

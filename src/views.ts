@@ -251,7 +251,6 @@ export function landingPage(): string {
 			<p class="lede">Every server runs on <strong>its own OpenCode Go key</strong> — nothing is billed to the operator and no key is shared between servers.</p>
 			<div class="actions">
 				<a class="btn primary" href="/setup">Set up a server</a>
-				<a class="btn" href="${installUrl()}" target="_blank" rel="noreferrer">Install</a>
 				<a class="btn" href="${SOURCE_URL}" target="_blank" rel="noreferrer">Source</a>
 			</div>
 		</div>
@@ -326,17 +325,18 @@ function avatar(guild: SetupGuild): string {
 }
 
 function guildCard(guild: SetupGuild): string {
-	if (!guild.installed) {
-		return `<div class="card">
-	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div><div class="meta">Not installed</div></div></div>
-	<a class="btn primary" href="${installUrl(guild.id)}" target="_blank" rel="noreferrer">Add Eryn to this server</a>
-</div>`;
-	}
-
-	const status = guild.configured ? `<span class="chip on">Configured</span>` : `<span class="chip">No key</span>`;
-	const modelLabel = guild.configured
+	const status = guild.configured
+		? `<span class="chip on">Configured</span>`
+		: guild.installed
+			? `<span class="chip">No key</span>`
+			: `<span class="chip">Not installed</span>`;
+	const meta = guild.configured
 		? `<div class="meta">${escape(guild.model ?? DEFAULT_MODEL)}${guild.updatedAt ? ` · ${new Date(guild.updatedAt).toISOString().slice(0, 10)}` : ""}</div>`
-		: "";
+		: `<div class="meta">${guild.installed ? "Installed" : "Not installed"}</div>`;
+
+	const install = guild.installed
+		? ""
+		: `<a class="btn" href="${installUrl(guild.id)}" target="_blank" rel="noreferrer">Add to server</a>`;
 	const remove = guild.configured
 		? `<form method="post" action="/setup" onsubmit="return confirm('Remove the key for this server?')">
 		<input type="hidden" name="action" value="remove" />
@@ -346,7 +346,7 @@ function guildCard(guild: SetupGuild): string {
 		: "";
 
 	return `<div class="card">
-	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div>${modelLabel || `<div class="meta">Installed</div>`}</div>${status}</div>
+	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div>${meta}</div>${status}</div>
 	<form method="post" action="/setup">
 		<input type="hidden" name="action" value="save" />
 		<input type="hidden" name="guild_id" value="${escape(guild.id)}" />
@@ -356,6 +356,7 @@ function guildCard(guild: SetupGuild): string {
 			<input type="text" name="model" value="${escape(guild.model ?? DEFAULT_MODEL)}" list="models" spellcheck="false" /></label>
 		<div class="row">
 			<button class="btn primary" type="submit">${guild.configured ? "Update key" : "Save key"}</button>
+			${install}
 			${remove}
 		</div>
 	</form>
