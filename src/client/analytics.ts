@@ -60,6 +60,13 @@ export function initAnalytics(config: { key: string; uiHost: string } | null): v
 	});
 
 	if (identity) posthog.identify(identity.id, identity.properties);
+
+	// `capture_pageview: "history_change"` records later navigations but not the
+	// load that started the session, so the landing page would never be counted.
+	// The SDK's own initial capture is disabled at that setting, so this is the
+	// only one and cannot double count.
+	posthog.capture("$pageview");
+
 	for (const error of pending.splice(0)) posthog.captureException(error);
 }
 
