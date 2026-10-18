@@ -190,6 +190,19 @@ const STYLE = `
 	footer.foot .wrap { padding: 26px 0 40px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; font: 500 11px/1.6 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 	footer.foot a { color: var(--faint); text-decoration: none; }
 	footer.foot a:hover { color: var(--fg); }
+	footer.foot .credit {
+		font-weight: 600;
+		color: var(--fg);
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		border-bottom: 1px solid var(--line-2);
+		padding-bottom: 3px;
+		transition: border-color .12s ease;
+	}
+	footer.foot .credit:hover { border-color: var(--fg); color: var(--fg); }
+	footer.foot .credit .arrow { color: var(--faint); transition: transform .12s ease, color .12s ease; }
+	footer.foot .credit:hover .arrow { color: var(--fg); transform: translate(1px, -1px); }
 
 	@media (max-width: 780px) {
 		.grid { grid-template-columns: 1fr; }
@@ -201,16 +214,16 @@ const STYLE = `
 
 function footer(): string {
 	return `<footer class="foot"><div class="wrap">
-	<span>eryn · OpenCode on Cloudflare Workers</span>
-	<span><a href="${SOURCE_URL}">Source</a> · <a href="/setup">Setup</a> · <a href="/health">Health</a></span>
+	<a class="credit" href="https://otbeaumont.me" target="_blank" rel="noreferrer">Created by Oscar Beaumont<span class="arrow">↗</span></a>
+	<span><a href="${SOURCE_URL}">Source</a> · <a href="/health">Health</a></span>
 </div></footer>`;
 }
 
 function header(account?: { name: string }): string {
 	const right = account
 		? `<span class="who">${escape(account.name)}</span><a class="navlink" href="/auth/logout">Sign out</a>`
-		: `<a class="navlink" href="${SOURCE_URL}">GitHub</a>`;
-	return `<header class="bar"><div class="wrap"><a class="brand" href="/">eryn</a><nav>${right}</nav></div></header>`;
+		: "";
+	return `<header class="bar"><div class="wrap"><a class="brand" href="/">eryn</a>${right ? `<nav>${right}</nav>` : ""}</div></header>`;
 }
 
 function document(title: string, body: string): string {
@@ -251,7 +264,6 @@ export function landingPage(): string {
 			<p class="lede">Every server runs on <strong>its own OpenCode Go key</strong> — nothing is billed to the operator and no key is shared between servers.</p>
 			<div class="actions">
 				<a class="btn primary" href="/setup">Set up a server</a>
-				<a class="btn" href="${SOURCE_URL}" target="_blank" rel="noreferrer">Source</a>
 			</div>
 		</div>
 	</section>
@@ -377,7 +389,6 @@ export function setupPage(options: SetupPageOptions): string {
 			${noticeBanner(options.notice)}
 			<p class="kicker">Setup</p>
 			<h1 class="title">Bring your own inference key</h1>
-			<p class="lede">Eryn runs on OpenCode Go. Paste a key from your <a href="https://opencode.ai/console" target="_blank" rel="noreferrer">OpenCode Console</a> for each server. The key is encrypted at rest, never leaves Cloudflare, and is used only for that server's sessions.</p>
 			<datalist id="models">${SUGGESTED_MODELS.map((model) => `<option value="${escape(model)}"></option>`).join("")}</datalist>
 			${cards}
 		</div>
