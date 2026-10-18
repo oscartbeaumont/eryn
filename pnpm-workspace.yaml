@@ -1,0 +1,8 @@
+# Approve build scripts needed by the generated Worker's dependencies, and
+# explicitly ignore the ones the embedded SDK pulls in but never runs in workerd.
+allowBuilds:
+  esbuild: true
+  workerd: true
+  "@parcel/watcher": false
+  tree-sitter-bash: false
+  tree-sitter-powershell: false

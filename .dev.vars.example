@@ -1,0 +1,9 @@
+# Copy to `.dev.vars` and fill in. `cf deploy --secrets-file .dev.vars` uploads these.
+OPENCODE_API_KEY=replace-with-your-OpenCode-Go-key
+DISCORD_BOT_TOKEN=replace-with-your-Discord-bot-token
+
+# Optional: register /stop in one guild (instant) instead of globally (up to ~1h).
+DISCORD_GUILD_ID=
+
+# Optional: limit the bot to specific channels and their threads.
+# DISCORD_CHANNELS={"channels":{"general":{"id":"123456789012345678","description":"default channel"}}}
