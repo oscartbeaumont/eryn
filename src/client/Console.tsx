@@ -148,7 +148,7 @@ function AddServers(props: { guilds: AvailableGuild[] }) {
 					type="button"
 					class={buttonClass.ghost}
 					onClick={() => setOpen(!open())}
-					aria-expanded={open()}
+					aria-expanded={open() ? "true" : "false"}
 				>
 					{open() ? "Close" : `Add a server (${props.guilds.length})`}
 				</button>
