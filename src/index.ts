@@ -150,15 +150,20 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
 	const slug = env.GITHUB_APP_SLUG?.trim();
 
+	const installedGuilds = manageable.filter((guild) => installed.has(guild.id));
+	const available = manageable
+		.filter((guild) => !installed.has(guild.id))
+		.map((guild) => ({ id: guild.id, name: guild.name, icon: guild.icon ?? null }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+
 	const guilds = await Promise.all(
-		manageable.map(async (guild) => {
+		installedGuilds.map(async (guild) => {
 			const summary = await getGuildSummary(env, guild.id);
 			const installationId = summary.github?.installationId;
 			return {
 				id: guild.id,
 				name: guild.name,
 				icon: guild.icon ?? null,
-				installed: installed.has(guild.id),
 				configured: summary.configured,
 				model: summary.model ?? DEFAULT_MODEL,
 				updatedAt: summary.updatedAt ?? null,
@@ -173,15 +178,14 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 			};
 		}),
 	);
-	guilds.sort(
-		(a, b) => Number(b.configured) - Number(a.configured) || Number(b.installed) - Number(a.installed) || a.name.localeCompare(b.name),
-	);
+	guilds.sort((a, b) => Number(b.configured) - Number(a.configured) || a.name.localeCompare(b.name));
 
 	return json({
 		signedIn: true,
 		account: { id: session.uid, name: session.name },
 		githubConfigured: Boolean(env.GITHUB_APP_ID?.trim() && env.GITHUB_APP_PRIVATE_KEY?.trim() && slug),
 		guilds,
+		available,
 	});
 }
 
@@ -196,6 +200,13 @@ async function handleSetupPost(
 	const guilds = await manageableGuilds(session);
 	if (!guilds.some((guild) => guild.id === form.guild_id && canManage(guild))) {
 		return json({ error: "You cannot manage that server." }, 403);
+	}
+
+	// A server must be installed before it can be configured.
+	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
+	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
+	if (!installed.has(form.guild_id)) {
+		return json({ error: "Add Eryn to that server before configuring it." }, 400);
 	}
 
 	if (form.action === "remove") {

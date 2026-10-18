@@ -1,5 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import { fetchSetup, saveGuild, type Guild, type SetupData } from "./api";
+import { fetchSetup, saveGuild, type AvailableGuild, type Guild, type SetupData } from "./api";
 import { installUrl } from "./discord";
 import { A, buttonClass, Chip, Footer, Header, Kicker, Notice } from "./ui";
 
@@ -60,25 +60,32 @@ export default function Setup() {
 								<datalist id="models">
 									<For each={MODELS}>{(model) => <option value={model} />}</For>
 								</datalist>
-								<div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
-									<For each={loaded().guilds ?? []}>
-										{(guild) => (
-											<GuildCard
-												guild={guild}
-												githubConfigured={Boolean(loaded().githubConfigured)}
-												onResult={(kind, message) => {
-													flash(kind, message);
-													void reload();
-												}}
-											/>
-										)}
-									</For>
-								</div>
-								<Show when={(loaded().guilds ?? []).length === 0}>
-									<p class="font-mono text-sm text-faint">
-										You do not administer any servers yet. Create one, or ask a server owner to set Eryn up.
-									</p>
+
+								<Show
+									when={(loaded().guilds ?? []).length > 0}
+									fallback={
+										<p class="max-w-[62ch] text-muted">
+											Add Eryn to a server below, then come back to connect its OpenCode Go key.
+										</p>
+									}
+								>
+									<div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
+										<For each={loaded().guilds ?? []}>
+											{(guild) => (
+												<GuildCard
+													guild={guild}
+													githubConfigured={Boolean(loaded().githubConfigured)}
+													onResult={(kind, message) => {
+														flash(kind, message);
+														void reload();
+													}}
+												/>
+											)}
+										</For>
+									</div>
 								</Show>
+
+								<AddServers guilds={loaded().available ?? []} />
 							</Show>
 						)}
 					</Show>
@@ -104,6 +111,62 @@ function SignIn() {
 				</A>
 			</div>
 		</>
+	);
+}
+
+/** A guild icon, or its initial when Discord has none. */
+function GuildAvatar(props: { guild: { id: string; name: string; icon: string | null } }) {
+	return (
+		<Show
+			when={props.guild.icon}
+			fallback={
+				<span class="grid size-11 flex-none place-items-center border border-line-strong bg-surface-2 font-mono text-lg font-semibold">
+					{props.guild.name.slice(0, 1).toUpperCase()}
+				</span>
+			}
+		>
+			{(icon) => (
+				<img
+					class="size-11 flex-none border border-line-strong object-cover"
+					src={`https://cdn.discordapp.com/icons/${props.guild.id}/${icon()}.png?size=64`}
+					alt=""
+					width="44"
+					height="44"
+				/>
+			)}
+		</Show>
+	);
+}
+
+/** Servers Eryn is not in yet: the only action is to add the bot. */
+function AddServers(props: { guilds: AvailableGuild[] }) {
+	return (
+		<Show when={props.guilds.length > 0}>
+			<div class="mt-14">
+				<Kicker>Add a server</Kicker>
+				<p class="mb-4 max-w-[62ch] text-muted">
+					Install Eryn to a server, then it appears above ready to configure.
+				</p>
+				<div class="divide-y divide-line border border-line">
+					<For each={props.guilds}>
+						{(guild) => (
+							<div class="flex items-center gap-3.5 px-5 py-4">
+								<GuildAvatar guild={guild} />
+								<span class="font-semibold">{guild.name}</span>
+								<a
+									href={installUrl(guild.id)}
+									target="_blank"
+									rel="noreferrer"
+									class={`${buttonClass.ghost} ml-auto`}
+								>
+									Add
+								</a>
+							</div>
+						)}
+					</For>
+				</div>
+			</div>
+		</Show>
 	);
 }
 
@@ -148,36 +211,17 @@ function GuildCard(props: {
 		}
 	}
 
-	const status = () => (props.guild.configured ? "Configured" : props.guild.installed ? "No key" : "Not installed");
-
 	return (
 		<div class="border border-line bg-surface p-6">
 			<div class="mb-5 flex items-center gap-3.5">
-				<Show
-					when={props.guild.icon}
-					fallback={
-						<span class="grid size-11 flex-none place-items-center border border-line-strong bg-surface-2 font-mono text-lg font-semibold">
-							{props.guild.name.slice(0, 1).toUpperCase()}
-						</span>
-					}
-				>
-					{(icon) => (
-						<img
-							class="size-11 flex-none border border-line-strong object-cover"
-							src={`https://cdn.discordapp.com/icons/${props.guild.id}/${icon()}.png?size=64`}
-							alt=""
-							width="44"
-							height="44"
-						/>
-					)}
-				</Show>
+				<GuildAvatar guild={props.guild} />
 				<div>
 					<div class="font-semibold">{props.guild.name}</div>
 					<div class="mt-1 font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
-						{props.guild.configured ? props.guild.model : props.guild.installed ? "Installed" : "Not installed"}
+						{props.guild.configured ? props.guild.model : "Not configured"}
 					</div>
 				</div>
-				<Chip on={props.guild.configured}>{status()}</Chip>
+				<Chip on={props.guild.configured}>{props.guild.configured ? "Configured" : "No key"}</Chip>
 			</div>
 
 			<form onSubmit={onSubmit}>
@@ -239,11 +283,6 @@ function GuildCard(props: {
 					<button type="submit" class={buttonClass.primary} disabled={busy()}>
 						{props.guild.configured ? "Update key" : "Save key"}
 					</button>
-					<Show when={!props.guild.installed}>
-						<a href={installUrl(props.guild.id)} target="_blank" rel="noreferrer" class={buttonClass.ghost}>
-							Add to server
-						</a>
-					</Show>
 					<Show when={props.guild.configured}>
 						<button type="button" class={buttonClass.danger} onClick={() => void onRemove()} disabled={busy()}>
 							Remove key

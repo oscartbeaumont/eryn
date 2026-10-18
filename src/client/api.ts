@@ -4,13 +4,19 @@ export interface Guild {
 	id: string;
 	name: string;
 	icon: string | null;
-	installed: boolean;
 	configured: boolean;
 	model: string;
 	updatedAt: number | null;
 	githubRepo: string | null;
 	githubInstalled: boolean;
 	githubInstallUrl: string | null;
+}
+
+/** A manageable server Eryn is not installed in yet. */
+export interface AvailableGuild {
+	id: string;
+	name: string;
+	icon: string | null;
 }
 
 export interface Account {
@@ -23,6 +29,7 @@ export interface SetupData {
 	account?: Account;
 	githubConfigured?: boolean;
 	guilds?: Guild[];
+	available?: AvailableGuild[];
 }
 
 export interface SaveGuildInput {
