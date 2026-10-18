@@ -51,6 +51,8 @@ export class ErynGateway extends DurableObject<Env> {
 	private readonly channels: Record<string, DiscordChannel>;
 	private readonly keepAliveMs: number;
 	private readonly locks = new Map<string, Promise<void>>();
+	/** Bot managed-role id per guild, resolved lazily. */
+	private readonly roleCache = new Map<string, string>();
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
@@ -139,11 +141,15 @@ export class ErynGateway extends DurableObject<Env> {
 		const channel = await this.rest.channel(message.channel_id);
 		if (!channel) return;
 
+		// Discord also creates a managed role named after the bot, and its `@`
+		// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
+		const roleId = await this.botRoleMention(message);
+
 		// A message inside a thread we own goes straight to that thread's session.
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) return;
 			if (!this.isAllowed(channel.id, channel.parent_id)) return;
-			const text = this.stripMention(message.content ?? "").trim();
+			const text = this.stripMention(message.content ?? "", roleId).trim();
 			if (!text) return;
 			if (STOP_TEXT.has(text.toLowerCase())) {
 				await this.stopThread(channel.id);
@@ -154,10 +160,10 @@ export class ErynGateway extends DurableObject<Env> {
 		}
 
 		// Otherwise require an explicit mention and open a thread for the request.
-		if (!this.isMention(message)) return;
+		if (!this.isMention(message, roleId)) return;
 		if (!this.isAllowed(channel.id, channel.parent_id)) return;
 
-		const text = this.stripMention(message.content ?? "").trim();
+		const text = this.stripMention(message.content ?? "", roleId).trim();
 		const name = this.threadName(text || DEFAULT_THREAD_NAME);
 		let threadId: string;
 		try {
@@ -241,15 +247,44 @@ export class ErynGateway extends DurableObject<Env> {
 		return this.botUserId ? new RegExp(`<@!?${this.botUserId}>`, "g") : undefined;
 	}
 
-	private isMention(message: DiscordMessage): boolean {
+	private isMention(message: DiscordMessage, roleId: string | undefined): boolean {
 		if (!this.botUserId) return false;
 		if (message.mentions?.some((user) => user.id === this.botUserId)) return true;
-		return this.mentionPattern()?.test(message.content ?? "") ?? false;
+		if (this.mentionPattern()?.test(message.content ?? "")) return true;
+		if (roleId !== undefined) {
+			if (message.mention_roles?.includes(roleId)) return true;
+			if ((message.content ?? "").includes(`<@&${roleId}>`)) return true;
+		}
+		return false;
 	}
 
-	private stripMention(content: string): string {
+	private stripMention(content: string, roleId: string | undefined): string {
 		const pattern = this.mentionPattern();
-		return (pattern ? content.replace(pattern, " ") : content).replace(/\s+/g, " ").trim();
+		let text = pattern ? content.replace(pattern, " ") : content;
+		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, " ");
+		return text.replace(/\s+/g, " ").trim();
+	}
+
+	/**
+	 * The bot's managed role id for the guild, but only when the message might
+	 * reference it, so ordinary messages never pay for the lookup.
+	 */
+	private async botRoleMention(message: DiscordMessage): Promise<string | undefined> {
+		if (message.guild_id === undefined) return undefined;
+		const roles = message.mention_roles ?? [];
+		if (!roles.length && !/<@&\d+>/.test(message.content ?? "")) return undefined;
+		return await this.botRoleId(message.guild_id).catch(() => undefined);
+	}
+
+	private async botRoleId(guildId: string): Promise<string | undefined> {
+		const cached = this.roleCache.get(guildId);
+		if (cached) return cached;
+		if (!this.botUserId) return undefined;
+		const roles = await this.rest.guildRoles(guildId);
+		const role = roles.find((candidate) => candidate.tags?.bot_id === this.botUserId);
+		if (!role) return undefined;
+		this.roleCache.set(guildId, role.id);
+		return role.id;
 	}
 
 	/** With configured channels the bot is limited to them and their threads. */

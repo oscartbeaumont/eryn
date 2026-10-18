@@ -29,7 +29,9 @@ Discord ── gateway WS ──▶ ErynGateway (singleton DO)  ──fetch─�
 ## Behaviour
 
 - **Mention to start.** A guild mention opens a thread named after the request
-  and creates a session. A mention already inside a thread answers there.
+  and creates a session. A mention already inside a thread answers there. Because
+  Discord also creates a managed role with the bot's name, the bot accepts a ping
+  of either its user (`<@…>`) or that role (`<@&…>`).
 - **Follow-ups.** Any human message inside a thread Erynn owns goes straight to
   that thread's session — no mention needed.
 - **Streaming.** The reply is written into a Discord message and edited as the

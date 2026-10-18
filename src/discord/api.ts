@@ -39,6 +39,14 @@ export interface DiscordChannel {
 	description?: string;
 }
 
+/** The subset of a guild role this bot reads. Managed bot roles carry `tags.bot_id`. */
+export interface DiscordRole {
+	id: string;
+	name: string;
+	managed: boolean;
+	tags?: { bot_id?: string };
+}
+
 /** An error raised by a non-retryable Discord response. */
 export class DiscordError extends Error {
 	readonly status: number | undefined;
@@ -205,6 +213,12 @@ export function discordRest(token: string) {
 
 		async triggerTyping(channelId: string): Promise<void> {
 			await request<void>("POST", `/channels/${channelId}/typing`);
+		},
+
+		/** The guild's roles, used to find the bot's managed role. */
+		async guildRoles(guildId: string): Promise<DiscordRole[]> {
+			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
+			return Array.isArray(result) ? result : [];
 		},
 
 		/** Acknowledge an interaction with a (by default ephemeral) message. */

@@ -32,6 +32,7 @@ export interface DiscordMessage {
 	webhook_id?: string;
 	author?: DiscordUser;
 	mentions?: DiscordUser[];
+	mention_roles?: string[];
 	thread?: { id: string; parent_id?: string };
 }
 
