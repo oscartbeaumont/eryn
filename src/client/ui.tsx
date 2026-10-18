@@ -97,7 +97,7 @@ export function Header(props: { account?: Account }) {
 								href="/console"
 								class={`${navLink} ${path() === "/console" ? "text-fg" : "text-muted hover:text-fg"}`}
 							>
-								Servers
+								Bot
 							</A>
 							<A
 								href="/console/mcp"

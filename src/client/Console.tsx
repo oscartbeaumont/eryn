@@ -51,18 +51,18 @@ export default function Console() {
 					<Show when={data()} fallback={<p class="font-mono text-sm text-faint">Loading…</p>}>
 						{(loaded) => (
 							<Show when={loaded().signedIn} fallback={<SignIn />}>
-								<Kicker>Console</Kicker>
+								<Kicker>Bot</Kicker>
 								<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">
-									Your servers
+									Your bot
 								</h1>
 
 								<Show when={(loaded().guilds ?? []).filter(needsKey).length}>
 									{(count) => (
 										<p class="mb-7 border border-danger/45 px-4 py-3.5 text-sm text-muted">
 											<strong class="font-semibold text-danger">
-												{count()} {count() === 1 ? "server is" : "servers are"} offline.
+												Offline in {count()} {count() === 1 ? "server" : "servers"}.
 											</strong>{" "}
-											Eryn cannot answer there until an OpenCode Go API key is added.
+											Eryn will not answer there until an OpenCode Go API key is added.
 										</p>
 									)}
 								</Show>
@@ -71,7 +71,8 @@ export default function Console() {
 									when={(loaded().guilds ?? []).length > 0}
 									fallback={
 										<p class="max-w-[62ch] text-muted">
-											Add Eryn to a server to get started, then connect its OpenCode Go key.
+											Add Eryn to a Discord server, then connect its OpenCode Go key. Eryn stays
+											offline in a server until a key is set.
 										</p>
 									}
 								>
@@ -105,11 +106,10 @@ export default function Console() {
 function SignIn() {
 	return (
 		<>
-			<Kicker>Console</Kicker>
-			<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">Connect a server</h1>
+			<Kicker>Bot</Kicker>
+			<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">Connect your bot</h1>
 			<p class="mb-8 max-w-[62ch] text-muted">
-				Sign in with Discord to see the servers you administer, then add an OpenCode Go key to run inference on your own
-				account.
+				Sign in with Discord to see the servers you administer, then add an OpenCode Go key so Eryn can answer in them.
 			</p>
 			<div class="flex flex-wrap gap-3">
 				<A href="/auth/discord" external class={buttonClass.primary}>
@@ -156,7 +156,7 @@ function AddServers(props: { guilds: AvailableGuild[] }) {
 					onClick={() => setOpen(!open())}
 					aria-expanded={open() ? "true" : "false"}
 				>
-					{open() ? "Close" : `Add a server (${props.guilds.length})`}
+					{open() ? "Close" : `Add Eryn to a server (${props.guilds.length})`}
 				</button>
 				{/* A 0fr→1fr grid row animates height without measuring anything. */}
 				<div

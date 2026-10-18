@@ -251,16 +251,17 @@ redirect URI, so sign-in only works against the deployed origin.
 4. Choose a model from the picker — a searchable list of what that key can
    actually reach.
 
-The card makes the key's state explicit: **Key required** with an input when
-there is none, and **Key set** showing the key's prefix with **Replace** and
-**Clear** buttons when there is. The model picker is disabled until a key is
-configured, because there is nothing to ask the provider without one, and its
-list is filled from that server's own OpenCode instance rather than a hardcoded
-set — the same catalogue a turn would resolve against, so it cannot drift from
-what the agent can use. Any `provider/model` reference can still be typed by
-hand.
+The card makes the state explicit. A server with no key shows a red **Offline**
+pill and a **Not ready** banner, because Eryn cannot answer there at all; once a
+key is set it shows a green **Ready** pill and the key's prefix with **Replace**
+and **Clear** buttons. Keys can be revealed while typing. The model picker is
+disabled until a key is configured, because there is nothing to ask the provider
+without one, and its list is filled from that server's own OpenCode instance
+rather than a hardcoded set — the same catalogue a turn would resolve against,
+so it cannot drift from what the agent can use. Any `provider/model` reference
+can still be typed by hand.
 
-The setup page lists only servers the user can manage
+The Bot page lists only servers the user can manage
 (`MANAGE_GUILD`/`ADMINISTRATOR`/owner), and every save re-checks that permission
 against Discord. Removing a key takes effect for new turns immediately.
 
