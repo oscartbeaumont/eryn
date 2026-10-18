@@ -9,12 +9,25 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
+		// Workers Observability: invocation logs and traces are persisted and
+		// searchable in the dashboard, and real-time Issues groups the errors that
+		// would otherwise only show up as noisy log lines.
+		observability: {
+			enabled: true,
+			// Our own routes carry OAuth codes, code challenges, and session state in
+			// the query string, so keep them out of logs and traces.
+			redactQueryString: true,
+			logs: { enabled: true, invocationLogs: true, persist: true },
+			traces: { enabled: true, persist: true },
+			issues: { enabled: true },
+		},
 		// A slow safety net for the gateway. The gateway's own Durable Object
 		// alarm is the real mechanism; running this every minute would pay for a
 		// wake-up a minute for no benefit.
 		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
 		// The Solid SPA is served as static assets; unknown paths fall back to
-		// index.html, while API, auth, and MCP routes go straight to the Worker.
+		// index.html, while API, auth, MCP, and ingest routes go straight to the
+		// Worker.
 		assets: {
 			notFoundHandling: "single-page-application",
 			runWorkerFirst: [
@@ -26,6 +39,8 @@ export default defineConfig({
 				"/mcp",
 				"/.well-known/*",
 				"/oauth/*",
+				// The PostHog reverse proxy.
+				"/ingest/*",
 			],
 		},
 		env: {
@@ -52,6 +67,16 @@ export default defineConfig({
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
 			// Where Eryn's own sessions reach the MCP. Defaults to PUBLIC_ORIGIN/mcp.
 			MCP_INTERNAL_URL: bindings.text(""),
+
+			// PostHog. The project token is a public value that ships in the client
+			// bundle; an empty token disables analytics entirely. Requests are sent
+			// to this origin's /ingest path and proxied onward from here, so they
+			// are first-party and ad blockers leave them alone.
+			POSTHOG_KEY: bindings.text("phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2"),
+			POSTHOG_INGEST_HOST: bindings.text("https://us.i.posthog.com"),
+			POSTHOG_ASSETS_HOST: bindings.text("https://us-assets.i.posthog.com"),
+			POSTHOG_UI_HOST: bindings.text("https://us.posthog.com"),
+
 			// How often the gateway Durable Object's keepalive alarm fires. Only a
 			// safety net: the socket is persistent, so a long interval is cheaper.
 			DISCORD_KEEPALIVE_SECONDS: bindings.text("840"),

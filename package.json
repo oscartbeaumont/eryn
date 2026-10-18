@@ -16,7 +16,8 @@
     "@opencode/plugin": "2.0.32",
     "@opencode/sdk": "2.0.32",
     "effect": "4.0.1",
-    "just-bash": "3.6.0"
+    "just-bash": "3.6.0",
+    "posthog-js": "^1.438.12"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",

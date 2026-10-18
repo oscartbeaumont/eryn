@@ -1,4 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
+import { capture } from "./analytics";
 import { fetchSetup, saveGuild, type AvailableGuild, type Guild, type SetupData } from "./api";
 import { installUrl } from "./discord";
 import { A, buttonClass, Chip, Footer, Header, Kicker, Notice } from "./ui";
@@ -205,6 +206,7 @@ function GuildCard(props: {
 				model: String(formData.get("model") ?? ""),
 				githubRepo: String(formData.get("github_repo") ?? ""),
 			});
+			capture("server_key_saved", { model: String(formData.get("model") ?? "") });
 			props.onResult("ok", result.message ?? "Saved.");
 		} catch (error) {
 			props.onResult("error", error instanceof Error ? error.message : String(error));
@@ -218,6 +220,7 @@ function GuildCard(props: {
 		setBusy(true);
 		try {
 			const result = await saveGuild({ action: "remove", guildId: props.guild.id });
+			capture("server_key_removed");
 			props.onResult("ok", result.message ?? "Removed.");
 		} catch (error) {
 			props.onResult("error", error instanceof Error ? error.message : String(error));

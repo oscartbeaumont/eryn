@@ -1,4 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
+import { capture } from "./analytics";
 import {
 	callMcp,
 	exchangeMcpCode,
@@ -156,6 +157,7 @@ export default function ConsoleMcp() {
 			const listed = await callMcp({ jsonrpc: "2.0", id: 2, method: "tools/list" }, call);
 			const tools = (listed.json as { result?: { tools?: { name?: string }[] } } | undefined)?.result?.tools ?? [];
 			setDiscovered(tools.map((tool) => tool.name ?? "?"));
+			capture("mcp_client_connected", { tools: tools.length });
 			setStatus({ kind: "ok", message: `Connected. The server advertised ${tools.length} tool(s).` });
 		} catch (error) {
 			setStatus({ kind: "error", message: describe(error) });

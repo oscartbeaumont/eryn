@@ -163,6 +163,20 @@ function handleSession(request: HttpServerRequest.HttpServerRequest): Effect.Eff
 	});
 }
 
+/**
+ * Public runtime configuration for the client bundle.
+ *
+ * The PostHog project token is a public value, and keeping it here rather than
+ * compiled into the bundle means analytics can be switched off by clearing a
+ * binding, with no rebuild.
+ */
+function handleConfig(): HttpServerResponse.HttpServerResponse {
+	const key = env.POSTHOG_KEY?.trim();
+	return json({
+		posthog: key ? { key, uiHost: env.POSTHOG_UI_HOST?.trim() || "https://us.posthog.com" } : null,
+	});
+}
+
 async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const session = await readSession(request);
 	if (!session) return json({ signedIn: false });
@@ -385,11 +399,56 @@ async function guardMcp(request: Request): Promise<Response | undefined> {
 	});
 }
 
+// --- PostHog proxy ------------------------------------------------------------
+
+const POSTHOG_DEFAULT_INGEST = "https://us.i.posthog.com";
+const POSTHOG_DEFAULT_ASSETS = "https://us-assets.i.posthog.com";
+
+/**
+ * Reverse-proxy PostHog ingestion through this origin.
+ *
+ * Pointing `api_host` at `/ingest` makes analytics requests first-party, which
+ * is what keeps them out of ad blockers' blocklists. Everything under `/ingest`
+ * is forwarded verbatim; `/ingest/static/*` goes to the asset host that serves
+ * session replay and the toolbar, everything else to the ingestion host.
+ *
+ * An empty `POSTHOG_KEY` disables analytics, and with it this proxy.
+ */
+async function proxyPostHog(request: Request, env: Env): Promise<Response> {
+	if (!env.POSTHOG_KEY?.trim()) return new Response("Not found", { status: 404 });
+
+	const url = new URL(request.url);
+	const path = `${url.pathname.slice("/ingest".length)}${url.search}`;
+	const ingest = env.POSTHOG_INGEST_HOST?.trim() || POSTHOG_DEFAULT_INGEST;
+	const assets = env.POSTHOG_ASSETS_HOST?.trim() || POSTHOG_DEFAULT_ASSETS;
+	const upstream = new URL(path, path.startsWith("/static/") ? assets : ingest);
+
+	// Never forward our own cookies or credentials to a third party.
+	const headers = new Headers(request.headers);
+	headers.delete("cookie");
+	headers.delete("authorization");
+	headers.delete("host");
+
+	const init: RequestInit = { method: request.method, headers, redirect: "manual" };
+	if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
+
+	const response = await fetch(upstream, init);
+	// The runtime hands back a decoded body, so a forwarded content-encoding or
+	// content-length would describe bytes that no longer match.
+	const out = new Headers(response.headers);
+	out.delete("content-encoding");
+	out.delete("content-length");
+	out.delete("transfer-encoding");
+	out.delete("set-cookie");
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
+}
+
 // --- Routes -------------------------------------------------------------------
 
 const Routes = Layer.mergeAll(
 	HttpRouter.add("GET", "/health", HttpServerResponse.jsonUnsafe({ ok: true, service: "eryn" })),
 	HttpRouter.add("GET", "/api/session", (request) => handleSession(request)),
+	HttpRouter.add("GET", "/api/config", Effect.sync(() => handleConfig())),
 	HttpRouter.add("GET", "/api/setup", (request) =>
 		Effect.promise(() => handleSetupGet(request).catch((error) => setupFailure(error))),
 	),
@@ -469,6 +528,12 @@ async function wake(env: Env): Promise<void> {
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// The PostHog reverse proxy is a plain pipe; it never touches the app.
+		if (new URL(request.url).pathname.startsWith("/ingest/")) {
+			return await proxyPostHog(request, env).catch(
+				(error) => new Response(`ingest proxy failed: ${describe(error)}`, { status: 502 }),
+			);
+		}
 		// `/mcp` is authenticated before the MCP layer sees it, so the layer stays
 		// concerned only with the protocol.
 		const unauthorized = await guardMcp(request).catch(() => undefined);

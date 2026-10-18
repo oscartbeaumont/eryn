@@ -37,6 +37,11 @@ export interface SetupData {
 	available?: AvailableGuild[];
 }
 
+/** Public runtime configuration, fetched once at boot. */
+export interface ClientConfig {
+	posthog: { key: string; uiHost: string } | null;
+}
+
 export interface SaveGuildInput {
 	action: "save" | "remove";
 	guildId: string;
@@ -64,6 +69,10 @@ export function fetchSetup(): Promise<SetupData> {
 
 export function fetchSession(): Promise<SessionState> {
 	return request<SessionState>("/api/session");
+}
+
+export function fetchConfig(): Promise<ClientConfig> {
+	return request<ClientConfig>("/api/config");
 }
 
 export function saveGuild(input: SaveGuildInput): Promise<ApiResult> {

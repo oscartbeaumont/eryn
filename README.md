@@ -94,6 +94,50 @@ special-cased.
 Tokens are HMAC-signed blobs, not rows: the client, the authorization code, and
 both tokens are stateless, so there is no store to provision or expire.
 
+## Analytics and observability
+
+Two independent systems, because they answer different questions.
+
+**Workers Observability** (`observability` in `cloudflare.config.ts`) persists
+invocation logs and traces to Cloudflare and turns recurring errors into
+real-time **Issues**. `redactQueryString` is on, because our own routes carry
+OAuth codes, PKCE challenges, and session state in the query string.
+
+**PostHog** covers the web UI: pageviews, a few product events
+(`server_key_saved`, `server_key_removed`, `mcp_client_connected`), and
+client-side crashes. Signed-in users are identified by their Discord id so
+console usage is attributable; anonymous visitors are never turned into person
+profiles.
+
+Requests do not go to `posthog.com`. The client points `api_host` at its own
+origin and rewrites every ingestion path to `/ingest/...`, and the Worker
+proxies that onward:
+
+```
+browser → https://eryn.otbeaumont.me/ingest/i/v0/e/  →  https://us.i.posthog.com/i/v0/e/
+          https://eryn.otbeaumont.me/ingest/static/* →  https://us-assets.i.posthog.com/static/*
+```
+
+Being first-party is the point: ad blockers match on `posthog.com`, so a
+proxied request survives. The proxy strips `cookie` and `authorization` before
+forwarding, so no Eryn credential ever reaches PostHog.
+
+The project token is served from `GET /api/config` rather than compiled into the
+bundle, so analytics can be turned off by clearing `POSTHOG_KEY` with no
+rebuild.
+
+### Nothing is captured in development
+
+`initAnalytics` returns immediately unless `import.meta.env.PROD` is true, and
+also refuses a loopback hostname, so neither `pnpm dev` nor a production build
+served locally reports anything. Crashes that happen before the SDK loads are
+buffered and replayed once it does.
+
+Error tracking needed one project-level change as well:
+`autocapture_exceptions_opt_in` is enabled on the PostHog project, because
+without it the server tells the SDK to leave exception autocapture off.
+
+
 ## Sleeping and cost
 
 A Discord bot has to be connected to hear a mention, and Cloudflare only
@@ -222,6 +266,10 @@ against Discord. Removing a key takes effect for new turns immediately.
 | `GITHUB_APP_SLUG`              | text   | empty                         | GitHub App URL slug, for the install link           |
 | `PUBLIC_ORIGIN`                | text   | `https://eryn.otbeaumont.me`  | Origin linked from Discord messages                 |
 | `MCP_INTERNAL_URL`             | text   | empty (→ `PUBLIC_ORIGIN/mcp`) | Where Eryn's own sessions reach the MCP             |
+| `POSTHOG_KEY`                  | text   | the Eryn project's public token | PostHog project token; empty disables analytics   |
+| `POSTHOG_INGEST_HOST`          | text   | `https://us.i.posthog.com`    | Where the `/ingest` proxy forwards events           |
+| `POSTHOG_ASSETS_HOST`          | text   | `https://us-assets.i.posthog.com` | Where `/ingest/static/*` is forwarded           |
+| `POSTHOG_UI_HOST`              | text   | `https://us.posthog.com`      | PostHog app host, so UI links point at the right instance |
 | `DISCORD_KEEPALIVE_SECONDS`    | text   | `840`                         | Gateway keepalive alarm interval                    |
 | `DISCORD_TURN_TIMEOUT_SECONDS` | text   | `900`                         | Seconds before a turn is interrupted                |
 

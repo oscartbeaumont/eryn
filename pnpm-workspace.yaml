@@ -13,3 +13,5 @@ allowBuilds:
   tree-sitter-powershell: false
   "@mongodb-js/zstd": false
   node-liblzma: false
+  # core-js's postinstall only prints a funding banner; nothing needs it at build.
+  core-js: false
