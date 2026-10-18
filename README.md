@@ -59,9 +59,9 @@ supplies its own through two decoupled plugins (`src/opencode/`):
   place at most once every 1.5s and spilling into new messages past 2000
   characters. The final transcript is written when the turn ends, so a throttled
   edit can never lose output.
-- **One ping, at the end.** The requester is mentioned exactly once, in a reply
-  to the finished answer, when the run completes (or is stopped or fails).
-  Nothing pings them while the agent is still working.
+- **One message.** The answer streams into a single message; there is no
+  separate completion reply. The requester is added to the thread silently (via
+  the thread-members API, no ping), so they follow it and Discord notifies them.
 - **Stop.** Run `/stop`, or say `stop` / `cancel` / `!stop` in the thread, to
   interrupt the running turn. The session is kept.
 - **Unconfigured servers.** A mention in a server with no key gets a short reply

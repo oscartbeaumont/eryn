@@ -247,7 +247,6 @@ export class ErynGateway extends DurableObject<Env> {
 					title,
 					text,
 					author: message.author?.username ?? "someone",
-					authorId: message.author?.id,
 					apiKey: config.apiKey,
 					model: config.model,
 					github: config.github,

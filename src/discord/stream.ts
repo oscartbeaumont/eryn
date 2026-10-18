@@ -84,11 +84,6 @@ export class DiscordStream {
 		await this.write(body);
 	}
 
-	/** The id of the last message written, for replying with a completion ping. */
-	get lastMessageId(): string | undefined {
-		return this.chunks.at(-1)?.id;
-	}
-
 	private stopLoading(): void {
 		this.loading = false;
 		if (this.loader) {

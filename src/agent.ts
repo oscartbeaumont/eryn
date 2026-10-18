@@ -39,8 +39,6 @@ interface PromptRequest {
 	title?: string;
 	text: string;
 	author?: string;
-	/** The user who triggered the turn, pinged once it finishes. */
-	authorId?: string;
 	/** The guild's own OpenCode Go credential, supplied by the gateway. */
 	apiKey: string;
 	model?: string;
@@ -209,58 +207,28 @@ export class ErynSession extends DurableObject<Env> {
 		const stream = new DiscordStream(this.rest, request.threadId);
 		await stream.start();
 
-		const startedAt = Date.now();
 		const turn = createTurn();
 		this.turn = turn;
 		this.stream = stream;
 		const stopTyping = this.startTyping(request.threadId);
-		let outcome = "Done";
 
 		try {
 			await host.sessions.prompt({ sessionID, text: request.text });
 			const finished = await this.wait(turn);
-			if (!finished) {
-				outcome = "Timed out";
-				await this.interrupt().catch(() => undefined);
-			} else if (turn.interrupted) {
-				outcome = "Stopped";
-			} else if (turn.failed) {
-				outcome = "Failed";
-			}
+			if (!finished) await this.interrupt().catch(() => undefined);
 
 			const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
 			const body = final ?? renderTurn(turn);
 			const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
 			await stream.finish(body, suffix);
 		} catch (error) {
-			outcome = "Failed";
 			await stream.finish(`I hit an error: ${describeError(error)}`);
 		} finally {
 			stopTyping();
 			turn.done = true;
 			if (this.turn === turn) this.turn = undefined;
 			if (this.stream === stream) this.stream = undefined;
-			// Ping the requester once, and only now that the run has finished.
-			await this.notifyDone(request, outcome, Date.now() - startedAt, stream.lastMessageId);
 		}
-	}
-
-	/** Reply to the finished answer, mentioning the requester exactly once. */
-	private async notifyDone(
-		request: PromptRequest,
-		outcome: string,
-		elapsedMs: number,
-		replyTo: string | undefined,
-	): Promise<void> {
-		if (!request.authorId) return;
-		const emoji = outcome === "Done" ? "✅" : outcome === "Failed" ? "❌" : "⚠️";
-		const seconds = Math.max(1, Math.round(elapsedMs / 1_000));
-		await this.rest
-			.sendMessage(request.threadId, `<@${request.authorId}> ${emoji} ${outcome} in ${seconds}s`, {
-				users: [request.authorId],
-				replyTo,
-			})
-			.catch((error) => log(`completion ping failed: ${describeError(error)}`));
 	}
 
 	/** Cancel the running turn, keeping the session for later messages. */
