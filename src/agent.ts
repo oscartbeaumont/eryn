@@ -1,21 +1,27 @@
 /**
  * The session Durable Object.
  *
- * One instance per Discord thread. It owns an embedded OpenCode host (see
- * `@opencode/sdk/workerd`), whose database lives in this object's SQLite
- * storage, and it is addressed by the thread id so a thread always maps to the
- * same session and conversation history.
+ * **One object per Discord guild.** The guild id is the object name, so a
+ * guild's OpenCode database, virtual filesystem, GitHub binding, and provider
+ * credential all live in storage that no other guild can be routed to. That is
+ * the security boundary: two servers can never share a workspace, a session,
+ * or a key, because they are different objects with different SQLite files.
+ *
+ * Threads inside the guild are OpenCode sessions inside this one object, so a
+ * server behaves like a single project and quickly goes idle between turns.
+ * The object holds no alarm and no background timer of its own: it wakes when
+ * the gateway forwards a prompt and is evictable the moment the turn ends and
+ * the event subscription is closed. All of the always-on work lives in the
+ * single gateway object, which does nothing but hold the Discord socket.
  *
  * A prompt runs the agent turn and streams the reply straight into the thread.
- * The object keeps one event subscription for its lifetime and renders
- * `session.text.*` events into a Discord message, using the final transcript as
- * the authoritative result so nothing is lost if an intermediate edit is
- * dropped. `/stop` from the gateway calls `interrupt`, which cancels the turn
- * but keeps the session for future messages.
+ * Events are matched back to their thread by session id, so concurrent turns in
+ * the same guild keep their own state.
  */
 
 import { DurableObject } from "cloudflare:workers";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
+import type { Configuration } from "@opencode/sdk/workerd";
 import { DEFAULT_MODEL, intFromEnv } from "./config";
 import { DEFAULT_THREAD_NAME, describeError, discordRest, type DiscordRest } from "./discord/api";
 import { DiscordStream } from "./discord/stream";
@@ -23,18 +29,23 @@ import { fileStore, type FileStore } from "./opencode/store";
 import { workspacePlugin } from "./opencode/workspace";
 import { createGitHub } from "./github";
 import { githubPlugin } from "./opencode/github";
+import { mintInternalToken } from "./mcp/access";
 
 const MODEL = DEFAULT_MODEL;
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
-const SESSION_KEY = "opencode:session";
+/** Prefix for a thread's session id, so one guild's storage holds many threads. */
+const SESSION_PREFIX = "opencode:session:";
 const DEFAULT_TURN_TIMEOUT_SECONDS = 900;
+const DEFAULT_MCP_URL = "https://eryn.otbeaumont.me/mcp";
 
 function log(message: string): void {
 	console.log(`[eryn:session] ${message}`);
 }
 
 interface PromptRequest {
+	/** The guild this thread belongs to. It must match the object's own name. */
+	guildId: string;
 	threadId: string;
 	title?: string;
 	text: string;
@@ -48,6 +59,7 @@ interface PromptRequest {
 
 /** Accumulated assistant output for one turn, keyed by message then part. */
 interface Turn {
+	readonly threadId: string;
 	readonly createdAt: number;
 	readonly parts: Map<string, Map<number, string>>;
 	/** Assistant message ids that belong to a real step, excluding auxiliary requests. */
@@ -59,12 +71,13 @@ interface Turn {
 	readonly completed: Promise<void>;
 }
 
-function createTurn(): Turn {
+function createTurn(threadId: string): Turn {
 	let resolve!: () => void;
 	const completed = new Promise<void>((res) => {
 		resolve = res;
 	});
 	return {
+		threadId,
 		createdAt: Date.now(),
 		parts: new Map(),
 		main: new Set(),
@@ -97,6 +110,12 @@ function renderTurn(turn: Turn): string {
 	return messages.join("\n\n").trim();
 }
 
+/** The live state of one thread inside this guild's object. */
+interface ThreadRun {
+	turn?: Turn;
+	stream?: DiscordStream;
+}
+
 interface Host {
 	promise: Promise<OpenCodeWorkerd.Interface>;
 	apiKey: string;
@@ -106,20 +125,28 @@ interface Host {
 }
 
 export class ErynSession extends DurableObject<Env> {
+	/** The guild this object serves, taken from the storage key the gateway used. */
+	private readonly guildId: string;
 	private readonly rest: DiscordRest;
 	private readonly turnTimeoutMs: number;
-	/** The thread's project: files shared by the file tools, bash, and GitHub. */
+	/** The guild's project: files shared by every thread, its file tools, and GitHub. */
 	private readonly files: FileStore;
+	/** In-memory turn state per thread; a thread's session id is persisted. */
+	private readonly runs = new Map<string, ThreadRun>();
 
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
-	private sessionID: string | undefined;
 	private consuming: Promise<void> | undefined;
-	private turn: Turn | undefined;
-	private stream: DiscordStream | undefined;
+	/** Which thread each OpenCode session belongs to, so events can be routed. */
+	private readonly sessions = new Map<string, string>();
+	/** The minted MCP bearer token, reused for the object's lifetime. */
+	private mcpToken: Promise<string | undefined> | undefined;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
+		// The Durable Object name is the guild id, which is exactly the boundary
+		// the gateway needs to enforce. Reading it back here makes that explicit.
+		this.guildId = state.id.name ?? "";
 		this.rest = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 		this.files = fileStore(state.storage);
 		this.turnTimeoutMs =
@@ -127,11 +154,11 @@ export class ErynSession extends DurableObject<Env> {
 	}
 
 	/**
-	 * The embedded OpenCode host for this thread, built on first use with the
+	 * The embedded OpenCode host for this guild, built on first use with the
 	 * guild's own credential. A changed key or model rebuilds the host so a
 	 * rotated credential takes effect on the next turn.
 	 */
-	private hostFor(
+	private async hostFor(
 		apiKey: string,
 		model: string,
 		github?: { installationId?: string; repo?: string },
@@ -162,6 +189,7 @@ export class ErynSession extends DurableObject<Env> {
 					default_agent: "build",
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
 					providers: { "opencode-go": { settings: { apiKey } } },
+					mcp: await this.mcpConfig(),
 				},
 				plugins,
 			});
@@ -175,11 +203,49 @@ export class ErynSession extends DurableObject<Env> {
 		return this.host.promise;
 	}
 
+	/**
+	 * The MCP server Eryn hosts, wired in with a locally minted token so the
+	 * cloud agent needs no OAuth round trip. It is the same public, protected
+	 * endpoint any harness can use.
+	 */
+	private mcpConfig(): Promise<Configuration["mcp"]> {
+		this.mcpToken ??= (async () => {
+			const secret = this.env.SESSION_SECRET?.trim();
+			if (!secret) return undefined;
+			return await mintInternalToken(secret);
+		})();
+		return this.mcpToken.then((token) => {
+			if (!token) return undefined;
+			const url = this.env.MCP_INTERNAL_URL?.trim() || `${this.publicOrigin()}/mcp`;
+			return {
+				servers: {
+					eryn: {
+						type: "remote",
+						url,
+						headers: { Authorization: `Bearer ${token}` },
+						// Eryn's own token is already minted; never start a login flow.
+						oauth: false,
+						codemode: false,
+					},
+				},
+			};
+		});
+	}
+
+	private publicOrigin(): string {
+		return this.env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") || DEFAULT_MCP_URL.slice(0, -"/mcp".length);
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
 		if (request.method === "POST" && pathname === "/session/prompt") {
 			const body = (await request.json()) as PromptRequest;
 			if (!body.apiKey) return Response.json({ ok: false, error: "missing api key" }, { status: 400 });
+			// The gateway names this object after the guild, so a mismatch means a
+			// routing bug rather than an authorised cross-guild request.
+			if (this.guildId && body.guildId && body.guildId !== this.guildId) {
+				return Response.json({ ok: false, error: "guild mismatch" }, { status: 403 });
+			}
 			try {
 				await this.prompt(body);
 				return Response.json({ ok: true });
@@ -189,10 +255,11 @@ export class ErynSession extends DurableObject<Env> {
 			}
 		}
 		if (request.method === "POST" && pathname === "/session/interrupt") {
-			return Response.json({ stopped: await this.interrupt() });
+			const body = (await request.json().catch(() => ({}))) as { threadId?: string };
+			return Response.json({ stopped: await this.interrupt(body.threadId) });
 		}
 		if (request.method === "GET" && pathname === "/session/status") {
-			return Response.json({ sessionID: this.sessionID, busy: this.turn !== undefined });
+			return Response.json({ guildId: this.guildId, busy: this.runs.size > 0 });
 		}
 		return Response.json({ error: "not found" }, { status: 404 });
 	}
@@ -201,21 +268,23 @@ export class ErynSession extends DurableObject<Env> {
 
 	private async prompt(request: PromptRequest): Promise<void> {
 		const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
-		const sessionID = await this.ensureSession(host, request.title ?? DEFAULT_THREAD_NAME);
+		const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
 		const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 
 		const stream = new DiscordStream(this.rest, request.threadId);
 		await stream.start();
 
-		const turn = createTurn();
-		this.turn = turn;
-		this.stream = stream;
+		const run = this.runs.get(request.threadId) ?? {};
+		const turn = createTurn(request.threadId);
+		run.turn = turn;
+		run.stream = stream;
+		this.runs.set(request.threadId, run);
 		const stopTyping = this.startTyping(request.threadId);
 
 		try {
 			await host.sessions.prompt({ sessionID, text: request.text });
 			const finished = await this.wait(turn);
-			if (!finished) await this.interrupt().catch(() => undefined);
+			if (!finished) await this.interrupt(request.threadId).catch(() => undefined);
 
 			const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
 			const body = final ?? renderTurn(turn);
@@ -226,16 +295,23 @@ export class ErynSession extends DurableObject<Env> {
 		} finally {
 			stopTyping();
 			turn.done = true;
-			if (this.turn === turn) this.turn = undefined;
-			if (this.stream === stream) this.stream = undefined;
+			const current = this.runs.get(request.threadId);
+			if (current && current.turn === turn) {
+				current.turn = undefined;
+				current.stream = undefined;
+				// Drop the thread entry so the object has nothing left to hold on to.
+				this.runs.delete(request.threadId);
+			}
 		}
 	}
 
-	/** Cancel the running turn, keeping the session for later messages. */
-	private async interrupt(): Promise<boolean> {
-		if (!this.turn || !this.host || !this.sessionID) return false;
+	/** Cancel a thread's running turn, keeping its session for later messages. */
+	private async interrupt(threadId: string | undefined): Promise<boolean> {
+		const run = threadId ? this.runs.get(threadId) : undefined;
+		const sessionID = threadId ? await this.sessionFor(threadId) : undefined;
+		if (!run?.turn || !this.host || !sessionID) return false;
 		const host = await this.host.promise;
-		await host.sessions.interrupt({ sessionID: this.sessionID });
+		await host.sessions.interrupt({ sessionID });
 		return true;
 	}
 
@@ -260,21 +336,34 @@ export class ErynSession extends DurableObject<Env> {
 
 	// --- Sessions ---------------------------------------------------------------
 
-	/** The session for this thread, created on first use and stored durably. */
-	private async ensureSession(host: OpenCodeWorkerd.Interface, title: string): Promise<string> {
-		this.sessionID ??= await this.ctx.storage.get<string>(SESSION_KEY);
-		if (this.sessionID) {
+	/** A thread's OpenCode session id, if it has been created. */
+	private async sessionFor(threadId: string): Promise<string | undefined> {
+		const cached = this.sessions.get(threadId);
+		if (cached) return cached;
+		const stored = await this.ctx.storage.get<string>(SESSION_PREFIX + threadId);
+		if (stored) this.sessions.set(threadId, stored);
+		return stored;
+	}
+
+	/** The session for a thread, created on first use and stored durably. */
+	private async ensureSession(
+		host: OpenCodeWorkerd.Interface,
+		threadId: string,
+		title: string,
+	): Promise<string> {
+		const existing = await this.sessionFor(threadId);
+		if (existing) {
 			try {
-				await host.sessions.get({ sessionID: this.sessionID });
-				return this.sessionID;
+				await host.sessions.get({ sessionID: existing });
+				return existing;
 			} catch {
-				this.sessionID = undefined;
+				this.sessions.delete(threadId);
 			}
 		}
 
 		const session = await host.sessions.create({ title, location: { directory: LOCATION } });
-		this.sessionID = session.id;
-		await this.ctx.storage.put(SESSION_KEY, session.id);
+		this.sessions.set(threadId, session.id);
+		await this.ctx.storage.put(SESSION_PREFIX + threadId, session.id);
 		return session.id;
 	}
 
@@ -328,13 +417,16 @@ export class ErynSession extends DurableObject<Env> {
 	}
 
 	private handleEvent(event: unknown): void {
-		const turn = this.turn;
-		if (!turn || turn.done) return;
-
 		const shape = event as { type?: unknown; created?: unknown; data?: unknown };
 		if (typeof shape.type !== "string" || !shape.data || typeof shape.data !== "object") return;
 		const data = shape.data as Record<string, unknown>;
-		if (data.sessionID !== this.sessionID) return;
+		const sessionID = data.sessionID;
+		if (typeof sessionID !== "string") return;
+		const threadId = this.sessions.get(sessionID);
+		if (!threadId) return;
+
+		const turn = this.runs.get(threadId)?.turn;
+		if (!turn || turn.done) return;
 		// Ignore events that predate this turn, such as the previous one going idle.
 		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
 
@@ -345,15 +437,15 @@ export class ErynSession extends DurableObject<Env> {
 			}
 			case "session.tool.called": {
 				// The agent is past pure reasoning; reflect that in the loading line.
-				this.stream?.setStatus("Working…");
+				this.runs.get(threadId)?.stream?.setStatus("Working…");
 				return;
 			}
 			case "session.text.delta": {
-				this.appendText(turn, data, typeof data.delta === "string" ? data.delta : "");
+				this.appendText(threadId, turn, data, typeof data.delta === "string" ? data.delta : "");
 				return;
 			}
 			case "session.text.ended": {
-				this.setPart(turn, data, typeof data.text === "string" ? data.text : "");
+				this.setPart(threadId, turn, data, typeof data.text === "string" ? data.text : "");
 				return;
 			}
 			case "session.execution.failed": {
@@ -380,23 +472,23 @@ export class ErynSession extends DurableObject<Env> {
 		}
 	}
 
-	private appendText(turn: Turn, data: Record<string, unknown>, delta: string): void {
+	private appendText(threadId: string, turn: Turn, data: Record<string, unknown>, delta: string): void {
 		const messageID = data.assistantMessageID;
 		const ordinal = data.ordinal;
 		if (typeof messageID !== "string" || typeof ordinal !== "number" || !delta) return;
 		const ordinals = turn.parts.get(messageID) ?? new Map<number, string>();
 		ordinals.set(ordinal, (ordinals.get(ordinal) ?? "") + delta);
 		turn.parts.set(messageID, ordinals);
-		this.stream?.push(renderTurn(turn));
+		this.runs.get(threadId)?.stream?.push(renderTurn(turn));
 	}
 
-	private setPart(turn: Turn, data: Record<string, unknown>, text: string): void {
+	private setPart(threadId: string, turn: Turn, data: Record<string, unknown>, text: string): void {
 		const messageID = data.assistantMessageID;
 		const ordinal = data.ordinal;
 		if (typeof messageID !== "string" || typeof ordinal !== "number") return;
 		const ordinals = turn.parts.get(messageID) ?? new Map<number, string>();
 		ordinals.set(ordinal, text);
 		turn.parts.set(messageID, ordinals);
-		this.stream?.push(renderTurn(turn));
+		this.runs.get(threadId)?.stream?.push(renderTurn(turn));
 	}
 }

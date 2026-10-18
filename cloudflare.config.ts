@@ -9,12 +9,24 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
-		triggers: [triggers.scheduled({ schedule: "* * * * *" })],
+		// A slow safety net for the gateway. The gateway's own Durable Object
+		// alarm is the real mechanism; running this every minute would pay for a
+		// wake-up a minute for no benefit.
+		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
 		// The Solid SPA is served as static assets; unknown paths fall back to
-		// index.html, while API and auth routes go straight to the Worker.
+		// index.html, while API, auth, and MCP routes go straight to the Worker.
 		assets: {
 			notFoundHandling: "single-page-application",
-			runWorkerFirst: ["/api/*", "/auth/*", "/github/*", "/health"],
+			runWorkerFirst: [
+				"/api/*",
+				"/auth/*",
+				"/github/*",
+				"/health",
+				// The MCP endpoint and its OAuth discovery/registration surface.
+				"/mcp",
+				"/.well-known/*",
+				"/oauth/*",
+			],
 		},
 		env: {
 			// Durable Objects: one singleton gateway, one session per thread, one registry.
@@ -38,8 +50,11 @@ export default defineConfig({
 
 			// Public origin used in messages linked from Discord.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
-			// Seconds between gateway keepalive alarms.
-			DISCORD_KEEPALIVE_SECONDS: bindings.text("60"),
+			// Where Eryn's own sessions reach the MCP. Defaults to PUBLIC_ORIGIN/mcp.
+			MCP_INTERNAL_URL: bindings.text(""),
+			// How often the gateway Durable Object's keepalive alarm fires. Only a
+			// safety net: the socket is persistent, so a long interval is cheaper.
+			DISCORD_KEEPALIVE_SECONDS: bindings.text("840"),
 			// Seconds a single agent turn may run before it is interrupted.
 			DISCORD_TURN_TIMEOUT_SECONDS: bindings.text("900"),
 		},

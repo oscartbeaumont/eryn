@@ -3,8 +3,8 @@
  *
  * The UI is a client-only Solid app (built by Vite into static assets and
  * served by Cloudflare); this Worker is the API and auth surface behind it:
- * Discord OAuth, the GitHub App install callback, and the JSON endpoints the
- * setup page calls. It never renders HTML.
+ * Discord OAuth, the GitHub App install callback, the MCP authorization
+ * server, and the JSON endpoints the console calls. It never renders HTML.
  */
 
 import { env } from "cloudflare:workers";
@@ -13,6 +13,29 @@ import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "e
 import { CLIENT_ID, DEFAULT_MODEL, isValidModel } from "./config";
 import { randomToken, sign, verify } from "./crypto";
 import { discordRest } from "./discord/api";
+import { mcpServer } from "./mcp/server";
+import {
+	AS_METADATA_PATH,
+	MCP_PATH,
+	OAuthError,
+	PRM_PATHS,
+	REGISTER_PATH,
+	TOKEN_PATH,
+	approveAuthorization,
+	authorizationServerMetadata,
+	bearerToken,
+	challenge,
+	denyAuthorization,
+	exchangeAuthorizationCode,
+	exchangeRefreshToken,
+	inspectAuthorization,
+	protectedResourceMetadata,
+	readAuthorizeParams,
+	registerClient,
+	resourceUrl,
+	verifyAccessToken,
+	type ConsentRequest,
+} from "./mcp/oauth";
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
 import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
 
@@ -238,6 +261,130 @@ function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
 	return json({ error: describe(error) }, 500);
 }
 
+// --- MCP ----------------------------------------------------------------------
+
+/** The origin a request arrived on. The MCP advertises itself per origin. */
+function originOf(request: HttpServerRequest.HttpServerRequest): string {
+	return new URL(request.originalUrl).origin;
+}
+
+/** JSON-shaped OAuth failures, which is what the register and token endpoints return. */
+function oauthFailure(error: unknown): HttpServerResponse.HttpServerResponse {
+	if (error instanceof OAuthError) return json({ error: error.code, error_description: error.message }, error.status);
+	return json({ error: "server_error", error_description: describe(error) }, 500);
+}
+
+function mcpSecret(): string | undefined {
+	return env.SESSION_SECRET?.trim() || undefined;
+}
+
+function mcpNotConfigured(): HttpServerResponse.HttpServerResponse {
+	return json({ error: "server_error", error_description: "The MCP is not configured on this deployment." }, 500);
+}
+
+/** RFC 7591 dynamic client registration. */
+async function handleRegister(text: string, secret: string): Promise<HttpServerResponse.HttpServerResponse> {
+	let body: unknown;
+	try {
+		body = JSON.parse(text);
+	} catch {
+		return json({ error: "invalid_client_metadata", error_description: "The body was not valid JSON." }, 400);
+	}
+	return json(await registerClient(body, secret), 201);
+}
+
+/** The token endpoint: authorization_code and refresh_token grants. */
+async function handleToken(
+	base: string,
+	text: string,
+	secret: string,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const form = new URLSearchParams(text);
+	const grant = form.get("grant_type");
+	if (grant === "authorization_code") return json(await exchangeAuthorizationCode(base, form, secret));
+	if (grant === "refresh_token") return json(await exchangeRefreshToken(base, form, secret));
+	throw new OAuthError("unsupported_grant_type", "Only authorization_code and refresh_token are supported.");
+}
+
+/** Describe an authorization request so the console can render consent. */
+async function handleAuthorizeDescribe(
+	request: HttpServerRequest.HttpServerRequest,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const secret = mcpSecret();
+	if (!secret) return mcpNotConfigured();
+	const base = originOf(request);
+	const params = readAuthorizeParams(new URL(request.originalUrl).searchParams);
+	try {
+		const consent = await inspectAuthorization(base, params, secret);
+		return json({
+			ok: true,
+			client: consent.client.name,
+			scope: consent.scope,
+			resource: consent.resource ?? resourceUrl(base),
+		});
+	} catch (error) {
+		if (error instanceof OAuthError) {
+			return json({ ok: false, error: error.code, description: error.message }, error.status);
+		}
+		throw error;
+	}
+}
+
+/** Approve or deny a consent request, returning the URL to hand back to the client. */
+async function handleAuthorizeDecide(
+	request: HttpServerRequest.HttpServerRequest,
+	text: string,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const secret = mcpSecret();
+	if (!secret) return mcpNotConfigured();
+	let body: { approve?: boolean; query?: string };
+	try {
+		body = JSON.parse(text) as typeof body;
+	} catch {
+		return json({ ok: false, error: "invalid_request", description: "The body was not valid JSON." }, 400);
+	}
+	const base = originOf(request);
+	const params = readAuthorizeParams(new URLSearchParams(body.query ?? ""));
+	let consent: ConsentRequest;
+	try {
+		consent = await inspectAuthorization(base, params, secret);
+	} catch (error) {
+		if (error instanceof OAuthError) {
+			return json({ ok: false, error: error.code, description: error.message }, error.status);
+		}
+		throw error;
+	}
+	if (body.approve === false) return json({ ok: true, redirect: denyAuthorization(consent) });
+	// Discord sign-in is optional: the MCP is useful on its own, and the only
+	// tool today is a random number generator. Once Discord/GitHub tools land,
+	// approval must require the matching account to be linked.
+	const session = await readSession(request);
+	const { redirect } = await approveAuthorization(consent, session?.uid ?? "anonymous", secret);
+	return json({ ok: true, redirect });
+}
+
+/**
+ * Reject unauthenticated `/mcp` requests before they reach the MCP layer, with
+ * the `WWW-Authenticate` challenge that starts OAuth discovery. Intercepting
+ * here keeps the MCP layer itself free of authentication concerns.
+ */
+async function guardMcp(request: Request): Promise<Response | undefined> {
+	const url = new URL(request.url);
+	if (url.pathname !== MCP_PATH) return undefined;
+	if (request.method === "OPTIONS") return undefined;
+	const secret = mcpSecret();
+	const token = bearerToken(request);
+	const grant = secret ? await verifyAccessToken(token, secret).catch(() => undefined) : undefined;
+	if (grant) return undefined;
+	return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }), {
+		status: 401,
+		headers: {
+			"content-type": "application/json",
+			"www-authenticate": challenge(url.origin, token ? "invalid_token" : undefined),
+		},
+	});
+}
+
 // --- Routes -------------------------------------------------------------------
 
 const Routes = Layer.mergeAll(
@@ -263,19 +410,69 @@ const Routes = Layer.mergeAll(
 	HttpRouter.add("GET", "/github/callback", (request) =>
 		Effect.promise(() => handleGitHubCallback(request).catch((error) => setupFailure(error))),
 	),
+
+	// --- MCP: discovery, registration, consent, and the endpoint itself -------
+	// Both protected-resource URLs are published because clients disagree on
+	// whether the resource path belongs in the well-known path.
+	HttpRouter.add("GET", PRM_PATHS[0], (request) =>
+		Effect.sync(() => json(protectedResourceMetadata(originOf(request)))),
+	),
+	HttpRouter.add("GET", PRM_PATHS[1], (request) =>
+		Effect.sync(() => json(protectedResourceMetadata(originOf(request)))),
+	),
+	HttpRouter.add("GET", AS_METADATA_PATH, (request) =>
+		Effect.sync(() => json(authorizationServerMetadata(originOf(request)))),
+	),
+	HttpRouter.add("POST", REGISTER_PATH, (request) =>
+		Effect.gen(function* () {
+			const secret = mcpSecret();
+			if (!secret) return mcpNotConfigured();
+			const text = yield* request.text;
+			return yield* Effect.promise(() => handleRegister(text, secret).catch((error) => oauthFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", TOKEN_PATH, (request) =>
+		Effect.gen(function* () {
+			const secret = mcpSecret();
+			if (!secret) return mcpNotConfigured();
+			const base = originOf(request);
+			const text = yield* request.text;
+			return yield* Effect.promise(() => handleToken(base, text, secret).catch((error) => oauthFailure(error)));
+		}),
+	),
+	HttpRouter.add("GET", "/api/mcp/authorize", (request) =>
+		Effect.promise(() => handleAuthorizeDescribe(request).catch((error) => oauthFailure(error))),
+	),
+	HttpRouter.add("POST", "/api/mcp/authorize", (request) =>
+		Effect.gen(function* () {
+			const text = yield* request.text;
+			return yield* Effect.promise(() => handleAuthorizeDecide(request, text).catch((error) => oauthFailure(error)));
+		}),
+	),
+	mcpServer,
 ).pipe(Layer.provide(HttpServer.layerServices));
 
 // The Workers scheduler is synchronous; see the `HttpRouter.toWebHandler` notes.
 const SyncScheduler = Layer.succeed(Scheduler.Scheduler, new Scheduler.MixedScheduler("sync"));
 const app = HttpRouter.toWebHandler(Layer.provideMerge(Routes, SyncScheduler));
 
-/** Make sure the singleton gateway object is running and connected. */
+/**
+ * Make sure the singleton gateway object is running and connected.
+ *
+ * This is the only thing that wakes the gateway, and the gateway wakes itself
+ * with an alarm; there is deliberately no per-minute cron, which would pay for
+ * a Durable Object request every minute of every day.
+ */
 async function wake(env: Env): Promise<void> {
 	await env.GATEWAY.get(env.GATEWAY.idFromName("gateway")).fetch("https://eryn.internal/wake");
 }
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// `/mcp` is authenticated before the MCP layer sees it, so the layer stays
+		// concerned only with the protocol.
+		const unauthorized = await guardMcp(request).catch(() => undefined);
+		if (unauthorized) return unauthorized;
 		const response = await app.handler(request);
 		if (request.method === "GET" && new URL(request.url).pathname === "/health") {
 			ctx.waitUntil(wake(env).catch(() => undefined));

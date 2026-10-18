@@ -3,13 +3,24 @@
  *
  * It holds exactly one Discord gateway connection (a singleton named
  * "gateway"), turns mentions into threads, remembers which threads it owns,
- * and forwards prompts to the per-thread session object. It deliberately
- * hosts no OpenCode work so a long agent turn can never stall the heartbeat.
+ * and forwards prompts to the per-guild session object. It deliberately hosts
+ * no OpenCode work, no database, and no timers beyond its own alarm, so it is
+ * the only part of Eryn that has to stay resident.
  *
- * Cloudflare only keeps an object in memory for 15 minutes per outbound
- * connection, so this object arms an alarm that resumes or recycles the
- * gateway before that cap is reached, and that also restarts it after a
- * deploy, eviction, or a missed connection.
+ * Sleep: a Discord bot has to be connected to hear a mention, and a Durable
+ * Object holding an outbound WebSocket cannot hibernate — Cloudflare only
+ * hibernates objects that accept *inbound* sockets. So this one object is
+ * billed for duration while the bot is online. Everything expensive — the
+ * OpenCode host, the SQLite database, the virtual filesystem, and every agent
+ * turn — lives in a per-guild session object that is created on the first
+ * prompt and becomes evictable as soon as the turn ends. Clearing
+ * `DISCORD_BOT_TOKEN` stops the gateway entirely (the object returns without
+ * connecting), which is the switch for "run nothing at all".
+ *
+ * The alarm is only a safety net: it re-arms itself, reconnects a dropped
+ * socket, and resumes the Discord session (with no missed messages) before
+ * Cloudflare's 15 minute cap on a connection. It is deliberately infrequent:
+ * see `DISCORD_KEEPALIVE_SECONDS`, and note there is no per-minute cron.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -31,7 +42,14 @@ const COMMANDS_KEY = "discord:commands";
 /** Bump when the registered command set changes so it is re-registered. */
 const COMMANDS_VERSION = "1";
 const MAX_THREAD_NAME = 100;
-const DEFAULT_KEEPALIVE_SECONDS = 60;
+/**
+ * How often the keepalive alarm fires. It exists to dodge Cloudflare's 15
+ * minute cap on an outbound connection and to recover a silently dropped
+ * socket, so a long interval is both safe and cheap: a session resume loses no
+ * messages. Every alarm is a billed Durable Object request, so this is
+ * deliberately not a minute.
+ */
+const DEFAULT_KEEPALIVE_SECONDS = 840;
 /** Text that interrupts the running turn when sent in an owned thread. */
 const STOP_TEXT = new Set(["stop", "cancel", "!stop", "!cancel", "/stop", "/cancel"]);
 
@@ -59,7 +77,7 @@ export class ErynGateway extends DurableObject<Env> {
 		super(state, env);
 		this.token = env.DISCORD_BOT_TOKEN?.trim() ?? "";
 		this.rest = discordRest(this.token);
-		this.keepAliveMs = intFromEnv(env.DISCORD_KEEPALIVE_SECONDS, DEFAULT_KEEPALIVE_SECONDS, 20, 3_600) * 1_000;
+		this.keepAliveMs = intFromEnv(env.DISCORD_KEEPALIVE_SECONDS, DEFAULT_KEEPALIVE_SECONDS, 60, 3_600) * 1_000;
 		this.gateway = new DiscordGateway(this.token, log, {
 			onMessage: (message) => {
 				void this.onMessage(message).catch((error) => log(`message handling failed: ${describeError(error)}`));
@@ -128,7 +146,8 @@ export class ErynGateway extends DurableObject<Env> {
 
 	private async onMessage(message: DiscordMessage): Promise<void> {
 		if (!this.botUserId) return;
-		if (message.guild_id === undefined) return;
+		const guildId = message.guild_id;
+		if (guildId === undefined) return;
 		if (message.webhook_id !== undefined) return;
 		if (message.author?.bot || message.author?.id === this.botUserId) return;
 
@@ -138,7 +157,7 @@ export class ErynGateway extends DurableObject<Env> {
 		// Discord also creates a managed role named after the bot, and its `@`
 		// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
 		const roleId = await this.botRoleMention(message);
-		const config = await this.guildConfig(message.guild_id);
+		const config = await this.guildConfig(guildId);
 
 		// A message inside a thread we own goes straight to that thread's session.
 		if (THREAD_TYPES.has(channel.type)) {
@@ -146,14 +165,14 @@ export class ErynGateway extends DurableObject<Env> {
 			const text = this.stripMention(message.content ?? "", roleId).trim();
 			if (!text) return;
 			if (STOP_TEXT.has(text.toLowerCase())) {
-				await this.stopThread(channel.id);
+				await this.stopThread(guildId, channel.id);
 				return;
 			}
 			if (!config) {
 				await this.requireSetup(channel.id);
 				return;
 			}
-			await this.forward(channel.id, this.threadName(text), text, message, config);
+			await this.forward(guildId, channel.id, this.threadName(text), text, message, config);
 			return;
 		}
 
@@ -190,13 +209,14 @@ export class ErynGateway extends DurableObject<Env> {
 			await this.requireSetup(threadId);
 			return;
 		}
-		await this.forward(threadId, name, text, message, config);
+		await this.forward(guildId, threadId, name, text, message, config);
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
 		if (interaction.type !== 2) return;
 		if (interaction.data?.name !== "stop") return;
 		const channelId = interaction.channel_id;
+		const guildId = interaction.guild_id;
 		if (!channelId) return;
 
 		if (!(await this.ownsThread(channelId))) {
@@ -208,7 +228,7 @@ export class ErynGateway extends DurableObject<Env> {
 		await this.rest
 			.interactionReply(interaction.id, interaction.token, "Stopping the current run…")
 			.catch(() => undefined);
-		void this.stopThread(channelId).catch((error) => log(`stop failed: ${describeError(error)}`));
+		void this.stopThread(guildId, channelId).catch((error) => log(`stop failed: ${describeError(error)}`));
 	}
 
 	// --- Session object plumbing ------------------------------------------------
@@ -229,8 +249,13 @@ export class ErynGateway extends DurableObject<Env> {
 			.catch(() => undefined);
 	}
 
-	/** Forward a prompt and wait for the turn, serialised per thread. */
+	/**
+	 * Forward a prompt to the guild's session object and wait for the turn,
+	 * serialised per thread so messages keep their order. The object is named
+	 * after the guild, which is the security boundary between servers.
+	 */
 	private forward(
+		guildId: string,
 		threadId: string,
 		title: string,
 		text: string,
@@ -238,11 +263,12 @@ export class ErynGateway extends DurableObject<Env> {
 		config: GuildKey,
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
-			const stub = this.env.SESSION.get(this.env.SESSION.idFromName(threadId));
+			const stub = this.sessionStub(guildId);
 			const response = await stub.fetch("https://eryn/session/prompt", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
+					guildId,
 					threadId,
 					title,
 					text,
@@ -256,9 +282,19 @@ export class ErynGateway extends DurableObject<Env> {
 		});
 	}
 
-	private async stopThread(threadId: string): Promise<void> {
-		const stub = this.env.SESSION.get(this.env.SESSION.idFromName(threadId));
-		await stub.fetch("https://eryn/session/interrupt", { method: "POST" });
+	private async stopThread(guildId: string | undefined, threadId: string): Promise<void> {
+		if (guildId === undefined) return;
+		const stub = this.sessionStub(guildId);
+		await stub.fetch("https://eryn/session/interrupt", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ threadId }),
+		});
+	}
+
+	/** The guild's one session object. */
+	private sessionStub(guildId: string): DurableObjectStub {
+		return this.env.SESSION.get(this.env.SESSION.idFromName(guildId));
 	}
 
 	private ownsThread(threadId: string): Promise<boolean> {
