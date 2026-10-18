@@ -26,7 +26,7 @@ export default function Landing() {
 			<main class="flex-1">
 				<section class="border-b border-line">
 					<div class="mx-auto w-[min(1080px,92vw)] py-20">
-						<Kicker>OpenCode · Cloudflare · Bring your own key</Kicker>
+						<Kicker>Your personal agent</Kicker>
 						<h1 class="mb-5 text-[clamp(56px,13vw,128px)] font-bold leading-[0.9] tracking-[-0.045em]">eryn</h1>
 						<p class="mb-5 max-w-[62ch] text-lg text-muted">
 							An OpenCode coding agent that lives in your Discord. Mention{" "}

@@ -121,7 +121,6 @@ export function Footer() {
 					<a href={SOURCE_URL} target="_blank" rel="noreferrer" class="hover:text-fg">
 						Source
 					</a>
-					<A href="/health">Health</A>
 				</span>
 			</div>
 		</footer>

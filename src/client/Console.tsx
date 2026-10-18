@@ -65,11 +65,11 @@ export default function Console() {
 									when={(loaded().guilds ?? []).length > 0}
 									fallback={
 										<p class="max-w-[62ch] text-muted">
-											Add Eryn to a server below, then come back to connect its OpenCode Go key.
+											Add Eryn to a server to get started, then connect its OpenCode Go key.
 										</p>
 									}
 								>
-									<div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
+									<div class="flex max-w-[820px] flex-col gap-4">
 										<For each={loaded().guilds ?? []}>
 											{(guild) => (
 												<GuildCard
@@ -138,33 +138,35 @@ function GuildAvatar(props: { guild: { id: string; name: string; icon: string | 
 	);
 }
 
-/** Servers Eryn is not in yet: the only action is to add the bot. */
+/** Servers Eryn is not in yet, revealed on demand so the console stays clean. */
 function AddServers(props: { guilds: AvailableGuild[] }) {
+	const [open, setOpen] = createSignal(false);
 	return (
 		<Show when={props.guilds.length > 0}>
-			<div class="mt-14">
-				<Kicker>Add a server</Kicker>
-				<p class="mb-4 max-w-[62ch] text-muted">
-					Install Eryn to a server, then it appears above ready to configure.
-				</p>
-				<div class="divide-y divide-line border border-line">
-					<For each={props.guilds}>
-						{(guild) => (
-							<div class="flex items-center gap-3.5 px-5 py-4">
-								<GuildAvatar guild={guild} />
-								<span class="font-semibold">{guild.name}</span>
-								<a
-									href={installUrl(guild.id)}
-									target="_blank"
-									rel="noreferrer"
-									class={`${buttonClass.ghost} ml-auto`}
-								>
-									Add
-								</a>
-							</div>
-						)}
-					</For>
-				</div>
+			<div class="mt-8 max-w-[820px]">
+				<button type="button" class={buttonClass.ghost} onClick={() => setOpen(!open())}>
+					{open() ? "Close" : `Add a server (${props.guilds.length})`}
+				</button>
+				<Show when={open()}>
+					<div class="mt-4 divide-y divide-line border border-line">
+						<For each={props.guilds}>
+							{(guild) => (
+								<div class="flex items-center gap-3.5 px-5 py-4">
+									<GuildAvatar guild={guild} />
+									<span class="font-semibold">{guild.name}</span>
+									<a
+										href={installUrl(guild.id)}
+										target="_blank"
+										rel="noreferrer"
+										class={`${buttonClass.ghost} ml-auto`}
+									>
+										Add
+									</a>
+								</div>
+							)}
+						</For>
+					</div>
+				</Show>
 			</div>
 		</Show>
 	);
@@ -215,12 +217,7 @@ function GuildCard(props: {
 		<div class="border border-line bg-surface p-6">
 			<div class="mb-5 flex items-center gap-3.5">
 				<GuildAvatar guild={props.guild} />
-				<div>
-					<div class="font-semibold">{props.guild.name}</div>
-					<div class="mt-1 font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
-						{props.guild.configured ? props.guild.model : "Not configured"}
-					</div>
-				</div>
+				<div class="font-semibold">{props.guild.name}</div>
 				<Chip on={props.guild.configured}>{props.guild.configured ? "Configured" : "No key"}</Chip>
 			</div>
 
