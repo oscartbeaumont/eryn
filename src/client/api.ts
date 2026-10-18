@@ -24,6 +24,11 @@ export interface Account {
 	name: string;
 }
 
+export interface SessionState {
+	signedIn: boolean;
+	account?: Account;
+}
+
 export interface SetupData {
 	signedIn: boolean;
 	account?: Account;
@@ -55,6 +60,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchSetup(): Promise<SetupData> {
 	return request<SetupData>("/api/setup");
+}
+
+export function fetchSession(): Promise<SessionState> {
+	return request<SessionState>("/api/session");
 }
 
 export function saveGuild(input: SaveGuildInput): Promise<ApiResult> {

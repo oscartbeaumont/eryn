@@ -6,7 +6,7 @@ OpenCode server, and streams the reply as it is written. Reply in the thread and
 the agent keeps going in the same session.
 
 **Every server brings its own OpenCode Go key.** A server admin signs in with
-Discord at `https://eryn.otbeaumont.me/setup`, picks a server they administer,
+Discord at `https://eryn.otbeaumont.me/console`, picks a server they administer,
 and pastes their own key. Inference is billed to them — nothing runs on the
 operator's account. Keys are encrypted at rest and used only for that server.
 
@@ -19,7 +19,7 @@ registry Durable Object holds each guild's encrypted credential.
 ```
                      ┌──────────────────────────────┐
   browser ── OAuth ──▶ Worker (Effect HTTP)          │
-                     │  /setup  /auth/callback       │
+                     │  /console  /auth/callback       │
                      └──────────────┬───────────────┘
                                     │ encrypted key
                                     ▼
@@ -108,7 +108,7 @@ The GitHub tools authenticate as a GitHub App, so no personal token is stored.
    Read-only**, **Pull requests: Read and write**, **Metadata: Read-only**.
 3. Generate a private key. Put the App id, the whole PEM, and the App's URL slug
    into `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_SLUG`.
-4. In `/setup`, an admin clicks **Install GitHub App** for their server and sets
+4. In `/console`, an admin clicks **Install GitHub App** for their server and sets
    the `owner/repo` to work in.
 
 Without these, Eryn still works; the GitHub tools are simply absent.
@@ -130,7 +130,7 @@ redirect URI, so sign-in only works against the deployed origin.
 ## Connecting a server (what an admin does)
 
 1. Install Eryn from the landing page's **Install** button.
-2. Open `https://eryn.otbeaumont.me/setup` and sign in with Discord.
+2. Open `https://eryn.otbeaumont.me/console` and sign in with Discord.
 3. Pick the server, paste an OpenCode Go API key, choose a model, and save.
 
 The setup page lists only servers the user can manage

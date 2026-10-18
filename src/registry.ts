@@ -6,7 +6,7 @@
  * - Each guild's OpenCode Go credential, encrypted (AES-GCM under the worker's
  *   `ENCRYPTION_KEY`) so it is never readable from storage alone. Only the
  *   gateway asks for the plaintext, over the internal Durable Object binding.
- * - A short-lived cache of each signed-in user's guild list, so `/setup` does
+ * - A short-lived cache of each signed-in user's guild list, so `/console` does
  *   not call Discord on every page load. Discord rate-limits those bearer-token
  *   routes hard.
  *

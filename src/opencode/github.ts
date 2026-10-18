@@ -32,7 +32,7 @@ export function githubPlugin(options: { github: GitHub; repo?: string; store: Fi
 
 	const resolveRepo = (input: { repo?: string }): string => {
 		const repo = input.repo?.trim() || options.repo;
-		if (!repo) throw new Error("No repository configured; set one in /setup or pass `repo`");
+		if (!repo) throw new Error("No repository configured; set one in /console or pass `repo`");
 		return repo;
 	};
 

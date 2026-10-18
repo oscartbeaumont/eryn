@@ -27,7 +27,7 @@ function redirectNotice(): NoticeState | undefined {
 	return undefined;
 }
 
-export default function Setup() {
+export default function Console() {
 	const [data, setData] = createSignal<SetupData>();
 	const [notice, setNotice] = createSignal<NoticeState | undefined>(redirectNotice());
 
@@ -53,9 +53,9 @@ export default function Setup() {
 					<Show when={data()} fallback={<p class="font-mono text-sm text-faint">Loading…</p>}>
 						{(loaded) => (
 							<Show when={loaded().signedIn} fallback={<SignIn />}>
-								<Kicker>Setup</Kicker>
+								<Kicker>Console</Kicker>
 								<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">
-									Bring your own inference key
+									Your servers
 								</h1>
 								<datalist id="models">
 									<For each={MODELS}>{(model) => <option value={model} />}</For>
@@ -99,7 +99,7 @@ export default function Setup() {
 function SignIn() {
 	return (
 		<>
-			<Kicker>Setup</Kicker>
+			<Kicker>Console</Kicker>
 			<h1 class="mb-4 text-[clamp(30px,5vw,44px)] font-bold leading-[1.05] tracking-[-0.03em]">Connect a server</h1>
 			<p class="mb-8 max-w-[62ch] text-muted">
 				Sign in with Discord to see the servers you administer, then add an OpenCode Go key to run inference on your own

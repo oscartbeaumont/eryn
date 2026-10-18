@@ -67,7 +67,7 @@ export async function getUserGuilds(env: Env, userId: string): Promise<DiscordGu
 	return Array.isArray(body.guilds) ? (body.guilds as DiscordGuild[]) : undefined;
 }
 
-/** Cache a user's guild list so `/setup` does not call Discord on every load. */
+/** Cache a user's guild list so `/console` does not call Discord on every load. */
 export async function putUserGuilds(env: Env, userId: string, guilds: DiscordGuild[]): Promise<void> {
 	await stub(env).fetch(`https://eryn/registry/user/${userId}/guilds`, {
 		method: "PUT",

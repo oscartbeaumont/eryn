@@ -1,5 +1,5 @@
 import { For } from "solid-js";
-import { A, buttonClass, Footer, Header, Kicker } from "./ui";
+import { Footer, Header, Kicker, SessionButton } from "./ui";
 
 const features = [
 	{
@@ -38,9 +38,7 @@ export default function Landing() {
 							billed to the operator and no key is shared.
 						</p>
 						<div class="flex flex-wrap gap-3">
-							<A href="/setup" class={buttonClass.primary}>
-								Set up a server
-							</A>
+							<SessionButton />
 						</div>
 					</div>
 				</section>

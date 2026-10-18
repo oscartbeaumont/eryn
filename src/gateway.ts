@@ -224,7 +224,7 @@ export class ErynGateway extends DurableObject<Env> {
 		await this.rest
 			.sendMessage(
 				threadId,
-				`This server has not connected an OpenCode Go key yet, so I cannot run inference here. A server admin can add one at ${origin}/setup`,
+				`This server has not connected an OpenCode Go key yet, so I cannot run inference here. A server admin can add one at ${origin}/console`,
 			)
 			.catch(() => undefined);
 	}

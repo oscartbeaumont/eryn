@@ -71,7 +71,7 @@ async function manageableGuilds(session: Session): Promise<DiscordGuild[]> {
 // --- Auth ---------------------------------------------------------------------
 
 function authError(origin: string, message: string): HttpServerResponse.HttpServerResponse {
-	return HttpServerResponse.redirect(`${origin}/setup?error=${encodeURIComponent(message)}`);
+	return HttpServerResponse.redirect(`${origin}/console?error=${encodeURIComponent(message)}`);
 }
 
 async function handleDiscordAuth(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
@@ -106,7 +106,7 @@ async function handleDiscordCallback(request: HttpServerRequest.HttpServerReques
 		exp: Date.now() + SESSION_TTL_MS,
 	};
 	const response = HttpServerResponse.setCookieUnsafe(
-		HttpServerResponse.redirect("/setup"),
+		HttpServerResponse.redirect("/console"),
 		SESSION_COOKIE,
 		await sign(session, env.SESSION_SECRET),
 		{ ...cookieOptions(origin), expires: new Date(session.exp) },
@@ -128,7 +128,7 @@ async function handleGitHubCallback(request: HttpServerRequest.HttpServerRequest
 		return authError(url.origin, "That GitHub installation could not be verified.");
 	}
 	await setGuildInstallation(env, state.guild, installationId);
-	return HttpServerResponse.redirect(`/setup?ok=${encodeURIComponent("GitHub connected.")}`);
+	return HttpServerResponse.redirect(`/console?ok=${encodeURIComponent("GitHub connected.")}`);
 }
 
 // --- API ----------------------------------------------------------------------

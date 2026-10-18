@@ -2,6 +2,7 @@
 
 import { createSignal, onCleanup, Show } from "solid-js";
 import type { Account } from "./api";
+import { session } from "./session";
 
 export const SOURCE_URL = "https://github.com/oscartbeaumont/eryn";
 export const SITE_URL = "https://otbeaumont.me";
@@ -48,6 +49,36 @@ export const buttonClass = {
 	small: `${button} px-3.5 py-2.5 border-line-strong text-fg hover:border-fg`,
 };
 
+/**
+ * The primary hero action: "Sign in" when signed out, "Open console" when
+ * signed in. It renders a neutral, equally-sized placeholder until the shared
+ * session resolves, so the label never flips on load.
+ */
+export function SessionButton() {
+	return (
+		<Show
+			when={session()}
+			fallback={
+				<span class={`${buttonClass.primary} min-w-[15rem] cursor-default opacity-50`} aria-busy="true">
+					Loading…
+				</span>
+			}
+		>
+			{(state) =>
+				state().signedIn ? (
+					<A href="/console" class={`${buttonClass.primary} min-w-[15rem]`}>
+						Open console
+					</A>
+				) : (
+					<A href="/auth/discord" external class={`${buttonClass.primary} min-w-[15rem]`}>
+						Sign in with Discord
+					</A>
+				)
+			}
+		</Show>
+	);
+}
+
 export function Header(props: { account?: Account }) {
 	return (
 		<header class="border-b border-line">
@@ -75,15 +106,17 @@ export function Footer() {
 	return (
 		<footer class="border-t border-line">
 			<div class="mx-auto flex w-[min(1080px,92vw)] flex-wrap justify-between gap-2 py-7 font-mono text-[11px] uppercase tracking-[0.08em] text-faint">
-				<a
-					href={SITE_URL}
-					target="_blank"
-					rel="noreferrer"
-					class="inline-flex items-center gap-2 border-b border-line-strong pb-0.5 font-semibold text-fg transition-colors hover:border-fg"
-				>
-					Created by Oscar Beaumont
-					<span class="text-faint transition-transform hover:text-fg">↗</span>
-				</a>
+				<span>
+					Created by{" "}
+					<a
+						href={SITE_URL}
+						target="_blank"
+						rel="noreferrer"
+						class="border-b border-line-strong pb-0.5 font-semibold text-fg transition-colors hover:border-fg"
+					>
+						Oscar Beaumont <span class="text-faint">↗</span>
+					</a>
+				</span>
 				<span class="flex gap-4">
 					<a href={SOURCE_URL} target="_blank" rel="noreferrer" class="hover:text-fg">
 						Source
