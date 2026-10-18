@@ -144,29 +144,42 @@ function AddServers(props: { guilds: AvailableGuild[] }) {
 	return (
 		<Show when={props.guilds.length > 0}>
 			<div class="mt-8 max-w-[820px]">
-				<button type="button" class={buttonClass.ghost} onClick={() => setOpen(!open())}>
+				<button
+					type="button"
+					class={buttonClass.ghost}
+					onClick={() => setOpen(!open())}
+					aria-expanded={open()}
+				>
 					{open() ? "Close" : `Add a server (${props.guilds.length})`}
 				</button>
-				<Show when={open()}>
-					<div class="mt-4 divide-y divide-line border border-line">
-						<For each={props.guilds}>
-							{(guild) => (
-								<div class="flex items-center gap-3.5 px-5 py-4">
-									<GuildAvatar guild={guild} />
-									<span class="font-semibold">{guild.name}</span>
-									<a
-										href={installUrl(guild.id)}
-										target="_blank"
-										rel="noreferrer"
-										class={`${buttonClass.ghost} ml-auto`}
-									>
-										Add
-									</a>
-								</div>
-							)}
-						</For>
+				{/* A 0fr→1fr grid row animates height without measuring anything. */}
+				<div
+					class="grid transition-[grid-template-rows] duration-300 ease-out"
+					style={{ "grid-template-rows": open() ? "1fr" : "0fr" }}
+				>
+					<div class="overflow-hidden" inert={!open()}>
+						<div class={`pt-4 transition-opacity duration-300 ${open() ? "opacity-100" : "opacity-0"}`}>
+							<div class="divide-y divide-line border border-line">
+								<For each={props.guilds}>
+									{(guild) => (
+										<div class="flex items-center gap-3.5 px-5 py-4">
+											<GuildAvatar guild={guild} />
+											<span class="font-semibold">{guild.name}</span>
+											<a
+												href={installUrl(guild.id)}
+												target="_blank"
+												rel="noreferrer"
+												class={`${buttonClass.ghost} ml-auto`}
+											>
+												Add
+											</a>
+										</div>
+									)}
+								</For>
+							</div>
+						</div>
 					</div>
-				</Show>
+				</div>
 			</div>
 		</Show>
 	);
