@@ -14,6 +14,3 @@ ENCRYPTION_KEY=
 # Random secret used to sign the OAuth state and session cookies.
 #   openssl rand -hex 32
 SESSION_SECRET=
-
-# Optional: register /stop in one guild (instant) instead of globally (up to ~1h).
-DISCORD_GUILD_ID=

@@ -106,14 +106,11 @@ export class ErynGateway extends DurableObject<Env> {
 
 	private async registerCommands(applicationId: string): Promise<void> {
 		if ((await this.ctx.storage.get<string>(COMMANDS_KEY)) === COMMANDS_VERSION) return;
-		const guild = this.env.DISCORD_GUILD_ID?.trim();
-		await this.rest.overwriteCommands(
-			applicationId,
-			[{ name: "stop", description: "Stop the Eryn agent running in this thread", type: 1 }],
-			guild || undefined,
-		);
+		await this.rest.overwriteCommands(applicationId, [
+			{ name: "stop", description: "Stop the Eryn agent running in this thread", type: 1 },
+		]);
 		await this.ctx.storage.put(COMMANDS_KEY, COMMANDS_VERSION);
-		log(guild ? `registered commands in guild ${guild}` : "registered global commands");
+		log("registered global commands");
 	}
 
 	private async keepAlive(): Promise<void> {
@@ -177,6 +174,14 @@ export class ErynGateway extends DurableObject<Env> {
 		}
 
 		await this.ctx.storage.put(THREAD_PREFIX + threadId, true);
+		// Add the requester to the thread, silently, so a completion ping lands
+		// for someone who has already navigated away.
+		const authorId = message.author?.id;
+		if (authorId) {
+			await this.rest
+				.addThreadMember(threadId, authorId)
+				.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
+		}
 		if (!text) {
 			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
 			return;
@@ -242,6 +247,7 @@ export class ErynGateway extends DurableObject<Env> {
 					title,
 					text,
 					author: message.author?.username ?? "someone",
+					authorId: message.author?.id,
 					apiKey: config.apiKey,
 					model: config.model,
 				}),

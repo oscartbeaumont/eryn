@@ -1,9 +1,10 @@
 /**
  * Server-rendered HTML for the public site.
  *
- * Everything is a single self-contained document built from template strings:
- * no client framework, no external requests. Colours are custom properties that
- * follow the visitor's light or dark preference.
+ * A single self-contained document per page: no client framework, no external
+ * requests. The look is deliberately blocky and terminal-adjacent — sharp
+ * corners, hairline borders, a monospace utility face, and a warm near-black
+ * palette — so the marketing pages and the Discord agent feel like one product.
  */
 
 import { CLIENT_ID, DEFAULT_MODEL } from "./config";
@@ -26,6 +27,8 @@ const SUGGESTED_MODELS = [
 	"opencode-go/gpt-6-luna",
 	"opencode-go/claude-haiku-5-5",
 ];
+
+const SOURCE_URL = "https://github.com/oscartbeaumont/eryn";
 
 /** The OAuth2 install link for the bot, optionally pinned to one guild. */
 export function installUrl(guildId?: string): string {
@@ -51,81 +54,164 @@ function escape(value: string): string {
 }
 
 const STYLE = `
+	*, *::before, *::after { box-sizing: border-box; border-radius: 0; }
 	:root {
-		--bg: #0b0d12; --bg-2: #11141c; --panel: rgba(255,255,255,0.04);
-		--border: rgba(255,255,255,0.10); --fg: #eef1f7; --muted: #9aa3b5;
-		--accent: #8b7cff; --accent-2: #38d6c4; --danger: #ff6b81; --ok: #38d6c4;
-		--code-bg: rgba(0,0,0,0.35); --shadow: 0 30px 80px -40px rgba(139,124,255,0.55);
+		color-scheme: dark;
+		--bg: #121010;
+		--bg-2: #171514;
+		--panel: #1b1918;
+		--panel-2: #211e1d;
+		--line: #2e2a29;
+		--line-2: #3d3837;
+		--fg: #f1ecec;
+		--muted: #a49d9c;
+		--faint: #6d6664;
+		--invert: #f1ecec;
+		--invert-fg: #14110f;
+		--ok: #8fd6b0;
+		--bad: #e78a8a;
+		--warn: #e8c07d;
+		--mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+		--sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 	}
-	@media (prefers-color-scheme: light) {
-		:root {
-			--bg: #f7f8fc; --bg-2: #ffffff; --panel: rgba(17,20,28,0.02);
-			--border: rgba(17,20,28,0.10); --fg: #171a22; --muted: #5b6376;
-			--accent: #5a49e8; --accent-2: #0f9c8c; --danger: #d23b52; --ok: #0f9c8c;
-			--code-bg: rgba(17,20,28,0.05); --shadow: 0 30px 80px -50px rgba(90,73,232,0.45);
-		}
-	}
-	* { box-sizing: border-box; }
-	html, body { height: 100%; }
+	html, body { margin: 0; }
 	body {
-		margin: 0;
-		background:
-			radial-gradient(1200px 600px at 15% -10%, color-mix(in oklab, var(--accent) 22%, transparent), transparent 60%),
-			radial-gradient(900px 500px at 110% 10%, color-mix(in oklab, var(--accent-2) 16%, transparent), transparent 55%),
-			linear-gradient(180deg, var(--bg), var(--bg-2));
+		background: var(--bg);
 		color: var(--fg);
-		font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+		font: 16px/1.6 var(--sans);
 		-webkit-font-smoothing: antialiased;
-		display: flex; min-height: 100%; flex-direction: column;
+		display: flex;
+		min-height: 100vh;
+		flex-direction: column;
 	}
-	main { flex: 1; width: min(760px, 92vw); margin: 0 auto; padding: clamp(40px, 9vh, 110px) 0 64px; }
-	.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 34px; }
-	.brand { font-weight: 700; letter-spacing: -0.02em; font-size: 20px; text-decoration: none; color: var(--fg); }
-	.who { color: var(--muted); font-size: 14px; }
-	.who a { color: var(--accent-2); text-decoration: none; margin-left: 12px; }
-	.badge { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted);
-		border: 1px solid var(--border); background: var(--panel); padding: 6px 12px; border-radius: 999px; }
-	.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 12px var(--accent-2); }
-	h1 { font-size: clamp(40px, 9vw, 84px); line-height: 0.98; margin: 22px 0 8px; letter-spacing: -0.04em;
-		background: linear-gradient(100deg, var(--fg) 20%, var(--accent) 60%, var(--accent-2));
-		-webkit-background-clip: text; background-clip: text; color: transparent; }
-	h2 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.02em; }
-	h3 { font-size: 18px; margin: 0; }
-	.tagline { font-size: clamp(18px, 2.6vw, 24px); margin: 0 0 18px; }
-	.lede { color: var(--muted); max-width: 60ch; margin: 0 0 28px; }
+	a { color: inherit; }
+	.wrap { width: min(1080px, 92vw); margin: 0 auto; }
+
+	header.bar { border-bottom: 1px solid var(--line); }
+	header.bar .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+	.brand {
+		font: 700 20px/1 var(--mono);
+		letter-spacing: -0.02em;
+		text-decoration: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+	}
+	.brand::before { content: ""; width: 12px; height: 12px; background: var(--invert); display: inline-block; }
+	.bar nav { display: flex; align-items: center; gap: 20px; }
+	.navlink {
+		font: 500 11px/1 var(--mono);
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		text-decoration: none;
+		color: var(--muted);
+	}
+	.navlink:hover { color: var(--fg); }
+	.who { font: 500 11px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+
+	main { flex: 1; }
+	.kicker { font: 500 11px/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); margin: 0 0 18px; }
+	section { padding: 72px 0; border-bottom: 1px solid var(--line); }
+	section.tight { padding: 40px 0; }
+	section.last { border-bottom: 0; }
+	h1.hero { font-size: clamp(56px, 13vw, 128px); line-height: 0.9; letter-spacing: -0.045em; margin: 0 0 20px; font-weight: 700; }
+	h1.title { font-size: clamp(30px, 5vw, 44px); line-height: 1.05; letter-spacing: -0.03em; margin: 0 0 14px; font-weight: 700; }
+	h2.block { font: 600 15px/1.4 var(--mono); letter-spacing: 0.02em; margin: 0 0 6px; }
+	.lede { color: var(--muted); max-width: 62ch; margin: 0 0 30px; }
 	.lede strong { color: var(--fg); font-weight: 600; }
-	pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; overflow-x: auto; margin: 0 0 28px; }
-	code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; }
-	.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 44px; }
-	.button { text-decoration: none; font-weight: 600; font-size: 15px; padding: 11px 20px; border-radius: 12px;
-		border: 1px solid var(--border); transition: transform .12s ease, background .12s ease; cursor: pointer; font-family: inherit; }
-	.button:hover { transform: translateY(-1px); }
-	.button.primary { background: linear-gradient(100deg, var(--accent), var(--accent-2)); color: #0b0d12; border-color: transparent; box-shadow: var(--shadow); }
-	.button.ghost { color: var(--fg); background: var(--panel); }
-	.button.danger { color: var(--danger); background: transparent; }
-	ul.features { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
-	ul.features li { display: grid; grid-template-columns: 26px 1fr; gap: 12px; color: var(--muted); }
-	ul.features b { color: var(--fg); font-weight: 600; }
-	.check { color: var(--accent-2); font-weight: 700; }
-	.notice { border-radius: 12px; padding: 12px 16px; margin-bottom: 24px; border: 1px solid var(--border); background: var(--panel); }
-	.notice.ok { border-color: color-mix(in oklab, var(--ok) 50%, var(--border)); }
-	.notice.error { border-color: color-mix(in oklab, var(--danger) 55%, var(--border)); color: var(--danger); }
-	.card { border: 1px solid var(--border); background: var(--panel); border-radius: 16px; padding: 20px; margin-bottom: 16px; }
-	.card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
-	.avatar { width: 40px; height: 40px; border-radius: 12px; object-fit: cover; background: var(--code-bg); display: grid; place-items: center; font-weight: 700; }
-	.chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-	.chip.on { color: #0b0d12; background: var(--accent-2); border-color: transparent; }
-	.field { display: block; margin-bottom: 12px; }
-	.field span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-	input[type=text], input[type=password] { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border);
-		background: var(--bg); color: var(--fg); font: inherit; }
-	input:focus { outline: 2px solid color-mix(in oklab, var(--accent) 60%, transparent); outline-offset: 1px; }
+	.lede a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
+	code { font-family: var(--mono); font-size: 0.92em; background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; }
+
+	.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+	.btn {
+		appearance: none;
+		font: 600 11px/1 var(--mono);
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		text-decoration: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 14px 20px;
+		border: 1px solid var(--line-2);
+		background: transparent;
+		color: var(--fg);
+		cursor: pointer;
+		transition: background .12s ease, color .12s ease, border-color .12s ease;
+	}
+	.btn:hover { border-color: var(--fg); }
+	.btn.primary { background: var(--invert); color: var(--invert-fg); border-color: var(--invert); }
+	.btn.primary:hover { background: #fff; border-color: #fff; }
+	.btn.small { padding: 10px 14px; }
+	.btn.danger { color: var(--bad); border-color: color-mix(in oklab, var(--bad) 55%, var(--line)); }
+	.btn.danger:hover { border-color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); }
+
+	.term { border: 1px solid var(--line); background: var(--bg-2); font-family: var(--mono); }
+	.term-head { display: flex; justify-content: space-between; gap: 16px; padding: 11px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+	.term-body { padding: 18px 16px; display: grid; gap: 12px; font-size: 14px; }
+	.term-body p { margin: 0; }
+	.term .tag { display: inline-block; min-width: 46px; color: var(--faint); }
+	.dim { color: var(--faint); }
+
+	.grid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); }
+	.grid > * { padding: 26px 24px; border-right: 1px solid var(--line); }
+	.grid > *:last-child { border-right: 0; }
+	.grid .num { font: 500 11px/1 var(--mono); letter-spacing: 0.14em; color: var(--faint); display: block; margin-bottom: 16px; }
+	.grid p { color: var(--muted); margin: 8px 0 0; font-size: 14px; }
+
+	.cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+	.card { border: 1px solid var(--line); background: var(--panel); padding: 22px; }
+	.card-top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+	.avatar { width: 44px; height: 44px; flex: none; border: 1px solid var(--line-2); background: var(--panel-2); display: grid; place-items: center; font: 600 18px/1 var(--mono); object-fit: cover; }
+	.guild-name { font-weight: 600; }
+	.meta { font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-top: 5px; }
+	.chip { font: 500 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; padding: 5px 9px; border: 1px solid var(--line-2); color: var(--muted); margin-left: auto; white-space: nowrap; }
+	.chip.on { color: var(--invert-fg); background: var(--ok); border-color: var(--ok); }
+	.field { display: block; margin-bottom: 14px; }
+	.field > span { display: block; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-bottom: 8px; }
+	input[type=text], input[type=password] {
+		width: 100%;
+		padding: 12px 13px;
+		border: 1px solid var(--line-2);
+		background: var(--bg);
+		color: var(--fg);
+		font: 14px/1.4 var(--mono);
+	}
+	input:focus { outline: none; border-color: var(--fg); }
 	.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-	.meta { color: var(--muted); font-size: 13px; }
-	.empty { color: var(--muted); }
-	footer { width: min(760px, 92vw); margin: 0 auto; padding: 24px 0 40px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); }
-	footer a { color: var(--muted); }
+
+	.notice { border: 1px solid var(--line-2); padding: 14px 16px; margin-bottom: 28px; font-size: 14px; }
+	.notice.ok { border-color: color-mix(in oklab, var(--ok) 55%, var(--line)); color: var(--ok); }
+	.notice.error { border-color: color-mix(in oklab, var(--bad) 55%, var(--line)); color: var(--bad); }
+	.empty { color: var(--faint); font-family: var(--mono); font-size: 13px; }
+
+	footer.foot { border-top: 1px solid var(--line); }
+	footer.foot .wrap { padding: 26px 0 40px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; font: 500 11px/1.6 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+	footer.foot a { color: var(--faint); text-decoration: none; }
+	footer.foot a:hover { color: var(--fg); }
+
+	@media (max-width: 780px) {
+		.grid { grid-template-columns: 1fr; }
+		.grid > * { border-right: 0; border-bottom: 1px solid var(--line); }
+		.grid > *:last-child { border-bottom: 0; }
+		section { padding: 52px 0; }
+	}
 `;
+
+function footer(): string {
+	return `<footer class="foot"><div class="wrap">
+	<span>eryn · OpenCode on Cloudflare Workers</span>
+	<span><a href="${SOURCE_URL}">Source</a> · <a href="/setup">Setup</a> · <a href="/health">Health</a></span>
+</div></footer>`;
+}
+
+function header(account?: { name: string }): string {
+	const right = account
+		? `<span class="who">${escape(account.name)}</span><a class="navlink" href="/auth/logout">Sign out</a>`
+		: `<a class="navlink" href="${SOURCE_URL}">GitHub</a>`;
+	return `<header class="bar"><div class="wrap"><a class="brand" href="/">eryn</a><nav>${right}</nav></div></header>`;
+}
 
 function document(title: string, body: string): string {
 	return `<!doctype html>
@@ -134,66 +220,84 @@ function document(title: string, body: string): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escape(title)}</title>
-<meta name="color-scheme" content="dark light" />
+<meta name="color-scheme" content="dark" />
 <meta name="description" content="Eryn is an OpenCode coding agent that lives in your Discord. Bring your own OpenCode Go key; inference is billed to you." />
 <style>${STYLE}</style>
 </head>
 <body>
 ${body}
-<footer>Eryn runs on Cloudflare Workers with an embedded OpenCode server. <a href="https://github.com/oscartbeaumont/eryn">Source</a> · <a href="/health">Health</a></footer>
+${footer()}
 </body>
 </html>`;
 }
 
+function noticeBanner(notice?: { kind: "ok" | "error"; message: string }): string {
+	if (!notice) return "";
+	return `<div class="notice ${notice.kind}">${escape(notice.message)}</div>`;
+}
+
+// --- Landing ------------------------------------------------------------------
+
 export function landingPage(): string {
 	return document(
 		"eryn — an OpenCode agent for Discord",
-		`<main>
-	<span class="badge"><span class="dot"></span> OpenCode · Cloudflare Workers · bring your own key</span>
-	<h1>eryn</h1>
-	<p class="tagline">An OpenCode coding agent that lives in your Discord.</p>
-	<p class="lede">Mention <strong>@eryn</strong> in a server and it opens a thread for the request, runs it through an embedded OpenCode server, and streams the answer as it is written. Reply in the thread and it keeps going in the same session.</p>
-	<p class="lede">Each server runs on <strong>its own OpenCode Go key</strong> — nothing is billed to the operator, and no key is shared between servers.</p>
-	<pre><code>@eryn refactor the parser and add tests for the edge cases</code></pre>
-	<div class="actions">
-		<a class="button primary" href="/setup">Set up a server</a>
-		<a class="button ghost" href="${installUrl()}" target="_blank" rel="noreferrer">Install</a>
-		<a class="button ghost" href="https://github.com/oscartbeaumont/eryn" target="_blank" rel="noreferrer">View source</a>
-	</div>
-	<ul class="features">
-		<li><span class="check">✓</span><span><b>Bring your own key.</b> Sign in with Discord, pick a server you administer, and paste an OpenCode Go key. It is encrypted at rest and used only for that server.</span></li>
-		<li><span class="check">✓</span><span><b>Threaded sessions.</b> Each thread is one durable OpenCode session, stored in a Durable Object.</span></li>
-		<li><span class="check">✓</span><span><b>Live and stoppable.</b> Replies stream into Discord as they are written; <code>/stop</code> cancels a run.</span></li>
-	</ul>
+		`${header()}
+<main>
+	<section>
+		<div class="wrap">
+			<p class="kicker">OpenCode · Cloudflare · Bring your own key</p>
+			<h1 class="hero">eryn</h1>
+			<p class="lede" style="font-size:18px">An OpenCode coding agent that lives in your Discord. Mention <strong>@eryn</strong> in a server and it opens a thread for the request, runs it through an embedded OpenCode server, and streams the answer back as it is written.</p>
+			<p class="lede">Every server runs on <strong>its own OpenCode Go key</strong> — nothing is billed to the operator and no key is shared between servers.</p>
+			<div class="actions">
+				<a class="btn primary" href="/setup">Set up a server</a>
+				<a class="btn" href="${installUrl()}" target="_blank" rel="noreferrer">Install</a>
+				<a class="btn" href="${SOURCE_URL}" target="_blank" rel="noreferrer">Source</a>
+			</div>
+		</div>
+	</section>
+	<section>
+		<div class="wrap">
+			<p class="kicker">A session, end to end</p>
+			<div class="term">
+				<div class="term-head"><span>discord / #engineering</span><span>thread</span></div>
+				<div class="term-body">
+					<p><span class="tag">you</span>@eryn refactor the parser and add tests for the edge cases</p>
+					<p><span class="tag">eryn</span><span class="dim">⠹ Thinking…</span></p>
+					<p><span class="tag">eryn</span>Done — extracted a tokenizer, added 12 cases, all green.</p>
+					<p><span class="tag">you</span>now split the tokenizer into its own module</p>
+					<p><span class="tag">eryn</span><span class="dim">⠼ Working…</span></p>
+				</div>
+			</div>
+		</div>
+	</section>
+	<section class="last">
+		<div class="wrap grid">
+			<div><span class="num">[01]</span><h2 class="block">Bring your own key</h2><p>Sign in with Discord, pick a server you administer, and paste an OpenCode Go key. It is encrypted at rest and used only for that server.</p></div>
+			<div><span class="num">[02]</span><h2 class="block">Threaded sessions</h2><p>Each thread is one durable OpenCode session stored in a Durable Object, so follow-up messages keep their context.</p></div>
+			<div><span class="num">[03]</span><h2 class="block">Live and stoppable</h2><p>Replies stream in as they are written and the requester is pinged when the run finishes. Send <code>/stop</code> to cancel.</p></div>
+		</div>
+	</section>
 </main>`,
 	);
 }
 
-function top(account?: { name: string }): string {
-	return `<div class="top">
-	<a class="brand" href="/">eryn</a>
-	${
-		account
-			? `<span class="who">Signed in as ${escape(account.name)}<a href="/auth/logout">Sign out</a></span>`
-			: `<a class="button ghost" href="/auth/discord">Sign in with Discord</a>`
-	}</div>`;
-}
+// --- Setup --------------------------------------------------------------------
 
 export function signInPage(options: { notice?: { kind: "ok" | "error"; message: string } } = {}): string {
-	const notice = options.notice
-		? `<div class="notice ${options.notice.kind}">${escape(options.notice.message)}</div>`
-		: "";
 	return document(
-		"Set up eryn — sign in",
-		`<main>
-	${top()}
-	${notice}
-	<h2>Connect a server</h2>
-	<p class="lede">Sign in with Discord to see the servers you administer, then add an OpenCode Go key to run inference on your own account.</p>
-	<div class="actions">
-		<a class="button primary" href="/auth/discord">Sign in with Discord</a>
-		<a class="button ghost" href="/">Back</a>
-	</div>
+		"Set up eryn",
+		`${header()}
+<main>
+	<section class="tight">
+		<div class="wrap">
+			${noticeBanner(options.notice)}
+			<p class="kicker">Setup</p>
+			<h1 class="title">Connect a server</h1>
+			<p class="lede">Sign in with Discord to see the servers you administer, then add an OpenCode Go key to run inference on your own account.</p>
+			<div class="actions"><a class="btn primary" href="/auth/discord">Sign in with Discord</a></div>
+		</div>
+	</section>
 </main>`,
 	);
 }
@@ -216,7 +320,7 @@ export interface SetupPageOptions {
 
 function avatar(guild: SetupGuild): string {
 	if (guild.icon) {
-		return `<img class="avatar" src="https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=64" alt="" width="40" height="40" />`;
+		return `<img class="avatar" src="https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=64" alt="" width="44" height="44" />`;
 	}
 	return `<span class="avatar">${escape(guild.name.slice(0, 1).toUpperCase())}</span>`;
 }
@@ -224,43 +328,34 @@ function avatar(guild: SetupGuild): string {
 function guildCard(guild: SetupGuild): string {
 	if (!guild.installed) {
 		return `<div class="card">
-	<div class="card-head">${avatar(guild)}
-		<div><h3>${escape(guild.name)}</h3><span class="meta">Eryn is not in this server yet</span></div>
-	</div>
-	<a class="button primary" href="${installUrl(guild.id)}" target="_blank" rel="noreferrer">Add Eryn to this server</a>
+	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div><div class="meta">Not installed</div></div></div>
+	<a class="btn primary" href="${installUrl(guild.id)}" target="_blank" rel="noreferrer">Add Eryn to this server</a>
 </div>`;
 	}
 
-	const status = guild.configured
-		? `<span class="chip on">Configured</span>`
-		: `<span class="chip">No key yet</span>`;
-	const meta = guild.configured
-		? `<span class="meta">${escape(guild.model ?? DEFAULT_MODEL)}${guild.updatedAt ? ` · updated ${new Date(guild.updatedAt).toISOString().slice(0, 10)}` : ""}</span>`
+	const status = guild.configured ? `<span class="chip on">Configured</span>` : `<span class="chip">No key</span>`;
+	const modelLabel = guild.configured
+		? `<div class="meta">${escape(guild.model ?? DEFAULT_MODEL)}${guild.updatedAt ? ` · ${new Date(guild.updatedAt).toISOString().slice(0, 10)}` : ""}</div>`
 		: "";
-
 	const remove = guild.configured
 		? `<form method="post" action="/setup" onsubmit="return confirm('Remove the key for this server?')">
 		<input type="hidden" name="action" value="remove" />
 		<input type="hidden" name="guild_id" value="${escape(guild.id)}" />
-		<button class="button danger" type="submit">Remove key</button>
+		<button class="btn danger" type="submit">Remove key</button>
 	</form>`
 		: "";
 
 	return `<div class="card">
-	<div class="card-head">${avatar(guild)}
-		<div><h3>${escape(guild.name)}</h3><span class="meta">Installed</span></div>
-		<span style="margin-left:auto"></span>${status}
-	</div>
-	${meta}
+	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div>${modelLabel || `<div class="meta">Installed</div>`}</div>${status}</div>
 	<form method="post" action="/setup">
 		<input type="hidden" name="action" value="save" />
 		<input type="hidden" name="guild_id" value="${escape(guild.id)}" />
-		<label class="field"><span>OpenCode Go API key${guild.configured ? " (leave blank to keep the current key)" : ""}</span>
-			<input type="password" name="api_key" placeholder="sk-..." autocomplete="off" spellcheck="false" /></label>
+		<label class="field"><span>OpenCode Go API key${guild.configured ? " — blank keeps current" : ""}</span>
+			<input type="password" name="api_key" placeholder="sk-…" autocomplete="off" spellcheck="false" /></label>
 		<label class="field"><span>Model</span>
 			<input type="text" name="model" value="${escape(guild.model ?? DEFAULT_MODEL)}" list="models" spellcheck="false" /></label>
 		<div class="row">
-			<button class="button primary" type="submit">${guild.configured ? "Update key" : "Save key"}</button>
+			<button class="btn primary" type="submit">${guild.configured ? "Update key" : "Save key"}</button>
 			${remove}
 		</div>
 	</form>
@@ -268,30 +363,41 @@ function guildCard(guild: SetupGuild): string {
 }
 
 export function setupPage(options: SetupPageOptions): string {
-	const notice = options.notice
-		? `<div class="notice ${options.notice.kind}">${escape(options.notice.message)}</div>`
-		: "";
 	const cards = options.guilds.length
-		? options.guilds.map(guildCard).join("\n")
+		? `<div class="cards">${options.guilds.map(guildCard).join("\n")}</div>`
 		: `<p class="empty">You do not administer any servers yet. Create one, or ask a server owner to set Eryn up.</p>`;
 
 	return document(
 		"Set up eryn",
-		`<main>
-	${top(options.account)}
-	${notice}
-	<h2>Bring your own inference key</h2>
-	<p class="lede">Eryn runs on OpenCode Go. Paste an API key from your <a href="https://opencode.ai/console" target="_blank" rel="noreferrer">OpenCode Console</a> for each server. The key is encrypted at rest, never leaves Cloudflare, and is used only for that server's sessions.</p>
-	<datalist id="models">${SUGGESTED_MODELS.map((model) => `<option value="${escape(model)}"></option>`).join("")}</datalist>
-	${cards}
+		`${header(options.account)}
+<main>
+	<section class="last">
+		<div class="wrap">
+			${noticeBanner(options.notice)}
+			<p class="kicker">Setup</p>
+			<h1 class="title">Bring your own inference key</h1>
+			<p class="lede">Eryn runs on OpenCode Go. Paste a key from your <a href="https://opencode.ai/console" target="_blank" rel="noreferrer">OpenCode Console</a> for each server. The key is encrypted at rest, never leaves Cloudflare, and is used only for that server's sessions.</p>
+			<datalist id="models">${SUGGESTED_MODELS.map((model) => `<option value="${escape(model)}"></option>`).join("")}</datalist>
+			${cards}
+		</div>
+	</section>
 </main>`,
 	);
 }
 
 export function noticeHtml(title: string, message: string): string {
-	return document(`eryn — ${title}`, `<main>${top()}
-	<h2>${escape(title)}</h2>
-	<p class="lede">${escape(message)}</p>
-	<div class="actions"><a class="button primary" href="/setup">Back to setup</a></div>
-</main>`);
+	return document(
+		`eryn — ${title}`,
+		`${header()}
+<main>
+	<section class="tight last">
+		<div class="wrap">
+			<p class="kicker">Notice</p>
+			<h1 class="title">${escape(title)}</h1>
+			<p class="lede">${escape(message)}</p>
+			<div class="actions"><a class="btn primary" href="/setup">Back to setup</a></div>
+		</div>
+	</section>
+</main>`,
+	);
 }

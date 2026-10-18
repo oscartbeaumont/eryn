@@ -146,13 +146,25 @@ export function discordRest(token: string) {
 			};
 		},
 
-		async sendMessage(channelId: string, content: string): Promise<{ id: string }> {
-			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/messages`, {
+		async sendMessage(
+			channelId: string,
+			content: string,
+			options: { users?: readonly string[]; replyTo?: string } = {},
+		): Promise<{ id: string }> {
+			const body: Record<string, unknown> = {
 				content,
-				allowed_mentions: { parse: [] },
-			});
+				// Suppress every ping unless a caller names the users to notify.
+				allowed_mentions: { parse: [], users: options.users ?? [] },
+			};
+			if (options.replyTo) body.message_reference = { message_id: options.replyTo, fail_if_not_exists: false };
+			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/messages`, body);
 			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not accept the message");
 			return { id: result.id };
+		},
+
+		/** Add a user to a thread so they follow it. This does not notify them. */
+		async addThreadMember(channelId: string, userId: string): Promise<void> {
+			await request<void>("PUT", `/channels/${channelId}/thread-members/${userId}`);
 		},
 
 		async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
@@ -199,12 +211,9 @@ export function discordRest(token: string) {
 			});
 		},
 
-		/** Replace the application's commands globally, or within one guild. */
-		async overwriteCommands(applicationId: string, commands: DiscordCommand[], guildId?: string): Promise<void> {
-			const path = guildId
-				? `/applications/${applicationId}/guilds/${guildId}/commands`
-				: `/applications/${applicationId}/commands`;
-			await request<unknown>("PUT", path, commands);
+		/** Replace the application's global commands. */
+		async overwriteCommands(applicationId: string, commands: DiscordCommand[]): Promise<void> {
+			await request<unknown>("PUT", `/applications/${applicationId}/commands`, commands);
 		},
 	};
 }

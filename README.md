@@ -34,14 +34,19 @@ Discord ── gateway WS ─▶ ErynGateway (singleton DO) ──fetch──▶
 ## Behaviour
 
 - **Mention to start.** A guild mention opens a thread named after the request
-  and creates a session. A mention already inside a thread answers there. The bot
+  and creates a session, and the requester is added to the thread. The bot
   accepts a ping of either its user (`<@…>`) or its managed role (`<@&…>`).
 - **Follow-ups.** Any human message inside a thread Eryn owns goes straight to
   that thread's session — no mention needed.
-- **Streaming.** The reply is written into a Discord message and edited as the
-  model produces tokens (at most one edit every 1.5s, spilling into new messages
-  past 2000 characters). The final transcript is written when the turn ends, so a
-  throttled edit can never lose output.
+- **Progress and streaming.** While the agent works, the reply message shows a
+  rotating spinner and a short status line (`Thinking…`, then `Working…` once
+  tools run). As tokens arrive the spinner gives way to the answer, edited in
+  place at most once every 1.5s and spilling into new messages past 2000
+  characters. The final transcript is written when the turn ends, so a throttled
+  edit can never lose output.
+- **One ping, at the end.** The requester is mentioned exactly once, in a reply
+  to the finished answer, when the run completes (or is stopped or fails).
+  Nothing pings them while the agent is still working.
 - **Stop.** Run `/stop`, or say `stop` / `cancel` / `!stop` in the thread, to
   interrupt the running turn. The session is kept.
 - **Unconfigured servers.** A mention in a server with no key gets a short reply
@@ -110,7 +115,6 @@ against Discord. Removing a key takes effect for new turns immediately.
 | `ENCRYPTION_KEY`               | secret | —                             | base64url 32-byte key encrypting guild credentials  |
 | `SESSION_SECRET`               | secret | —                             | Signs the OAuth state and session cookies           |
 | `PUBLIC_ORIGIN`                | text   | `https://eryn.otbeaumont.me`  | Origin linked from Discord messages                 |
-| `DISCORD_GUILD_ID`             | text   | empty                         | Register `/stop` in this guild for instant use      |
 | `DISCORD_KEEPALIVE_SECONDS`    | text   | `60`                          | Gateway keepalive alarm interval                    |
 | `DISCORD_TURN_TIMEOUT_SECONDS` | text   | `900`                         | Seconds before a turn is interrupted                |
 

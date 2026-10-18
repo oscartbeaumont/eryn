@@ -27,8 +27,6 @@ export default defineConfig({
 
 			// Public origin used in messages linked from Discord.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
-			// Optional: register `/stop` in one guild for instant availability.
-			DISCORD_GUILD_ID: bindings.text(""),
 			// Seconds between gateway keepalive alarms.
 			DISCORD_KEEPALIVE_SECONDS: bindings.text("60"),
 			// Seconds a single agent turn may run before it is interrupted.

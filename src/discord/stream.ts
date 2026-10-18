@@ -1,6 +1,10 @@
 /**
- * Streams an assistant reply into a Discord thread by editing a message in
- * place, spilling into further messages once the 2000-character limit is hit.
+ * Streams an assistant reply into a Discord thread.
+ *
+ * While the agent is thinking the message shows a rotating spinner and a short
+ * status line, so the thread looks alive instead of frozen. Once text arrives
+ * the spinner stops and the reply is edited in place, spilling into further
+ * messages past the 2000-character limit.
  *
  * Edits are coalesced to at most one per `EDIT_INTERVAL_MS`, because Discord
  * rate-limits message edits aggressively. `finish` always writes the complete
@@ -12,14 +16,21 @@ import { describeError, splitMessage, type DiscordRest } from "./api";
 /** Minimum gap between edits of the same message. */
 const EDIT_INTERVAL_MS = 1_500;
 
-/** Shown until the first token arrives. */
-const PLACEHOLDER = "⏳";
+/** How often the spinner advances while the agent is thinking. */
+const LOADING_INTERVAL_MS = 1_400;
+
+/** Braille spinner frames; they render cleanly in Discord's monospace. */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 export class DiscordStream {
 	private readonly chunks: { id: string; content: string }[] = [];
 	private text = "";
+	private loading = true;
+	private status = "Thinking…";
+	private frame = 0;
 	private lastFlush = 0;
 	private timer: ReturnType<typeof setTimeout> | undefined;
+	private loader: ReturnType<typeof setInterval> | undefined;
 	private finished = false;
 	private pending: Promise<void> = Promise.resolve();
 
@@ -28,16 +39,27 @@ export class DiscordStream {
 		private readonly channelId: string,
 	) {}
 
-	/** Post the placeholder so the thread shows activity immediately. */
+	/** Post the spinner and start animating it. */
 	async start(): Promise<void> {
-		const message = await this.rest.sendMessage(this.channelId, PLACEHOLDER);
-		this.chunks.push({ id: message.id, content: PLACEHOLDER });
+		const message = await this.rest.sendMessage(this.channelId, this.loadingBody());
+		this.chunks.push({ id: message.id, content: this.loadingBody() });
 		this.lastFlush = Date.now();
+		this.loader = setInterval(() => {
+			if (this.finished || !this.loading) return;
+			this.frame = (this.frame + 1) % SPINNER.length;
+			void this.flush();
+		}, LOADING_INTERVAL_MS);
 	}
 
-	/** Replace the not-yet-committed text object with the latest rendered reply. */
+	/** Change the loading line, e.g. once the agent starts running tools. */
+	setStatus(status: string): void {
+		this.status = status;
+	}
+
+	/** Replace the not-yet-committed text with the latest rendered reply. */
 	push(text: string): void {
 		if (this.finished) return;
+		if (text.trim()) this.stopLoading();
 		this.text = text;
 		if (this.timer) return;
 		const wait = Math.max(0, EDIT_INTERVAL_MS - (Date.now() - this.lastFlush));
@@ -56,14 +78,32 @@ export class DiscordStream {
 			clearTimeout(this.timer);
 			this.timer = undefined;
 		}
+		this.stopLoading();
 		await this.pending.catch(() => undefined);
 		const body = [text.trim(), suffix?.trim()].filter(Boolean).join("\n\n") || "_(no output)_";
 		await this.write(body);
 	}
 
+	/** The id of the last message written, for replying with a completion ping. */
+	get lastMessageId(): string | undefined {
+		return this.chunks.at(-1)?.id;
+	}
+
+	private stopLoading(): void {
+		this.loading = false;
+		if (this.loader) {
+			clearInterval(this.loader);
+			this.loader = undefined;
+		}
+	}
+
+	private loadingBody(): string {
+		return `${SPINNER[this.frame]} ${this.status}`;
+	}
+
 	private flush(): Promise<void> {
 		this.lastFlush = Date.now();
-		const body = this.text.trim() || PLACEHOLDER;
+		const body = this.loading ? this.loadingBody() : this.text.trim() || this.loadingBody();
 		this.pending = this.pending
 			.then(() => this.write(body))
 			.catch((error) => {
