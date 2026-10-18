@@ -16,7 +16,7 @@ import { CLIENT_ID, DEFAULT_MODEL, isValidModel } from "./config";
 import { randomToken, sign, verify } from "./crypto";
 import { discordRest } from "./discord/api";
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
-import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild } from "./registry-client";
+import { getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
 import { landingPage, noticeHtml, setupPage, signInPage, type SetupGuild } from "./views";
 
 export { ErynGateway } from "./gateway";
@@ -41,6 +41,7 @@ interface SetupForm {
 	guild_id: string;
 	api_key?: string;
 	model?: string;
+	github_repo?: string;
 }
 
 const SetupFormSchema = Schema.Struct({
@@ -48,6 +49,7 @@ const SetupFormSchema = Schema.Struct({
 	guild_id: Schema.String,
 	api_key: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
+	github_repo: Schema.optional(Schema.String),
 });
 
 function describe(error: unknown): string {
@@ -160,6 +162,23 @@ async function handleLogout(request: HttpServerRequest.HttpServerRequest): Promi
 	);
 }
 
+/** Capture the installation id GitHub sends after the App is installed. */
+async function handleGitHubCallback(
+	request: HttpServerRequest.HttpServerRequest,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const url = new URL(request.originalUrl);
+	const installationId = url.searchParams.get("installation_id");
+	const state = await verify<{ guild: string; exp: number }>(
+		url.searchParams.get("state") ?? undefined,
+		env.SESSION_SECRET,
+	);
+	if (!installationId || !state || state.exp < Date.now()) {
+		return notice("GitHub setup failed", "That GitHub installation could not be verified.", 400);
+	}
+	await setGuildInstallation(env, state.guild, installationId);
+	return HttpServerResponse.redirect(`/setup?ok=${encodeURIComponent("GitHub connected.")}`);
+}
+
 async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const url = new URL(request.originalUrl);
 	const notice = noticeFromQuery(url);
@@ -170,9 +189,11 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 	const manageable = userGuilds.filter(canManage);
 	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
+	const slug = env.GITHUB_APP_SLUG?.trim();
 	const guilds: SetupGuild[] = await Promise.all(
 		manageable.map(async (guild) => {
 			const summary = await getGuildSummary(env, guild.id);
+			const installationId = summary.github?.installationId;
 			return {
 				id: guild.id,
 				name: guild.name,
@@ -181,6 +202,14 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 				configured: summary.configured,
 				model: summary.model,
 				updatedAt: summary.updatedAt,
+				githubRepo: summary.github?.repo,
+				githubInstalled: Boolean(installationId),
+				githubInstallUrl:
+					slug && !installationId
+						? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(
+								await sign({ guild: guild.id, exp: Date.now() + 600_000 }, env.SESSION_SECRET),
+							)}`
+						: undefined,
 			};
 		}),
 	);
@@ -192,7 +221,14 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 			a.name.localeCompare(b.name),
 	);
 
-	return HttpServerResponse.html(setupPage({ account: { id: session.uid, name: session.name }, guilds, notice }));
+	return HttpServerResponse.html(
+		setupPage({
+			account: { id: session.uid, name: session.name },
+			guilds,
+			notice,
+			githubConfigured: Boolean(env.GITHUB_APP_ID?.trim() && env.GITHUB_APP_PRIVATE_KEY?.trim() && slug),
+		}),
+	);
 }
 
 async function handleSetupPost(
@@ -221,7 +257,12 @@ async function handleSetupPost(
 	}
 
 	try {
-		await putGuild(env, form.guild_id, { apiKey: form.api_key?.trim(), model, configuredBy: session.uid });
+		await putGuild(env, form.guild_id, {
+			apiKey: form.api_key?.trim(),
+			model,
+			configuredBy: session.uid,
+			githubRepo: form.github_repo,
+		});
 	} catch (error) {
 		return HttpServerResponse.redirect(`/setup?error=${encodeURIComponent(describe(error))}`);
 	}
@@ -248,6 +289,9 @@ const Routes = Layer.mergeAll(
 		),
 	),
 	HttpRouter.add("GET", "/auth/logout", (request) => Effect.promise(() => handleLogout(request))),
+	HttpRouter.add("GET", "/github/callback", (request) =>
+		Effect.promise(() => handleGitHubCallback(request).catch((error) => setupFailure(error))),
+	),
 	HttpRouter.add("GET", "/setup", (request) =>
 		Effect.promise(() => handleSetupGet(request).catch((error) => setupFailure(error))),
 	),

@@ -321,12 +321,16 @@ export interface SetupGuild {
 	configured: boolean;
 	model?: string;
 	updatedAt?: number;
+	githubRepo?: string;
+	githubInstalled: boolean;
+	githubInstallUrl?: string;
 }
 
 export interface SetupPageOptions {
 	account: { id: string; name: string };
 	guilds: SetupGuild[];
 	notice?: { kind: "ok" | "error"; message: string };
+	githubConfigured: boolean;
 }
 
 function avatar(guild: SetupGuild): string {
@@ -336,7 +340,7 @@ function avatar(guild: SetupGuild): string {
 	return `<span class="avatar">${escape(guild.name.slice(0, 1).toUpperCase())}</span>`;
 }
 
-function guildCard(guild: SetupGuild): string {
+function guildCard(guild: SetupGuild, githubConfigured: boolean): string {
 	const status = guild.configured
 		? `<span class="chip on">Configured</span>`
 		: guild.installed
@@ -357,6 +361,17 @@ function guildCard(guild: SetupGuild): string {
 	</form>`
 		: "";
 
+	const github = !githubConfigured
+		? `<p class="meta">GitHub is not configured on this deployment.</p>`
+		: `${
+				guild.githubInstalled
+					? ""
+					: `<div class="row" style="margin-bottom:14px"><a class="btn small" href="${escape(
+							guild.githubInstallUrl ?? "#",
+						)}" target="_blank" rel="noreferrer">Install GitHub App</a></div>`
+			}<label class="field"><span>GitHub repository (owner/name)</span>
+			<input type="text" name="github_repo" value="${escape(guild.githubRepo ?? "")}" placeholder="owner/repo" spellcheck="false" /></label>`;
+
 	return `<div class="card">
 	<div class="card-top">${avatar(guild)}<div><div class="guild-name">${escape(guild.name)}</div>${meta}</div>${status}</div>
 	<form method="post" action="/setup">
@@ -366,6 +381,7 @@ function guildCard(guild: SetupGuild): string {
 			<input type="password" name="api_key" placeholder="sk-…" autocomplete="off" spellcheck="false" /></label>
 		<label class="field"><span>Model</span>
 			<input type="text" name="model" value="${escape(guild.model ?? DEFAULT_MODEL)}" list="models" spellcheck="false" /></label>
+		${github}
 		<div class="row">
 			<button class="btn primary" type="submit">${guild.configured ? "Update key" : "Save key"}</button>
 			${install}
@@ -377,7 +393,7 @@ function guildCard(guild: SetupGuild): string {
 
 export function setupPage(options: SetupPageOptions): string {
 	const cards = options.guilds.length
-		? `<div class="cards">${options.guilds.map(guildCard).join("\n")}</div>`
+		? `<div class="cards">${options.guilds.map((guild) => guildCard(guild, options.githubConfigured)).join("\n")}</div>`
 		: `<p class="empty">You do not administer any servers yet. Create one, or ask a server owner to set Eryn up.</p>`;
 
 	return document(

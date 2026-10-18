@@ -30,6 +30,13 @@ interface StoredGuild extends Sealed {
 	model: string;
 	configuredBy?: string;
 	updatedAt: number;
+	github?: GitHubBinding;
+}
+
+/** Per-guild GitHub App installation and default repository. */
+export interface GitHubBinding {
+	installationId?: string;
+	repo?: string;
 }
 
 export interface GuildSummary {
@@ -37,6 +44,7 @@ export interface GuildSummary {
 	model?: string;
 	configuredBy?: string;
 	updatedAt?: number;
+	github?: GitHubBinding;
 }
 
 export interface CachedGuilds {
@@ -63,28 +71,35 @@ export class ErynRegistry extends DurableObject<Env> {
 
 		if (request.method === "PUT" && !wantsKey) {
 			if (!secret) return json({ error: "registry is not configured" }, 500);
-			const body = (await request.json()) as { apiKey?: string; model?: string; configuredBy?: string };
-			const model = body.model?.trim() || DEFAULT_MODEL;
+			const body = (await request.json()) as {
+				apiKey?: string;
+				model?: string;
+				configuredBy?: string;
+				githubRepo?: string;
+				githubInstallationId?: string;
+			};
+			const existing = await this.ctx.storage.get<StoredGuild>(storageKey);
+			const model = body.model?.trim() || existing?.model || DEFAULT_MODEL;
 			if (!isValidModel(model)) return json({ error: "model must be an opencode-go/* reference" }, 400);
 			const apiKey = body.apiKey?.trim();
-			const existing = await this.ctx.storage.get<StoredGuild>(storageKey);
-			// An empty key updates only the model, keeping the stored credential.
-			if (!apiKey) {
-				if (!existing) return json({ error: "an API key is required" }, 400);
-				await this.ctx.storage.put<StoredGuild>(storageKey, {
-					...existing,
-					model,
-					configuredBy: body.configuredBy ?? existing.configuredBy,
-					updatedAt: Date.now(),
-				});
-				return json({ ok: true });
-			}
-			const sealed = await encryptSecret(secret, apiKey);
+
+			// An empty key keeps the stored credential, or records a GitHub-only
+			// binding until a key is added.
+			const sealed: Sealed = apiKey
+				? await encryptSecret(secret, apiKey)
+				: { iv: existing?.iv ?? "", data: existing?.data ?? "" };
+
+			const github: GitHubBinding = {
+				installationId: body.githubInstallationId ?? existing?.github?.installationId,
+				repo: body.githubRepo !== undefined ? body.githubRepo.trim() || undefined : existing?.github?.repo,
+			};
+
 			await this.ctx.storage.put<StoredGuild>(storageKey, {
 				...sealed,
 				model,
-				configuredBy: body.configuredBy,
+				configuredBy: body.configuredBy ?? existing?.configuredBy,
 				updatedAt: Date.now(),
+				...(github.installationId || github.repo ? { github } : {}),
 			});
 			return json({ ok: true });
 		}
@@ -97,16 +112,23 @@ export class ErynRegistry extends DurableObject<Env> {
 		}
 
 		if (request.method === "GET" && wantsKey) {
-			if (!stored || !secret) return json({ error: "not configured" }, 404);
+			if (!stored || !secret || !stored.data) return json({ error: "not configured" }, 404);
 			const apiKey = await decryptSecret(secret, stored).catch(() => undefined);
 			if (!apiKey) return json({ error: "stored key could not be read" }, 500);
-			return json({ apiKey, model: stored.model });
+			return json({ apiKey, model: stored.model, github: stored.github });
 		}
 
 		if (request.method === "GET" && !wantsKey) {
-			const summary: GuildSummary = stored
-				? { configured: true, model: stored.model, configuredBy: stored.configuredBy, updatedAt: stored.updatedAt }
-				: { configured: false };
+			const summary: GuildSummary =
+				stored && stored.data
+					? {
+							configured: true,
+							model: stored.model,
+							configuredBy: stored.configuredBy,
+							updatedAt: stored.updatedAt,
+							github: stored.github,
+						}
+					: { configured: false, github: stored?.github };
 			return json(summary);
 		}
 

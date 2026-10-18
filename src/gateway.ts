@@ -250,6 +250,7 @@ export class ErynGateway extends DurableObject<Env> {
 					authorId: message.author?.id,
 					apiKey: config.apiKey,
 					model: config.model,
+					github: config.github,
 				}),
 			});
 			if (!response.ok) log(`session prompt for ${threadId} failed with HTTP ${response.status}`);

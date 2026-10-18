@@ -4,11 +4,12 @@
  */
 
 import type { DiscordGuild } from "./oauth";
-import { USER_GUILDS_TTL_MS, type GuildSummary } from "./registry";
+import { USER_GUILDS_TTL_MS, type GitHubBinding, type GuildSummary } from "./registry";
 
 export interface GuildKey {
 	apiKey: string;
 	model: string;
+	github?: GitHubBinding;
 }
 
 function stub(env: Env) {
@@ -32,7 +33,7 @@ export async function getGuildSummary(env: Env, guildId: string): Promise<GuildS
 export async function putGuild(
 	env: Env,
 	guildId: string,
-	input: { apiKey?: string; model: string; configuredBy: string },
+	input: { apiKey?: string; model: string; configuredBy: string; githubRepo?: string; githubInstallationId?: string },
 ): Promise<void> {
 	const response = await stub(env).fetch(`https://eryn/registry/guild/${guildId}`, {
 		method: "PUT",
@@ -47,6 +48,15 @@ export async function putGuild(
 
 export async function removeGuild(env: Env, guildId: string): Promise<void> {
 	await stub(env).fetch(`https://eryn/registry/guild/${guildId}`, { method: "DELETE" });
+}
+
+/** Record a GitHub App installation id captured from the install callback. */
+export async function setGuildInstallation(env: Env, guildId: string, installationId: string): Promise<void> {
+	await stub(env).fetch(`https://eryn/registry/guild/${guildId}`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ githubInstallationId: installationId }),
+	});
 }
 
 /** The cached guild list for a signed-in user, or `undefined` when stale. */

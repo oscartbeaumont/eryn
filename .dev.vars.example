@@ -14,3 +14,11 @@ ENCRYPTION_KEY=
 # Random secret used to sign the OAuth state and session cookies.
 #   openssl rand -hex 32
 SESSION_SECRET=
+
+# GitHub App (optional): powers the agent's GitHub tools (issues, clone, branch,
+# commit, pull request). Create an App, set its Setup URL to
+# https://eryn.otbeaumont.me/github/callback, then copy the App id, its private
+# key (PEM), and its URL slug. Leave as-is to disable the GitHub tools.
+GITHUB_APP_ID=
+GITHUB_APP_PRIVATE_KEY=
+GITHUB_APP_SLUG=

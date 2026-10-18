@@ -24,6 +24,11 @@ export default defineConfig({
 			ENCRYPTION_KEY: bindings.secret(),
 			// Random secret signing the OAuth state and session cookies.
 			SESSION_SECRET: bindings.secret(),
+			// GitHub App credentials, for the agent's GitHub tools (optional).
+			GITHUB_APP_ID: bindings.secret(),
+			GITHUB_APP_PRIVATE_KEY: bindings.secret(),
+			// The App's URL slug, used for the "Install GitHub App" link.
+			GITHUB_APP_SLUG: bindings.text(""),
 
 			// Public origin used in messages linked from Discord.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),

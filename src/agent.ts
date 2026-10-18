@@ -19,6 +19,10 @@ import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import { DEFAULT_MODEL, intFromEnv } from "./config";
 import { DEFAULT_THREAD_NAME, describeError, discordRest, type DiscordRest } from "./discord/api";
 import { DiscordStream } from "./discord/stream";
+import { fileStore, type FileStore } from "./opencode/store";
+import { workspacePlugin } from "./opencode/workspace";
+import { createGitHub } from "./github";
+import { githubPlugin } from "./opencode/github";
 
 const MODEL = DEFAULT_MODEL;
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
@@ -40,6 +44,8 @@ interface PromptRequest {
 	/** The guild's own OpenCode Go credential, supplied by the gateway. */
 	apiKey: string;
 	model?: string;
+	/** GitHub App binding for this guild, when configured. */
+	github?: { installationId?: string; repo?: string };
 }
 
 /** Accumulated assistant output for one turn, keyed by message then part. */
@@ -97,11 +103,15 @@ interface Host {
 	promise: Promise<OpenCodeWorkerd.Interface>;
 	apiKey: string;
 	model: string;
+	/** Signature of the GitHub binding, so a config change rebuilds the host. */
+	github: string;
 }
 
 export class ErynSession extends DurableObject<Env> {
 	private readonly rest: DiscordRest;
 	private readonly turnTimeoutMs: number;
+	/** The thread's project: files shared by the file tools, bash, and GitHub. */
+	private readonly files: FileStore;
 
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
@@ -113,6 +123,7 @@ export class ErynSession extends DurableObject<Env> {
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
 		this.rest = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
+		this.files = fileStore(state.storage);
 		this.turnTimeoutMs =
 			intFromEnv(env.DISCORD_TURN_TIMEOUT_SECONDS, DEFAULT_TURN_TIMEOUT_SECONDS, 30, 3_600) * 1_000;
 	}
@@ -122,11 +133,29 @@ export class ErynSession extends DurableObject<Env> {
 	 * guild's own credential. A changed key or model rebuilds the host so a
 	 * rotated credential takes effect on the next turn.
 	 */
-	private hostFor(apiKey: string, model: string): Promise<OpenCodeWorkerd.Interface> {
-		if (!this.host || this.host.apiKey !== apiKey || this.host.model !== model) {
+	private hostFor(
+		apiKey: string,
+		model: string,
+		github?: { installationId?: string; repo?: string },
+	): Promise<OpenCodeWorkerd.Interface> {
+		const githubKey = github ? `${github.installationId ?? ""}|${github.repo ?? ""}` : "";
+		if (!this.host || this.host.apiKey !== apiKey || this.host.model !== model || this.host.github !== githubKey) {
 			const previous = this.host?.promise;
 			this.abort?.abort();
 			this.abort = new AbortController();
+
+			const plugins = [workspacePlugin(this.files)];
+			const appId = this.env.GITHUB_APP_ID?.trim();
+			const privateKey = this.env.GITHUB_APP_PRIVATE_KEY?.trim();
+			if (github?.installationId && appId && privateKey) {
+				plugins.push(
+					githubPlugin({
+						github: createGitHub({ appId, privateKey, installationId: github.installationId }),
+						repo: github.repo,
+						store: this.files,
+					}),
+				);
+			}
 
 			const promise = OpenCodeWorkerd.create({
 				storage: this.ctx.storage,
@@ -136,8 +165,9 @@ export class ErynSession extends DurableObject<Env> {
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
 					providers: { "opencode-go": { settings: { apiKey } } },
 				},
+				plugins,
 			});
-			this.host = { promise, apiKey, model };
+			this.host = { promise, apiKey, model, github: githubKey };
 			this.consuming = undefined;
 			void promise
 				.then((host) => this.startConsuming(host))
@@ -172,7 +202,7 @@ export class ErynSession extends DurableObject<Env> {
 	// --- A turn -----------------------------------------------------------------
 
 	private async prompt(request: PromptRequest): Promise<void> {
-		const host = await this.hostFor(request.apiKey, request.model ?? MODEL);
+		const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
 		const sessionID = await this.ensureSession(host, request.title ?? DEFAULT_THREAD_NAME);
 		const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 

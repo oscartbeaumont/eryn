@@ -1,8 +1,15 @@
-# Approve build scripts needed by the generated Worker's dependencies, and
-# explicitly ignore the ones the embedded SDK pulls in but never runs in workerd.
+# Approve build scripts needed by the Worker's dependencies, and explicitly
+# ignore the ones the embedded SDK and just-bash pull in but never run in workerd
+# (we use web APIs like DecompressionStream instead of native codecs).
+# Flat node_modules: OpenCode's plugin package is both a direct and a transitive
+# dependency with optional peers, which pnpm's default isolated linker mislinks.
+nodeLinker: hoisted
+
 allowBuilds:
   esbuild: true
   workerd: true
   "@parcel/watcher": false
   tree-sitter-bash: false
   tree-sitter-powershell: false
+  "@mongodb-js/zstd": false
+  node-liblzma: false

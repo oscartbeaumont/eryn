@@ -31,6 +31,21 @@ Discord ── gateway WS ─▶ ErynGateway (singleton DO) ──fetch──▶
                              └──────────── Discord REST ◀────────────┘   embedded OpenCode → OpenCode Go
 ```
 
+## Agent capabilities
+
+The Workerd OpenCode profile has no host filesystem or process plane, so Eryn
+supplies its own through two decoupled plugins (`src/opencode/`):
+
+- **`eryn.workspace`** replaces the built-in `read`/`write`/`edit`/`bash` tools
+  with implementations backed by a virtual filesystem stored in the thread's
+  Durable Object, and by [`just-bash`](https://github.com/vercel-labs/just-bash)
+  for shell commands. `bash`, the file tools, and GitHub all see the same files,
+  so the agent can genuinely create and run a small project.
+- **`eryn.github`** adds `github_issues`, `github_issue`, `github_clone`,
+  `github_branch`, `github_commit`, and `github_pull_request`, authenticated as a
+  GitHub App. `github_clone` downloads a repository tarball straight into the
+  workspace; edits are committed and a PR opened without a local `git`.
+
 ## Behaviour
 
 - **Mention to start.** A guild mention opens a thread named after the request
@@ -82,7 +97,23 @@ echo "SESSION_SECRET=$(openssl rand -hex 32)"
 
 Put both in `.dev.vars`.
 
-### 3. Deploy
+### 3. GitHub App (optional)
+
+The GitHub tools authenticate as a GitHub App, so no personal token is stored.
+
+1. Create an App at <https://github.com/settings/apps/new>. Set its **Setup URL**
+   (and enable *Redirect on update*) to
+   `https://eryn.otbeaumont.me/github/callback`.
+2. Grant repository permissions: **Contents: Read and write**, **Issues:
+   Read-only**, **Pull requests: Read and write**, **Metadata: Read-only**.
+3. Generate a private key. Put the App id, the whole PEM, and the App's URL slug
+   into `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_SLUG`.
+4. In `/setup`, an admin clicks **Install GitHub App** for their server and sets
+   the `owner/repo` to work in.
+
+Without these, Eryn still works; the GitHub tools are simply absent.
+
+### 4. Deploy
 
 ```sh
 pnpm run typecheck
@@ -114,6 +145,9 @@ against Discord. Removing a key takes effect for new turns immediately.
 | `DISCORD_CLIENT_SECRET`        | secret | —                             | OAuth2 client secret for the setup sign-in          |
 | `ENCRYPTION_KEY`               | secret | —                             | base64url 32-byte key encrypting guild credentials  |
 | `SESSION_SECRET`               | secret | —                             | Signs the OAuth state and session cookies           |
+| `GITHUB_APP_ID`                | secret | —                             | GitHub App id (optional; enables the GitHub tools)  |
+| `GITHUB_APP_PRIVATE_KEY`       | secret | —                             | GitHub App private key, PEM (optional)              |
+| `GITHUB_APP_SLUG`              | text   | empty                         | GitHub App URL slug, for the install link           |
 | `PUBLIC_ORIGIN`                | text   | `https://eryn.otbeaumont.me`  | Origin linked from Discord messages                 |
 | `DISCORD_KEEPALIVE_SECONDS`    | text   | `60`                          | Gateway keepalive alarm interval                    |
 | `DISCORD_TURN_TIMEOUT_SECONDS` | text   | `900`                         | Seconds before a turn is interrupted                |
@@ -124,10 +158,11 @@ Durable Object binding, and passed to the thread's session for that turn.
 
 ## Known limits
 
-- The OpenCode Workerd profile has no local filesystem or process execution, so
-  the agent is a conversational assistant: it reasons, plans, and can use
-  network-based tools, but cannot edit files or run a shell. See
-  <https://opencode.ai/v2/docs/build/sdk/cloudflare>.
+- The virtual filesystem lives in the thread's Durable Object storage, one key
+  per file, and is scoped to the thread — it is not the host's filesystem, and
+  very large files are bounded by Durable Object storage limits. The shell is
+  `just-bash`, so it covers common commands but not every Unix tool (or real
+  network access).
 - Guild channels only; DMs have no threads and are ignored.
 - A gateway outage between an eviction and the next alarm is not replayed unless
   Discord still holds the resumable session, so a mention in that window can be
