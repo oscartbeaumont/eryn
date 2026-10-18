@@ -87,6 +87,8 @@ interface Turn {
 	done: boolean;
 	interrupted: boolean;
 	failed: boolean;
+	/** Why the turn failed, when the provider or agent reported a reason. */
+	error?: string;
 	readonly resolve: () => void;
 	readonly completed: Promise<void>;
 }
@@ -113,6 +115,36 @@ function completeTurn(turn: Turn): void {
 	if (turn.done) return;
 	turn.done = true;
 	turn.resolve();
+}
+
+/** Split a stored `provider/model` reference for the session API. */
+function parseModelRef(model: string): { providerID: string; id: string } | undefined {
+	const at = model.indexOf("/");
+	if (at <= 0 || at === model.length - 1) return undefined;
+	return { providerID: model.slice(0, at), id: model.slice(at + 1) };
+}
+
+/** The error detail an SDK failure carries, if any. */
+function errorDetail(error: unknown): string | undefined {
+	if (!error || typeof error !== "object") return undefined;
+	const shape = error as { message?: unknown; type?: unknown };
+	if (typeof shape.message === "string" && shape.message.trim()) return shape.message.trim();
+	if (typeof shape.type === "string") return shape.type;
+	return undefined;
+}
+
+/**
+ * What to say when a turn failed. The SDK reports the provider's own message,
+ * which is far more useful than a generic apology, and the fix is almost always
+ * the model or the key for this server.
+ */
+function failureNote(error: string): string {
+	const hint = /deprecat|unavailable|not found/i.test(error)
+		? "\n\nThe model for this server is no longer available — pick another in the console."
+		: /credential|unauthor|401|403/i.test(error)
+			? "\n\nThe key for this server was rejected — check or replace it in the console."
+			: "";
+	return `**That turn failed.**\n> ${error}${hint}`;
 }
 
 /** Render the streamed text so far, preferring messages that belong to a step. */
@@ -163,6 +195,8 @@ export class ErynSession extends DurableObject<Env> {
 	private mcpToken: Promise<string | undefined> | undefined;
 	/** The model catalogue for the current host, fetched at most once per host. */
 	private models: ModelOption[] | undefined;
+	/** The model already selected on a thread's session, so we only switch once. */
+	private readonly appliedModels = new Map<string, string>();
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -363,31 +397,38 @@ export class ErynSession extends DurableObject<Env> {
 	// --- A turn -----------------------------------------------------------------
 
 	private async prompt(request: PromptRequest): Promise<void> {
-		const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
-		const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
-		const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
-
 		const stream = new DiscordStream(this.rest, request.threadId);
-		await stream.start();
-
 		const run = this.runs.get(request.threadId) ?? {};
 		const turn = createTurn(request.threadId);
 		run.turn = turn;
 		run.stream = stream;
 		this.runs.set(request.threadId, run);
-		const stopTyping = this.startTyping(request.threadId);
 
+		let stopTyping: () => void = () => undefined;
 		try {
+			// Announced before anything slow, so the thread never sits silent while
+			// the host boots.
+			await stream.start();
+			stopTyping = this.startTyping(request.threadId);
+
+			const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
+			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
+			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
+			await this.applyModel(host, request.threadId, sessionID, request.model ?? MODEL);
+
 			await host.sessions.prompt({ sessionID, text: request.text });
 			const finished = await this.wait(turn);
 			if (!finished) await this.interrupt(request.threadId).catch(() => undefined);
 
 			const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
-			const body = final ?? renderTurn(turn);
+			const body = turn.error ? failureNote(turn.error) : (final ?? renderTurn(turn));
 			const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
 			await stream.finish(body, suffix);
 		} catch (error) {
-			await stream.finish(`I hit an error: ${describeError(error)}`);
+			log(`prompt failed: ${describeError(error)}`);
+			// Always say something: a silent failure is indistinguishable from a
+			// hung turn, which is exactly how a stuck "Thinking…" reads.
+			await stream.finish(`I hit an error before I could finish: ${describeError(error)}`);
 		} finally {
 			stopTyping();
 			turn.done = true;
@@ -398,6 +439,32 @@ export class ErynSession extends DurableObject<Env> {
 				// Drop the thread entry so the object has nothing left to hold on to.
 				this.runs.delete(request.threadId);
 			}
+		}
+	}
+
+	/**
+	 * Point the session at the guild's chosen model.
+	 *
+	 * This is not redundant with the config's `model`. In this SDK the config
+	 * value does not reach session model selection at all — sessions run the
+	 * catalogue's default instead, which is a free model that can be deprecated
+	 * out from under the bot, failing every turn. Switching the session
+	 * explicitly is what actually applies the choice.
+	 */
+	private async applyModel(
+		host: OpenCodeWorkerd.Interface,
+		threadId: string,
+		sessionID: string,
+		model: string,
+	): Promise<void> {
+		if (this.appliedModels.get(threadId) === model) return;
+		const ref = parseModelRef(model);
+		if (!ref) return;
+		try {
+			await host.sessions.switchModel({ sessionID, model: ref });
+			this.appliedModels.set(threadId, model);
+		} catch (error) {
+			log(`could not select model ${model}: ${describeError(error)}`);
 		}
 	}
 
@@ -547,6 +614,15 @@ export class ErynSession extends DurableObject<Env> {
 			case "session.execution.failed": {
 				turn.failed = true;
 				completeTurn(turn);
+				return;
+			}
+			case "session.step.failed": {
+				// The SDK puts the provider's own message here — "Model X has been
+				// deprecated", "Invalid credential" — which is the only place the
+				// real reason for a failure appears. Without it the reply can only
+				// say "no output" and give no clue what to fix.
+				turn.failed = true;
+				turn.error ??= errorDetail(data.error);
 				return;
 			}
 			case "session.execution.interrupted": {

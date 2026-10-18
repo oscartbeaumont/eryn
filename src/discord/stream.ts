@@ -71,7 +71,13 @@ export class DiscordStream {
 			}, wait);
 	}
 
-	/** Write the final text (plus an optional suffix) and stop editing. */
+	/**
+	 * Write the final text (plus an optional suffix) and stop editing.
+	 *
+	 * Never rejects. If the final write is what fails, a thrown error here would
+	 * leave the message showing the last spinner frame — which reads as a hung
+	 * turn rather than a failed one — so the failure is logged and swallowed.
+	 */
 	async finish(text: string, suffix?: string): Promise<void> {
 		this.finished = true;
 		if (this.timer) {
@@ -80,8 +86,12 @@ export class DiscordStream {
 		}
 		this.stopLoading();
 		await this.pending.catch(() => undefined);
-		const body = [text.trim(), suffix?.trim()].filter(Boolean).join("\n\n") || "_(no output)_";
-		await this.write(body);
+		const body = [text.trim(), suffix?.trim()].filter(Boolean).join("\n\n") || "_Eryn produced no output._";
+		try {
+			await this.write(body);
+		} catch (error) {
+			console.log(`[eryn:stream] could not write the final message: ${describeError(error)}`);
+		}
 	}
 
 	private stopLoading(): void {
