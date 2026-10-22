@@ -57,6 +57,8 @@ interface ModelOption {
 	provider: string;
 	status: string;
 	enabled: boolean;
+	/** Whether this guild has connected the provider the model belongs to. */
+	connected: boolean;
 }
 
 /**
@@ -212,27 +214,41 @@ type HostIntegrationMethod =
  * `external` needs a credential chain the platform provides.
  */
 function describeMethod(method: HostIntegrationMethod): IntegrationMethodOption | undefined {
+	// Every read below is guarded, because this runs over every provider a host
+	// knows: one method that is not shaped the way the rest are must not be able
+	// to throw the whole catalogue away, which reads to the console as "no
+	// providers" rather than as a failure.
+	const label = (fallback: string) => {
+		const value = (method as { label?: unknown }).label;
+		return typeof value === "string" && value.trim() ? value.trim() : fallback;
+	};
 	switch (method.type) {
 		case "key":
-			return { type: "key", label: method.label?.trim() || "API key", supported: true };
+			return { type: "key", label: label("API key"), supported: true };
 		case "oauth": {
-			const fields = (method.form ?? []).map(describeField);
+			const fields = (Array.isArray(method.form) ? method.form : []).map(describeField);
 			return {
 				type: "oauth",
-				id: method.id,
-				label: method.label,
+				id: typeof method.id === "string" ? method.id : "",
+				label: label("Sign in"),
 				// A flow that asks for something is only offered if every field it asks
 				// for is one this console can actually collect.
 				supported: fields.every((field) => field !== undefined),
 				fields: fields.filter((field): field is ProviderField => field !== undefined),
 			};
 		}
-		case "env":
-			return { type: "env", label: `Environment variable (${method.names.join(", ")})`, supported: false };
+		case "env": {
+			const names = (Array.isArray(method.names) ? method.names : []).filter((name): name is string => typeof name === "string");
+			return {
+				type: "env",
+				label: names.length ? `Environment variable (${names.join(", ")})` : "Environment variable",
+				supported: false,
+			};
+		}
 		case "command":
-			return { type: "command", label: method.label, supported: false };
+			return { type: "command", label: label("Run a command"), supported: false };
 		case "external":
-			return { type: "external", label: method.label, supported: false };
+			return { type: "external", label: label("External credential"), supported: false };
 		default:
 			return undefined;
 	}
@@ -670,27 +686,36 @@ export class ErynSession extends DurableObject<Env> {
 	}
 
 	/**
-	 * The models of every provider the guild has connected.
+	 * Every model the host knows about, with the connected providers first.
 	 *
-	 * Nothing connected means an empty list rather than every model in the
-	 * catalogue: offering a model whose provider has no credential would promise
-	 * something a turn cannot do.
+	 * Not only the connected ones: a provider the deployment can reach but that
+	 * nobody has connected yet still has a catalogue worth showing, and the picker
+	 * marks it unavailable. Hiding those made a provider someone had configured
+	 * elsewhere look as though it did not exist.
 	 */
 	private async listModels(request: GuildRequest): Promise<ModelOption[]> {
 		const host = await this.hostFor(request.connections, request.model ?? MODEL, request.github);
 		if (!this.models) {
-			const connected = await this.connectedProviders(host);
+			// A catalogue that cannot be narrowed is still a catalogue, so a failure
+			// here costs the ordering rather than the whole list.
+			const connected = await this.connectedProviders(host).catch(() => new Set<string>());
 			const listed = await host.model.list({ location: { directory: LOCATION } });
 			this.models = listed.data
-				.filter((entry) => entry.status !== "deprecated" && connected.has(entry.providerID))
+				.filter((entry) => entry.status !== "deprecated")
 				.map((entry) => ({
 					id: `${entry.providerID}/${entry.id}`,
 					name: entry.name,
 					provider: entry.providerID,
 					status: entry.status,
 					enabled: entry.enabled,
+					connected: connected.has(entry.providerID),
 				}))
-				.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
+				.sort(
+					(a, b) =>
+						Number(b.connected) - Number(a.connected) ||
+						Number(b.enabled) - Number(a.enabled) ||
+						a.name.localeCompare(b.name),
+				);
 		}
 		return this.models;
 	}
@@ -720,20 +745,26 @@ export class ErynSession extends DurableObject<Env> {
 		try {
 			const host = await this.hostFor(body.connections, body.model ?? MODEL, body.github);
 			const listed = await host.integration.list({ location: { directory: LOCATION } });
-			const integrations: IntegrationOption[] = listed.data
-				.map((integration) => ({
-					id: String(integration.id),
-					name: integration.name || String(integration.id),
-					connected: integration.connections.length > 0,
-					methods: integration.methods
-						.map(describeMethod)
-						.filter((method): method is IntegrationMethodOption => method !== undefined),
-				}))
-				// A provider whose methods we cannot describe at all is dropped. Ones we
-				// can describe but cannot run stay, so the console can still name a
-				// provider a server connected before it changed shape.
-				.filter((integration) => integration.methods.length > 0)
-				.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
+			const integrations: IntegrationOption[] = [];
+			for (const entry of Array.isArray(listed.data) ? listed.data : []) {
+				try {
+					integrations.push({
+						id: String(entry.id),
+						name: entry.name || String(entry.id),
+						connected: Array.isArray(entry.connections) && entry.connections.length > 0,
+						methods: (Array.isArray(entry.methods) ? entry.methods : [])
+							.map(describeMethod)
+							.filter((method): method is IntegrationMethodOption => method !== undefined),
+					});
+				} catch (error) {
+					// Named, so a provider that cannot be described is a line in the log
+					// rather than a hole in the list.
+					log(`could not describe ${String((entry as { id?: unknown }).id)}: ${describeError(error)}`);
+				}
+			}
+			// Every provider is returned, even one with no flow this deployment can
+			// run, so the console can name it and say why it is not offered.
+			integrations.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
 			return Response.json({ integrations });
 		} catch (error) {
 			log(`could not list integrations: ${describeError(error)}`);

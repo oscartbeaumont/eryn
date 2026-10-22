@@ -302,6 +302,7 @@ function GuildCard(props: {
 	const [catalogue, setCatalogue] = createSignal<"loading" | "ready" | "error">("loading");
 	const [catalogueError, setCatalogueError] = createSignal<string>();
 	const [providers, setProviders] = createSignal<Provider[]>([]);
+	const [providersError, setProvidersError] = createSignal<string>();
 
 	/**
 	 * The catalogue comes from this server's own OpenCode instance, so it is
@@ -327,11 +328,15 @@ function GuildCard(props: {
 	/** Every provider this deployment offers, with the flows each one supports. */
 	async function loadProviders() {
 		try {
-			setProviders((await fetchProviders(props.guild.id)).integrations);
-		} catch {
+			const result = await fetchProviders(props.guild.id);
+			setProviders(result.integrations);
+			setProvidersError(result.error);
+		} catch (error) {
 			// The list is only needed to add or name a provider; failing to read it
-			// must not take the rest of the card down with it.
+			// must not take the rest of the card down with it, but it is said out
+			// loud rather than shown as an empty list.
 			setProviders([]);
+			setProvidersError(error instanceof Error ? error.message : String(error));
 		}
 	}
 
@@ -387,7 +392,10 @@ function GuildCard(props: {
 		if (catalogue() === "loading") return "Loading models from this server's OpenCode instance…";
 		if (catalogue() === "error") return `Could not load models: ${catalogueError()}`;
 		if (models().length === 0) return "This provider reported no models. You can still type a reference.";
-		return `${models().length} models available. Search, or type any provider/model reference.`;
+		// Every provider is listed, so the useful number is how many can actually
+		// run here — the rest are shown so a configured provider is not invisible.
+		const usable = models().filter((model) => model.enabled).length;
+		return `${models().length} models, ${usable} usable with the providers connected here. Search, or type any provider/model reference.`;
 	}
 
 	return (
@@ -439,6 +447,7 @@ function GuildCard(props: {
 			<AddProvider
 				guild={props.guild}
 				providers={providers()}
+				error={providersError()}
 				onResult={(kind, message) => {
 					props.onResult(kind, message);
 				}}
@@ -516,6 +525,8 @@ function GuildCard(props: {
 function AddProvider(props: {
 	guild: Guild;
 	providers: Provider[];
+	/** Why the catalogue could not be read, when it could not. */
+	error?: string;
 	onResult: (kind: NoticeState["kind"], message: string) => void;
 }) {
 	const [open, setOpen] = createSignal(false);
@@ -675,9 +686,13 @@ function AddProvider(props: {
 								}))}
 								placeholder="Search providers…"
 								emptyText={
-									props.providers.length === 0
-										? "No providers are available to this server yet."
-										: "No provider matches that search."
+									props.error
+										? `The provider list could not be read: ${props.error}`
+										: props.providers.length === 0
+											? "No providers are available to this server yet."
+											: query().trim()
+												? "No provider matches that search."
+												: "No provider here can be connected from this deployment."
 								}
 								onInput={setQuery}
 								onPick={(option) => choose(props.providers.find((provider) => provider.id === option.id))}

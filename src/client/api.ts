@@ -78,6 +78,8 @@ export interface ModelOption {
 	provider: string;
 	status: string;
 	enabled: boolean;
+	/** Whether the provider behind it is connected for this server. */
+	connected?: boolean;
 }
 
 export interface ModelsResult {
@@ -188,8 +190,8 @@ export function saveGuild(input: SaveGuildInput): Promise<ApiResult> {
  * this is the same catalogue a turn resolves against, so a provider added
  * upstream shows up here without a change to Eryn.
  */
-export function fetchProviders(guildId: string): Promise<{ integrations: Provider[] }> {
-	return request<{ integrations: Provider[] }>("/api/providers", {
+export function fetchProviders(guildId: string): Promise<{ integrations: Provider[]; error?: string }> {
+	return request<{ integrations: Provider[]; error?: string }>("/api/providers", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ guild_id: guildId }),

@@ -382,6 +382,17 @@ that server's own OpenCode instance rather than a hardcoded set — the same
 catalogue a turn would resolve against, so it cannot drift from what the agent
 can use. Any `provider/model` reference can still be typed by hand.
 
+Every provider that instance knows is listed, not only the ones connected here:
+a provider someone configured elsewhere still has a catalogue worth seeing, and
+the picker marks the models that cannot run yet. Connected providers come first,
+and the hint under the field says how many of the listed models are usable.
+
+The provider catalogue behind **Connect a provider** is read defensively, per
+provider: a provider whose methods are not shaped like the rest is logged and
+skipped rather than throwing, which would empty the whole list and read as
+"there are no providers" instead of as a failure. If the list cannot be read at
+all, the console says why.
+
 The Bot page lists only servers the user can manage
 (`MANAGE_GUILD`/`ADMINISTRATOR`/owner), and every save re-checks that permission
 against Discord. Disconnecting a provider takes effect for new turns immediately.

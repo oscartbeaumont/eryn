@@ -307,13 +307,14 @@ async function providerRequest<T>(guildId: string, path: string, body: Record<st
 }
 
 /** Every provider a guild could connect, from its own embedded OpenCode server. */
-async function listIntegrations(guildId: string): Promise<IntegrationOption[]> {
+async function listIntegrations(guildId: string): Promise<{ integrations: IntegrationOption[]; error?: string }> {
 	try {
 		const body = await providerRequest<{ integrations?: IntegrationOption[] }>(guildId, "/session/integrations", {});
-		return Array.isArray(body.integrations) ? body.integrations : [];
-	} catch {
-		// A guild whose object cannot answer has no providers to offer.
-		return [];
+		return { integrations: Array.isArray(body.integrations) ? body.integrations : [] };
+	} catch (error) {
+		// A guild whose object cannot answer has no providers to offer, but saying
+		// so beats an empty list that reads as "there are none".
+		return { integrations: [], error: describe(error) };
 	}
 }
 
@@ -398,7 +399,7 @@ async function handleSetupPost(
 
 		// The provider has to be one this deployment's own catalogue offers, so a
 		// stale browser cannot store a credential nothing will ever read.
-		const integration = (await listIntegrations(form.guild_id)).find((entry) => entry.id === integrationID);
+		const integration = (await listIntegrations(form.guild_id)).integrations.find((entry) => entry.id === integrationID);
 		if (!integration) return json({ error: "That provider is not one this deployment offers." }, 400);
 
 		try {
@@ -442,7 +443,7 @@ async function handleProviders(
 ): Promise<HttpServerResponse.HttpServerResponse> {
 	const allowed = await authorizedGuild(request, guildId);
 	if (!allowed.ok) return allowed.response;
-	return json({ integrations: await listIntegrations(guildId) });
+	return json(await listIntegrations(guildId));
 }
 
 /**
