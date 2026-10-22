@@ -189,8 +189,16 @@ export class ErynSession extends DurableObject<Env> {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
 	private consuming: Promise<void> | undefined;
-	/** Which thread each OpenCode session belongs to, so events can be routed. */
-	private readonly sessions = new Map<string, string>();
+	/**
+	 * A thread's session, and the reverse mapping.
+	 *
+	 * Both directions are needed, because the two sides know different things: a
+	 * prompt knows the thread it belongs to, and an event knows only the session
+	 * that produced it. Keeping a single map and reading it the other way round
+	 * silently matches nothing, which reads as a turn that never finishes.
+	 */
+	private readonly sessionByThread = new Map<string, string>();
+	private readonly threadBySession = new Map<string, string>();
 	/** The minted MCP bearer token, reused for the object's lifetime. */
 	private mcpToken: Promise<string | undefined> | undefined;
 	/** The model catalogue for the current host, fetched at most once per host. */
@@ -412,6 +420,10 @@ export class ErynSession extends DurableObject<Env> {
 			stopTyping = this.startTyping(request.threadId);
 
 			const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
+			// The reply and the completion signal both arrive as events, so a
+			// stream that died since the last turn has to be replaced before this
+			// one starts; otherwise the turn would run blind until it timed out.
+			this.startConsuming(host);
 			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
 			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 			await this.applyModel(host, request.threadId, sessionID, request.model ?? MODEL);
@@ -501,11 +513,24 @@ export class ErynSession extends DurableObject<Env> {
 
 	/** A thread's OpenCode session id, if it has been created. */
 	private async sessionFor(threadId: string): Promise<string | undefined> {
-		const cached = this.sessions.get(threadId);
+		const cached = this.sessionByThread.get(threadId);
 		if (cached) return cached;
 		const stored = await this.ctx.storage.get<string>(SESSION_PREFIX + threadId);
-		if (stored) this.sessions.set(threadId, stored);
+		if (stored) this.remember(threadId, stored);
 		return stored;
+	}
+
+	/** Record that a thread is served by a session, in both directions. */
+	private remember(threadId: string, sessionID: string): void {
+		this.sessionByThread.set(threadId, sessionID);
+		this.threadBySession.set(sessionID, threadId);
+	}
+
+	/** Forget a thread's session, so a dead session id is never reused. */
+	private forget(threadId: string): void {
+		const sessionID = this.sessionByThread.get(threadId);
+		if (sessionID !== undefined) this.threadBySession.delete(sessionID);
+		this.sessionByThread.delete(threadId);
 	}
 
 	/** The session for a thread, created on first use and stored durably. */
@@ -520,12 +545,12 @@ export class ErynSession extends DurableObject<Env> {
 				await host.sessions.get({ sessionID: existing });
 				return existing;
 			} catch {
-				this.sessions.delete(threadId);
+				this.forget(threadId);
 			}
 		}
 
 		const session = await host.sessions.create({ title, location: { directory: LOCATION } });
-		this.sessions.set(threadId, session.id);
+		this.remember(threadId, session.id);
 		await this.ctx.storage.put(SESSION_PREFIX + threadId, session.id);
 		return session.id;
 	}
@@ -563,9 +588,20 @@ export class ErynSession extends DurableObject<Env> {
 
 	// --- Event stream -----------------------------------------------------------
 
+	/**
+	 * Subscribe to the host's event stream, which is what both the streaming
+	 * reply and a turn's completion signal come from.
+	 *
+	 * The feed is volatile by contract: a slow consumer overflows it and the
+	 * stream fails. A subscription that ends is therefore not fatal, but it does
+	 * have to be replaced — otherwise every later turn in this object would run
+	 * with no events at all and hang until the turn timeout. `prompt` re-ensures
+	 * it at the start of every turn, and the identity guard keeps a stale
+	 * subscription's teardown from clearing the one that replaced it.
+	 */
 	private startConsuming(host: OpenCodeWorkerd.Interface): void {
 		if (this.consuming) return;
-		this.consuming = (async () => {
+		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
 					this.handleEvent(event);
@@ -573,10 +609,13 @@ export class ErynSession extends DurableObject<Env> {
 					log(`event handling failed: ${describeError(error)}`);
 				}
 			}
-		})().catch((error) => {
-			log(`event stream stopped: ${describeError(error)}`);
-			this.consuming = undefined;
-		});
+		})();
+		const settled = loop
+			.catch((error) => log(`event stream stopped: ${describeError(error)}`))
+			.then(() => {
+				if (this.consuming === settled) this.consuming = undefined;
+			});
+		this.consuming = settled;
 	}
 
 	private handleEvent(event: unknown): void {
@@ -585,7 +624,7 @@ export class ErynSession extends DurableObject<Env> {
 		const data = shape.data as Record<string, unknown>;
 		const sessionID = data.sessionID;
 		if (typeof sessionID !== "string") return;
-		const threadId = this.sessions.get(sessionID);
+		const threadId = this.threadBySession.get(sessionID);
 		if (!threadId) return;
 
 		const turn = this.runs.get(threadId)?.turn;
