@@ -211,10 +211,13 @@ on is therefore a deliberate act — the MCP page's Connect — and one that
 reverses: the tools stay registered and their visibility follows the connection,
 so disconnecting withdraws them without tearing anything down.
 
-Two limits are worth knowing. Messages are flattened to text, attachments are
-named rather than fetched, and a message is cut at 900 characters. And posting
-never parses mentions, so a message the model writes cannot ping a role or
-everyone by accident.
+Three limits are worth knowing. **Search depends on Discord's index**, which is
+built lazily per server: until it exists the endpoint answers `202` with code
+`110000`, and the tool says so rather than reporting no matches — paging a
+channel with `discord_messages` always works, and is what the tool points at.
+Messages are flattened to text, attachments are named rather than fetched, and a
+message is cut at 900 characters. And posting never parses mentions, so a
+message the model writes cannot ping a role or everyone by accident.
 
 ### The gateway
 

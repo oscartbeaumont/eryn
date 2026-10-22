@@ -172,7 +172,7 @@ export const DISCORD_TOOLS: readonly DiscordTool[] = [
 		name: "discord_search",
 		title: "Search Discord messages",
 		description:
-			"Search a Discord server's message history by text, optionally narrowed to one channel or author. Use this when you need to find something older than the recent history of a channel.",
+			"Search a Discord server's message history by text, optionally narrowed to one channel or author. Use this when you need to find something older than the recent history of a channel. Discord builds this server's index lazily, so a search can come back before it is ready.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -195,6 +195,11 @@ export const DISCORD_TOOLS: readonly DiscordTool[] = [
 				limit: numberArg(args.limit, 25),
 				offset: numberArg(args.offset, 0),
 			});
+			// An unbuilt index reads as zero results, which would send the model away
+			// believing there is nothing to find.
+			if (found.indexing) {
+				return "Discord is still building this server's search index, so nothing can be searched yet. Read the channel with discord_messages for recent history, or try again later.";
+			}
 			if (!found.messages.length) return `No messages matched (of ${found.total} the index counted).`;
 			const header = `${found.messages.length} of ${found.total} matches:`;
 			return [header, ...found.messages.map(messageLine)].join("\n");

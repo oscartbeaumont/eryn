@@ -284,21 +284,28 @@ export function discordRest(token: string) {
 		 *
 		 * Discord returns results grouped by thread, so the arrays are flattened
 		 * here and the caller sees messages in the order the index returned them.
+		 *
+		 * The search index is built lazily: until it exists the request succeeds
+		 * with `202` and code `110000`, which is emphatically not "no matches" and
+		 * is reported separately so a caller cannot mistake one for the other.
 		 */
 		async searchMessages(
 			guildId: string,
 			options: { content?: string; authorId?: string; channelId?: string; limit?: number; offset?: number } = {},
-		): Promise<{ total: number; messages: DiscordMessageView[] }> {
+		): Promise<{ total: number; messages: DiscordMessageView[]; indexing?: boolean }> {
 			const query = new URLSearchParams();
 			if (options.content) query.set("content", options.content);
 			if (options.authorId) query.append("author_id", options.authorId);
 			if (options.channelId) query.append("channel_id", options.channelId);
 			query.set("limit", String(Math.min(Math.max(options.limit ?? 25, 1), 25)));
 			if (options.offset) query.set("offset", String(options.offset));
-			const result = await request<{ messages?: DiscordMessageView[][]; total_results?: number }>(
+			const result = await request<{ messages?: DiscordMessageView[][]; total_results?: number; code?: number }>(
 				"GET",
 				`/guilds/${guildId}/messages/search?${query}`,
 			);
+			if (result?.code === 110000 || (result && !Array.isArray(result.messages) && result.code !== undefined)) {
+				return { total: 0, messages: [], indexing: true };
+			}
 			const grouped = Array.isArray(result?.messages) ? result.messages : [];
 			return {
 				total: typeof result?.total_results === "number" ? result.total_results : 0,
