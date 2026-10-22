@@ -196,6 +196,12 @@ export function discordRest(token: string) {
 			return Array.isArray(result) ? result : [];
 		},
 
+		/** A guild's owner, whose MCP tools the agent in that guild acts with. */
+		async guildOwner(guildId: string): Promise<string | undefined> {
+			const result = await request<{ owner_id?: unknown }>("GET", `/guilds/${guildId}`);
+			return typeof result?.owner_id === "string" ? result.owner_id : undefined;
+		},
+
 		/** The guilds the bot is a member of, used to show install status on setup. */
 		async guilds(): Promise<{ id: string; name: string }[]> {
 			const result = await request<{ id?: unknown; name?: unknown }[]>("GET", "/users/@me/guilds");

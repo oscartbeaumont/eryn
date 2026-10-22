@@ -164,6 +164,41 @@ Everything else sleeps:
 The unavoidable part is the one resident gateway object; there is no way to
 receive arbitrary Discord messages without a persistent gateway connection.
 
+## Connecting your own MCP servers
+
+`/console/mcp` takes a remote MCP server by URL, and Eryn becomes its client:
+the Discord agent can call its tools, and the same server can be dropped from
+your own harness once the endpoint fronts it.
+
+Only **remote** servers can be connected. A Worker has no process plane, so a
+stdio server (`browser-control`, `pencil`, `google-calendar`, …) cannot be
+reached at all — it has to keep running locally, or be put behind a public URL
+by something like `mcp-proxy`.
+
+**Eryn owns the sign-in.** The MCP authorization spec is OAuth 2.1 with
+protected-resource metadata, dynamic client registration, and a `resource`
+indicator; `src/mcp/auth.ts` implements all three, and the callback lands on
+`/oauth/mcp/callback`. It has to be Eryn's flow: OpenCode's own MCP client
+receives its callback on a `127.0.0.1` listener (`createServer` in
+`@opencode/core/dist/mcp/oauth.js`), which a Worker can neither open nor be
+reached at. So the agent is handed a plain bearer header instead, and the token
+is refreshed on use.
+
+Servers belong to a **Discord user**, not to a server, because they are a
+person's tools: set them up once and they follow you into every Discord server
+you run Eryn in. The agent acts with the **guild owner's** servers — resolved
+from Discord once per object — so a server's tools are the owner's, not an
+admin's. Tokens and the registered client live in `ErynRegistry` sealed under
+`ENCRYPTION_KEY`, alongside provider keys.
+
+**Not yet: the gateway.** Today each connected server is wired into the agent
+directly. Exposing their tools *through* Eryn's own `/mcp` — so a harness points
+at one URL and drops its local copies, with `notifications/tools/list_changed`
+when the dashboard toggles one — is the next change. It needs a per-caller tool
+registry, which Effect's `McpServer` does not provide: one instance per isolate
+serves one `tools` array, so a shared endpoint would show every user's tool
+names to every other user.
+
 ## Behaviour
 
 - **Mention to start.** A guild mention opens a thread named after the request

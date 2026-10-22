@@ -3,7 +3,11 @@ import { capture } from "./analytics";
 import {
 	callMcp,
 	exchangeMcpCode,
+	fetchMcpServers,
+	mcpServerAction,
 	registerMcpClient,
+	startMcpSignIn,
+	type McpServer,
 	type McpTokens,
 } from "./api";
 import { session } from "./session";
@@ -72,7 +76,7 @@ async function pkce(): Promise<{ verifier: string; challenge: string }> {
 }
 
 export default function ConsoleMcp() {
-	const [status, setStatus] = createSignal<Status>({ kind: "idle", message: "" });
+	const [status, setStatus] = createSignal<Status>(redirectStatus());
 	const [tokens, setTokens] = createSignal<McpTokens>();
 	const [discovered, setDiscovered] = createSignal<string[]>();
 	const origin = window.location.origin;
@@ -187,6 +191,8 @@ export default function ConsoleMcp() {
 						<Notice kind={status().kind === "error" ? "error" : "ok"}>{status().message}</Notice>
 					</Show>
 
+					<McpServers onNotice={(kind, message) => setStatus({ kind: kind === "error" ? "error" : "ok", message })} />
+
 					<div class="grid gap-4">
 						<div class="border border-line bg-surface p-6">
 							<div class="mb-4 flex items-center gap-3">
@@ -299,6 +305,204 @@ export default function ConsoleMcp() {
 			<Footer />
 		</>
 	);
+}
+
+/**
+ * The remote MCP servers this user has connected.
+ *
+ * They belong to the person rather than to a Discord server, so they are set up
+ * once here and follow the user into every server they run Eryn in. A server
+ * that wants a sign-in gets one through Eryn, which is the only party that can
+ * receive the callback.
+ */
+function McpServers(props: { onNotice: (kind: "ok" | "error", message: string) => void }) {
+	const [servers, setServers] = createSignal<McpServer[]>([]);
+	const [loaded, setLoaded] = createSignal(false);
+	const [busy, setBusy] = createSignal(false);
+	const [name, setName] = createSignal("");
+	const [url, setUrl] = createSignal("");
+	const [tools, setTools] = createSignal<{ id: string; list: { name: string; description: string }[] }>();
+
+	async function reload() {
+		try {
+			setServers((await fetchMcpServers()).servers);
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setLoaded(true);
+		}
+	}
+	void reload();
+
+	async function run(action: "remove" | "enable" | "disable", server: McpServer) {
+		setBusy(true);
+		try {
+			const result = await mcpServerAction({ action, id: server.id });
+			props.onNotice("ok", result.message ?? "Done.");
+			await reload();
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function add(event: SubmitEvent) {
+		event.preventDefault();
+		if (!url().trim()) return;
+		setBusy(true);
+		try {
+			const result = await mcpServerAction({ action: "add", name: name(), url: url() });
+			setName("");
+			setUrl("");
+			props.onNotice("ok", result.message ?? "Added.");
+			await reload();
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function signIn(server: McpServer) {
+		setBusy(true);
+		try {
+			const result = await startMcpSignIn(server.id);
+			if (!result.url) throw new Error("The sign-in could not be started.");
+			window.location.href = result.url;
+		} catch (error) {
+			props.onNotice("error", describe(error));
+			setBusy(false);
+		}
+	}
+
+	/** Ask the server itself what it offers, rather than trusting a cached list. */
+	async function inspect(server: McpServer) {
+		setBusy(true);
+		try {
+			const result = await mcpServerAction({ action: "tools", id: server.id });
+			setTools({ id: server.id, list: result.tools ?? [] });
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<div class="mb-8 border border-line bg-surface p-6">
+			<div class="mb-1 flex items-center gap-3">
+				<span class="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">Your MCP servers</span>
+			</div>
+			<p class="mb-4 max-w-[62ch] text-sm text-muted">
+				Add a remote MCP server by URL and Eryn can call its tools — from the Discord agent and from this endpoint,
+				so your own harness can drop its copy of the same server.
+			</p>
+
+			<Show when={loaded() && servers().length === 0}>
+				<p class="mb-4 border border-dashed border-line-strong px-4 py-3.5 text-sm text-muted">
+					No servers connected yet. Add one below — for example <code class="font-mono">https://mcp.context7.com/mcp</code>.
+				</p>
+			</Show>
+
+			<div class="mb-4 divide-y divide-line border border-line-strong">
+				<For each={servers()}>
+					{(server) => (
+						<div class="px-4 py-3.5">
+							<div class="flex flex-wrap items-center gap-3">
+								<span class="font-mono text-sm text-fg">{server.name}</span>
+								<Chip tone={server.enabled ? "ok" : "danger"}>{server.enabled ? "On" : "Off"}</Chip>
+								<Show when={server.authorized}>
+									<Chip>Signed in</Chip>
+								</Show>
+								<span class="min-w-0 flex-1 truncate font-mono text-xs text-faint">{server.url}</span>
+								<div class="flex flex-wrap gap-2">
+									<Show when={!server.authorized}>
+										<button type="button" class={buttonClass.small} disabled={busy()} onClick={() => void signIn(server)}>
+											Sign in
+										</button>
+									</Show>
+									<button type="button" class={buttonClass.ghost} disabled={busy()} onClick={() => void inspect(server)}>
+										Tools
+									</button>
+									<button
+										type="button"
+										class={buttonClass.ghost}
+										disabled={busy()}
+										onClick={() => void run(server.enabled ? "disable" : "enable", server)}
+									>
+										{server.enabled ? "Disable" : "Enable"}
+									</button>
+									<button type="button" class={buttonClass.danger} disabled={busy()} onClick={() => void run("remove", server)}>
+										Remove
+									</button>
+								</div>
+							</div>
+							<Show when={tools()?.id === server.id ? tools() : undefined}>
+								{(current) => (
+									<div class="mt-3 border-t border-line pt-3">
+										<Show
+											when={current().list.length > 0}
+											fallback={<p class="text-xs text-faint">That server reported no tools.</p>}
+										>
+											<ul class="flex flex-col gap-1.5">
+												<For each={current().list}>
+													{(tool) => (
+														<li class="text-xs text-muted">
+															<span class="font-mono text-fg">{tool.name}</span>
+															{tool.description ? ` — ${tool.description}` : ""}
+														</li>
+													)}
+												</For>
+											</ul>
+										</Show>
+									</div>
+								)}
+							</Show>
+						</div>
+					)}
+				</For>
+			</div>
+
+			<form class="flex flex-wrap items-end gap-3" onSubmit={add}>
+				<label class="min-w-0 flex-1">
+					<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Name</span>
+					<input
+						type="text"
+						value={name()}
+						placeholder="context7"
+						spellcheck={false}
+						class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+						onInput={(event) => setName(event.currentTarget.value)}
+					/>
+				</label>
+				<label class="min-w-0 flex-[2]">
+					<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">URL</span>
+					<input
+						type="text"
+						value={url()}
+						placeholder="https://example.com/mcp"
+						spellcheck={false}
+						class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+						onInput={(event) => setUrl(event.currentTarget.value)}
+					/>
+				</label>
+				<button type="submit" class={buttonClass.primary} disabled={busy()}>
+					Add
+				</button>
+			</form>
+		</div>
+	);
+}
+
+/** A notice carried in on redirect, from an MCP sign-in callback. */
+function redirectStatus(): Status {
+	const params = new URLSearchParams(window.location.search);
+	const ok = params.get("ok");
+	if (ok) return { kind: "ok", message: ok };
+	const error = params.get("error");
+	if (error) return { kind: "error", message: error };
+	return { kind: "idle", message: "" };
 }
 
 function describe(error: unknown): string {

@@ -33,6 +33,7 @@ import { createGitHub } from "./github";
 import { githubPlugin } from "./opencode/github";
 import { mintInternalToken } from "./mcp/access";
 import { MCP_PATH } from "./mcp/oauth";
+import { ensureToken, readMcpServers, writeMcpServers, type McpServerRecord } from "./mcp/servers";
 import type { IntegrationMethodOption, IntegrationOption, ProviderField } from "./providers";
 import type { GuildConnection } from "./registry";
 
@@ -323,6 +324,15 @@ interface ThreadRun {
 	stream?: DiscordStream;
 }
 
+/** The shape the host's config wants for a remote MCP server. */
+type RemoteMcpServer = {
+	type: "remote";
+	url: string;
+	headers?: Record<string, string>;
+	oauth: false;
+	codemode: boolean;
+};
+
 interface Host {
 	promise: Promise<OpenCodeWorkerd.Interface>;
 	/** Signature of the provider set, so a changed or rotated credential rebuilds the host. */
@@ -330,6 +340,8 @@ interface Host {
 	model: string;
 	/** Signature of the GitHub binding, so a config change rebuilds the host. */
 	github: string;
+	/** Signature of the owner's MCP servers, so connecting one rebuilds the host. */
+	mcp: string;
 }
 
 export class ErynSession extends DurableObject<Env> {
@@ -357,6 +369,10 @@ export class ErynSession extends DurableObject<Env> {
 	private readonly threadBySession = new Map<string, string>();
 	/** The minted MCP bearer token, reused for the object's lifetime. */
 	private mcpToken: Promise<string | undefined> | undefined;
+	/** The guild's owner, resolved once. `null` records that Discord would not say. */
+	private owner: string | null | undefined;
+	/** Signature of the owner's MCP servers, so a change rebuilds the host. */
+	private mcpSignature = "";
 	/** The model catalogue for the current host, fetched at most once per host. */
 	private models: ModelOption[] | undefined;
 	/** The model already selected on a thread's session, so we only switch once. */
@@ -395,11 +411,16 @@ export class ErynSession extends DurableObject<Env> {
 			.map((connection) => `${connection.integrationID}:${connection.method}:${connection.key}`)
 			.sort()
 			.join("\u0000");
+		// The owner's MCP servers are read before the decision to rebuild, because
+		// connecting one has to take effect on the next turn rather than whenever
+		// something else happens to change the host.
+		const mcp = await this.mcpConfig();
 		if (
 			!this.host ||
 			this.host.connections !== signature ||
 			this.host.model !== model ||
-			this.host.github !== githubKey
+			this.host.github !== githubKey ||
+			this.host.mcp !== this.mcpSignature
 		) {
 			const previous = this.host?.promise;
 			this.abort?.abort();
@@ -424,7 +445,7 @@ export class ErynSession extends DurableObject<Env> {
 					model,
 					default_agent: "build",
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
-					mcp: await this.mcpConfig(),
+					mcp,
 				},
 				plugins,
 			}).then(async (host) => {
@@ -457,7 +478,7 @@ export class ErynSession extends DurableObject<Env> {
 				}
 				return host;
 			});
-			this.host = { promise, connections: signature, model, github: githubKey };
+			this.host = { promise, connections: signature, model, github: githubKey, mcp: this.mcpSignature };
 			this.consuming = undefined;
 			// A different provider set or model means a different catalogue.
 			this.models = undefined;
@@ -478,7 +499,7 @@ export class ErynSession extends DurableObject<Env> {
 	 * omitted, because an agent that cannot reach its own MCP is far better than
 	 * an agent that cannot answer at all.
 	 */
-	private mcpConfig(): Promise<Configuration["mcp"]> {
+	private async mcpConfig(): Promise<Configuration["mcp"]> {
 		this.mcpToken ??= (async () => {
 			const secret = this.env.SESSION_SECRET?.trim();
 			if (!secret) return undefined;
@@ -488,22 +509,70 @@ export class ErynSession extends DurableObject<Env> {
 			this.mcpToken = undefined;
 			return undefined;
 		});
-		return this.mcpToken.then((token) => {
-			if (!token) return undefined;
+
+		const servers: Record<string, RemoteMcpServer> = { ...(await this.ownerMcpServers()) };
+		const token = await this.mcpToken;
+		if (token) {
 			const url = this.env.MCP_INTERNAL_URL?.trim() || `${this.publicOrigin()}${MCP_PATH}`;
-			return {
-				servers: {
-					eryn: {
-						type: "remote",
-						url,
-						headers: { Authorization: `Bearer ${token}` },
-						// Eryn's own token is already minted; never start a login flow.
-						oauth: false,
-						codemode: false,
-					},
-				},
+			servers.eryn = {
+				type: "remote",
+				url,
+				headers: { Authorization: `Bearer ${token}` },
+				// Eryn's own token is already minted; never start a login flow.
+				oauth: false,
+				codemode: false,
 			};
-		});
+		}
+		return Object.keys(servers).length ? { servers } : undefined;
+	}
+
+	/**
+	 * The MCP servers the guild's owner has connected, as the agent's own config.
+	 *
+	 * They are the owner's rather than the guild's because they are a person's
+	 * tools: the same set follows them into every server they run Eryn in. The
+	 * token is refreshed here and written back, so the registry keeps a usable
+	 * one, and the agent is handed a plain bearer header — OpenCode's own MCP
+	 * client cannot complete an OAuth flow inside a Worker, because it waits for
+	 * the callback on a `127.0.0.1` listener.
+	 */
+	private async ownerMcpServers(): Promise<Record<string, RemoteMcpServer>> {
+		const ownerId = await this.ownerId();
+		if (!ownerId) return {};
+		const servers = await readMcpServers(this.env, ownerId).catch(() => [] as McpServerRecord[]);
+		const enabled = servers.filter((server) => server.enabled && server.name !== "eryn");
+		this.mcpSignature = enabled.map((server) => `${server.name}:${server.url}`).join("|");
+		if (!enabled.length) return {};
+
+		const config: Record<string, RemoteMcpServer> = {};
+		const refreshed = new Map<string, McpServerRecord>();
+		for (const server of enabled) {
+			const resolved: { token?: string; updated?: McpServerRecord } = await ensureToken(server).catch(() => ({}));
+			const { token, updated } = resolved;
+			if (updated) refreshed.set(server.id, updated);
+			config[server.name] = {
+				type: "remote",
+				url: server.url,
+				// A stored token is presented directly, so no flow is ever started.
+				oauth: false,
+				codemode: false,
+				...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+			};
+		}
+		if (refreshed.size) {
+			await writeMcpServers(
+				this.env,
+				ownerId,
+				servers.map((server) => refreshed.get(server.id) ?? server),
+			).catch((error) => log(`could not store a refreshed MCP token: ${describeError(error)}`));
+		}
+		return config;
+	}
+
+	/** The guild's owner, resolved once per object. */
+	private async ownerId(): Promise<string | undefined> {
+		if (this.owner === undefined) this.owner = (await this.rest.guildOwner(this.guildId).catch(() => undefined)) ?? null;
+		return this.owner ?? undefined;
 	}
 
 	private publicOrigin(): string {

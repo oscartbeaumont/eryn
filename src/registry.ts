@@ -108,7 +108,43 @@ export class ErynRegistry extends DurableObject<Env> {
 		const path = new URL(request.url).pathname.split("/").filter(Boolean);
 		if (path[0] !== "registry") return json({ error: "not found" }, 404);
 		if (path[1] === "guild" && path[2]) return this.guild(request, path[2], path[3] === "key");
+		if (path[1] === "mcp" && path[2]) return this.mcpServers(request, decodeURIComponent(path[2]));
 		if (path[1] === "user" && path[2] && path[3] === "guilds") return this.userGuilds(request, path[2]);
+		return json({ error: "not found" }, 404);
+	}
+
+	/**
+	 * A user's connected MCP servers.
+	 *
+	 * Sealed as one blob, like a guild's provider keys, because the whole list is
+	 * always read and written together. Unlike a guild's, these belong to a
+	 * person: they follow the user across every server they run Eryn in.
+	 */
+	private async mcpServers(request: Request, userId: string): Promise<Response> {
+		const storageKey = `mcp:${userId}`;
+		const secret = this.env.ENCRYPTION_KEY;
+
+		if (request.method === "PUT") {
+			if (!secret) return json({ error: "registry is not configured" }, 500);
+			const body = (await request.json().catch(() => ({}))) as { servers?: unknown };
+			if (!Array.isArray(body.servers)) return json({ error: "servers is required" }, 400);
+			await this.ctx.storage.put<Sealed>(storageKey, await encryptSecret(secret, JSON.stringify(body.servers)));
+			return json({ ok: true });
+		}
+
+		if (request.method === "GET") {
+			const stored = await this.ctx.storage.get<Sealed>(storageKey);
+			if (!stored?.data || !secret) return json({ servers: [] });
+			const plaintext = await decryptSecret(secret, stored).catch(() => undefined);
+			if (!plaintext) return json({ servers: [] });
+			try {
+				const parsed = JSON.parse(plaintext) as unknown;
+				return json({ servers: Array.isArray(parsed) ? parsed : [] });
+			} catch {
+				return json({ servers: [] });
+			}
+		}
+
 		return json({ error: "not found" }, 404);
 	}
 

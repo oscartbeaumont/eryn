@@ -221,6 +221,62 @@ export function oauth(input: {
 	});
 }
 
+// --- MCP servers (the ones you connect) ---------------------------------------
+
+/** A remote MCP server this user has connected. The token stays on the backend. */
+export interface McpServer {
+	id: string;
+	name: string;
+	url: string;
+	enabled: boolean;
+	/** Whether a sign-in is stored, so the dashboard can say so. */
+	authorized: boolean;
+}
+
+export interface McpServersResult {
+	signedIn: boolean;
+	servers: McpServer[];
+}
+
+export interface McpServerResult extends ApiResult {
+	servers?: McpServer[];
+	/** What a live call to the server reported, for the "tools" action. */
+	tools?: { name: string; description: string }[];
+}
+
+/** The servers this user has connected. */
+export function fetchMcpServers(): Promise<McpServersResult> {
+	return request<McpServersResult>("/api/mcp/servers");
+}
+
+/** Add, remove, enable, disable, or inspect one of them. */
+export function mcpServerAction(input: {
+	action: "add" | "remove" | "enable" | "disable" | "tools";
+	id?: string;
+	name?: string;
+	url?: string;
+}): Promise<McpServerResult> {
+	return request<McpServerResult>("/api/mcp/servers", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/**
+ * Start a server's sign-in.
+ *
+ * The browser is sent to the returned URL; the authorization server brings it
+ * back to Eryn, which stores the tokens and returns it here.
+ */
+export function startMcpSignIn(id: string): Promise<{ url?: string; error?: string }> {
+	return request<{ url?: string; error?: string }>("/api/mcp/servers/oauth", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ action: "oauth", id }),
+	});
+}
+
 // --- MCP ----------------------------------------------------------------------
 
 /** What the consent screen needs to know about a pending authorization. */

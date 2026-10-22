@@ -39,6 +39,17 @@ import {
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
 import type { IntegrationOption, OAuthAttempt, OAuthAttemptStatus } from "./providers";
 import {
+	beginAuthorization,
+	discover,
+	exchangeCode as exchangeMcpCode,
+	newState,
+	registerClient as registerMcpClient,
+	type McpAuthorization,
+	type McpClientRegistration,
+} from "./mcp/auth";
+import { listTools, McpUnauthorized } from "./mcp/client";
+import { ensureToken, newServerId, readMcpServers, summarise, writeMcpServers, type McpServerRecord } from "./mcp/servers";
+import {
 	getGuildConfig,
 	getGuildSummary,
 	getUserGuilds,
@@ -86,6 +97,38 @@ const OAuthRequestSchema = Schema.Struct({
 	code: Schema.optional(Schema.String),
 	answer: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 });
+
+const McpServerRequestSchema = Schema.Struct({
+	action: Schema.String,
+	id: Schema.optional(Schema.String),
+	name: Schema.optional(Schema.String),
+	url: Schema.optional(Schema.String),
+});
+
+/** Where an MCP server sends the browser back once the user has approved. */
+const MCP_OAUTH_CALLBACK = "/oauth/mcp/callback";
+/** The signed, one-shot record of a sign-in that is under way. */
+const MCP_OAUTH_COOKIE = "eryn_mcp_oauth";
+const MCP_OAUTH_TTL_MS = 10 * 60 * 1_000;
+
+/**
+ * A sign-in in progress.
+ *
+ * It is carried in a signed cookie rather than a row, like every other piece of
+ * flow state here: it holds the PKCE verifier and the client we registered, and
+ * it is the only thing the callback needs to finish the exchange.
+ */
+interface PendingMcpOAuth {
+	typ: "mcp-oauth";
+	userId: string;
+	serverId: string;
+	verifier: string;
+	state: string;
+	redirectUri: string;
+	client: McpClientRegistration;
+	authorization: McpAuthorization;
+	exp: number;
+}
 
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -460,6 +503,205 @@ async function handleOAuth(
 	}
 }
 
+// --- MCP servers (the ones a user connects) -----------------------------------
+
+/** The servers this user has connected, without any credential in sight. */
+async function handleMcpServerList(
+	request: HttpServerRequest.HttpServerRequest,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ signedIn: false, servers: [] });
+	const servers = await readMcpServers(env, session.uid);
+	return json({ signedIn: true, servers: servers.map(summarise) });
+}
+
+/**
+ * The remote MCP servers the signed-in user has connected.
+ *
+ * These belong to the person, not to a server, so they are configured on the
+ * MCP page and follow them into every Discord server they run Eryn in. Nothing
+ * here talks to a guild, and no credential is ever returned to the browser.
+ */
+async function handleMcpServers(
+	request: HttpServerRequest.HttpServerRequest,
+	form: Schema.Schema.Type<typeof McpServerRequestSchema>,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ error: "Please sign in again." }, 401);
+
+	const servers = await readMcpServers(env, session.uid);
+
+	if (form.action === "add") {
+		const url = form.url?.trim();
+		const name = form.name?.trim() || (url ? new URL(url).hostname : "");
+		if (!url) return json({ error: "A URL is needed." }, 400);
+		if (!name) return json({ error: "A name is needed." }, 400);
+		try {
+			const parsed = new URL(url);
+			// A Worker can only reach a public origin; anything else would fail at
+			// the first call rather than here, which is a worse place to find out.
+			if (parsed.protocol !== "https:") return json({ error: "An MCP server must be reached over https." }, 400);
+		} catch {
+			return json({ error: "That is not a URL." }, 400);
+		}
+		if (servers.some((server) => server.name === name)) {
+			return json({ error: `A server named ${name} is already connected.` }, 400);
+		}
+		const record: McpServerRecord = { id: newServerId(), name, url, enabled: true, createdAt: Date.now() };
+		await writeMcpServers(env, session.uid, [...servers, record]);
+		return json({ ok: true, message: `${name} added.`, servers: [...servers, record].map(summarise) });
+	}
+
+	const target = servers.find((server) => server.id === form.id);
+	if (!target) return json({ error: "That server is not connected." }, 404);
+
+	if (form.action === "remove") {
+		await writeMcpServers(env, session.uid, servers.filter((server) => server.id !== target.id));
+		return json({ ok: true, message: `${target.name} removed.` });
+	}
+
+	if (form.action === "enable" || form.action === "disable") {
+		const enabled = form.action === "enable";
+		await writeMcpServers(
+			env,
+			session.uid,
+			servers.map((server) => (server.id === target.id ? { ...server, enabled } : server)),
+		);
+		return json({ ok: true, message: `${target.name} ${enabled ? "enabled" : "disabled"}.` });
+	}
+
+	if (form.action === "tools") {
+		// A live call, so the dashboard shows what the server actually offers
+		// rather than what it was believed to offer when it was added.
+		try {
+			const { token } = await ensureToken(target);
+			const tools = await listTools({ url: target.url, token });
+			return json({
+				ok: true,
+				tools: tools.map((tool) => ({ name: tool.name, description: tool.description ?? "" })),
+			});
+		} catch (error) {
+			if (error instanceof McpUnauthorized) return json({ error: "That server needs a sign-in first." }, 400);
+			return json({ error: describe(error) }, 502);
+		}
+	}
+
+	return json({ error: "unknown action" }, 400);
+}
+
+/**
+ * Start an MCP server's sign-in.
+ *
+ * The pending attempt is a signed cookie rather than a row: it holds the PKCE
+ * verifier and the client we registered, and it is the only thing the callback
+ * needs to finish the exchange.
+ */
+async function handleMcpOAuthStart(
+	request: HttpServerRequest.HttpServerRequest,
+	form: Schema.Schema.Type<typeof McpServerRequestSchema>,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ error: "Please sign in again." }, 401);
+
+	const servers = await readMcpServers(env, session.uid);
+	const target = servers.find((server) => server.id === form.id);
+	if (!target) return json({ error: "That server is not connected." }, 404);
+
+	const origin = new URL(request.originalUrl).origin;
+	try {
+		const authorization = await discover(target.url, { token: target.auth?.accessToken });
+		const redirectUri = `${origin}${MCP_OAUTH_CALLBACK}`;
+		// A server we have already registered with keeps the same client, so a
+		// second sign-in does not litter the authorization server with clients.
+		const client = target.auth
+			? { clientId: target.auth.clientId, ...(target.auth.clientSecret ? { clientSecret: target.auth.clientSecret } : {}) }
+			: await registerMcpClient(authorization, redirectUri);
+		const state = newState();
+		const { url, verifier } = await beginAuthorization({
+			authorization,
+			clientId: client.clientId,
+			redirectUri,
+			state,
+			...(authorization.scopesSupported?.length ? { scope: authorization.scopesSupported.join(" ") } : {}),
+		});
+
+		const pending: PendingMcpOAuth = {
+			typ: "mcp-oauth",
+			userId: session.uid,
+			serverId: target.id,
+			verifier,
+			state,
+			redirectUri,
+			client,
+			authorization,
+			exp: Date.now() + MCP_OAUTH_TTL_MS,
+		};
+		return HttpServerResponse.setCookieUnsafe(
+			HttpServerResponse.jsonUnsafe({ ok: true, url }),
+			MCP_OAUTH_COOKIE,
+			await sign(pending, env.SESSION_SECRET),
+			{ ...cookieOptions(origin), expires: new Date(pending.exp) },
+		);
+	} catch (error) {
+		return json({ error: describe(error) }, 502);
+	}
+}
+
+/** Finish an MCP server's sign-in, and store the tokens it issued. */
+async function handleMcpOAuthCallback(
+	request: HttpServerRequest.HttpServerRequest,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const url = new URL(request.originalUrl);
+	const origin = url.origin;
+	const pending = await verify<PendingMcpOAuth>(request.cookies?.[MCP_OAUTH_COOKIE], env.SESSION_SECRET);
+	const code = url.searchParams.get("code");
+	const state = url.searchParams.get("state");
+	if (!pending || pending.exp < Date.now() || !code || state !== pending.state) {
+		return mcpRedirect(origin, "error", "That MCP sign-in could not be verified. Start it again from the console.");
+	}
+
+	try {
+		const tokens = await exchangeMcpCode({
+			authorization: pending.authorization,
+			client: pending.client,
+			code,
+			verifier: pending.verifier,
+			redirectUri: pending.redirectUri,
+		});
+		const servers = await readMcpServers(env, pending.userId);
+		await writeMcpServers(
+			env,
+			pending.userId,
+			servers.map((server) =>
+				server.id === pending.serverId
+					? {
+							...server,
+							enabled: true,
+							auth: {
+								...pending.client,
+								authorization: pending.authorization,
+								accessToken: tokens.accessToken,
+								...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+								...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
+							},
+						}
+					: server,
+			),
+		);
+	} catch (error) {
+		return mcpRedirect(origin, "error", describe(error));
+	}
+
+	return HttpServerResponse.expireCookieUnsafe(MCP_OAUTH_COOKIE, cookieOptions(origin))(
+		HttpServerResponse.redirect(`/console/mcp?ok=${encodeURIComponent("Signed in to that MCP server.")}`),
+	);
+}
+
+/** Back to the MCP page with a notice, which is where a sign-in starts. */
+function mcpRedirect(origin: string, kind: "ok" | "error", message: string): HttpServerResponse.HttpServerResponse {
+	return HttpServerResponse.redirect(`${origin}/console/mcp?${kind}=${encodeURIComponent(message)}`);
+}
+
 // --- MCP ----------------------------------------------------------------------
 
 /** The origin a request arrived on. The MCP advertises itself per origin. */
@@ -664,6 +906,26 @@ const Routes = Layer.mergeAll(
 			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleOAuth(request, form).catch((error) => setupFailure(error)));
 		}),
+	),
+	HttpRouter.add("GET", "/api/mcp/servers", (request) =>
+		Effect.promise(() => handleMcpServerList(request).catch((error) => setupFailure(error))),
+	),
+	HttpRouter.add("POST", "/api/mcp/servers", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleMcpServers(request, form).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/mcp/servers/oauth", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleMcpOAuthStart(request, form).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("GET", MCP_OAUTH_CALLBACK, (request) =>
+		Effect.promise(() => handleMcpOAuthCallback(request).catch((error) => setupFailure(error))),
 	),
 	HttpRouter.add("GET", "/auth/discord", (request) =>
 		Effect.promise(() => handleDiscordAuth(request).catch((error) => json({ error: describe(error) }, 500))),
