@@ -94,6 +94,52 @@ const KEY_PREFIX_LENGTH = 18;
 /** The integration the one-key era used, so an old record can be migrated. */
 const LEGACY_INTEGRATION = "opencode-go";
 
+/**
+ * The OpenCode Console, which is a different provider from OpenCode Go.
+ *
+ * They have separate keys and separate catalogues — the Console's is the larger
+ * one, covering models from several upstreams — but share an environment
+ * variable name, so a key filed under the wrong one looks fine and simply
+ * offers, or reaches, the wrong models.
+ */
+const CONSOLE_INTEGRATION = "opencode";
+
+/** Marks the one-off refile as done, so it happens once per deployment. */
+const REFILE_KEY = "migration:console-provider";
+
+/**
+ * Move a key filed under OpenCode Go to the Console provider.
+ *
+ * Every key was filed as Go for as long as Go was the only choice, so a key
+ * issued by the Console ended up under the wrong provider. Only the name
+ * changes: the secret is carried across untouched, because the point is that
+ * nobody should have to paste it again. A Console connection already present
+ * wins, since two entries cannot share one integration.
+ */
+export function refileConsoleKey(
+	connections: GuildConnection[],
+	prefixes: Record<string, string> | undefined,
+): { connections: GuildConnection[]; prefixes: Record<string, string>; moved: number } | undefined {
+	if (!connections.some((connection) => connection.integrationID === LEGACY_INTEGRATION)) return undefined;
+	const alreadyConsole = connections.some((connection) => connection.integrationID === CONSOLE_INTEGRATION);
+	const next: GuildConnection[] = [];
+	const kept: Record<string, string> = {};
+	let moved = 0;
+	for (const connection of connections) {
+		if (connection.integrationID !== LEGACY_INTEGRATION) {
+			next.push(connection);
+			const prefix = prefixes?.[connection.integrationID];
+			if (prefix) kept[connection.integrationID] = prefix;
+			continue;
+		}
+		moved += 1;
+		if (alreadyConsole) continue;
+		next.push({ ...connection, integrationID: CONSOLE_INTEGRATION });
+		kept[CONSOLE_INTEGRATION] = prefixes?.[LEGACY_INTEGRATION] ?? connection.key.slice(0, KEY_PREFIX_LENGTH);
+	}
+	return { connections: next, prefixes: kept, moved };
+}
+
 export interface CachedGuilds {
 	guilds: unknown[];
 	expiresAt: number;
@@ -104,8 +150,15 @@ function json(body: unknown, status = 200): Response {
 }
 
 export class ErynRegistry extends DurableObject<Env> {
+	/** Set once the one-off refile has been found to have run. */
+	private refiled: boolean | undefined;
+
 	async fetch(request: Request): Promise<Response> {
 		const path = new URL(request.url).pathname.split("/").filter(Boolean);
+		// Cheap after the first call: the marker is remembered for the lifetime of
+		// the object, so a request pays one boolean check rather than a read.
+		const moved = await this.refile();
+		if (path[0] === "registry" && path[1] === "migrate") return json({ moved });
 		if (path[0] !== "registry") return json({ error: "not found" }, 404);
 		if (path[1] === "guild" && path[2]) return this.guild(request, path[2], path[3] === "key");
 		if (path[1] === "mcp" && path[2]) return this.mcpServers(request, decodeURIComponent(path[2]));
@@ -148,6 +201,51 @@ export class ErynRegistry extends DurableObject<Env> {
 		}
 
 		return json({ error: "not found" }, 404);
+	}
+
+	/**
+	 * Move every guild's OpenCode Go key to the Console provider, once.
+	 *
+	 * It walks the records because there is no list of guilds anywhere else, and
+	 * it runs on any request rather than at a particular endpoint so a deploy
+	 * applies it without anything having to remember to ask.
+	 */
+	private async refile(): Promise<number> {
+		if (this.refiled) return 0;
+		const secret = this.env.ENCRYPTION_KEY;
+		if (!secret) return 0;
+		if (await this.ctx.storage.get<boolean>(REFILE_KEY)) {
+			this.refiled = true;
+			return 0;
+		}
+
+		let moved = 0;
+		try {
+			for (const [storageKey] of await this.ctx.storage.list<StoredGuild>({ prefix: "guild:" })) {
+				// `load` first, so a record still on the pre-providers single key is
+				// folded into a connection and then refiled in the same pass.
+				const stored = await this.load(storageKey);
+				const refiled = refileConsoleKey(await this.connections(stored), stored?.prefixes);
+				if (!refiled) continue;
+				moved += refiled.moved;
+				await this.ctx.storage.put<StoredGuild>(storageKey, {
+					model: stored?.model ?? DEFAULT_MODEL,
+					updatedAt: Date.now(),
+					...(stored?.configuredBy ? { configuredBy: stored.configuredBy } : {}),
+					...(stored?.github ? { github: stored.github } : {}),
+					credentials: await encryptSecret(secret, JSON.stringify(refiled.connections)),
+					...(Object.keys(refiled.prefixes).length ? { prefixes: refiled.prefixes } : {}),
+				});
+			}
+			await this.ctx.storage.put(REFILE_KEY, true);
+			this.refiled = true;
+			if (moved) console.log(`[eryn:registry] refiled ${moved} key(s) to the OpenCode Console provider`);
+		} catch (error) {
+			// Deliberately unmarked, so a failure is retried rather than leaving a
+			// key under the wrong provider for good.
+			console.log(`[eryn:registry] could not refile: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		return moved;
 	}
 
 	/**

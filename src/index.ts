@@ -1155,7 +1155,14 @@ const app = HttpRouter.toWebHandler(Layer.provideMerge(Routes, SyncScheduler));
  * a Durable Object request every minute of every day.
  */
 async function wake(env: Env): Promise<void> {
-	await env.GATEWAY.get(env.GATEWAY.idFromName("gateway")).fetch("https://eryn.internal/wake");
+	const [, registry] = await Promise.all([
+		env.GATEWAY.get(env.GATEWAY.idFromName("gateway")).fetch("https://eryn.internal/wake"),
+		// The registry runs its one-off migrations the first time it is touched, so
+		// touching it here applies them without waiting for a request to arrive.
+		env.REGISTRY.get(env.REGISTRY.idFromName("registry")).fetch("https://eryn.internal/registry/migrate"),
+	]).catch(() => [undefined, undefined]);
+	const body = (await registry?.json().catch(() => ({}))) as { moved?: number } | undefined;
+	if (body?.moved) console.log(`[eryn] refiled ${body.moved} key(s) to the OpenCode Console provider`);
 }
 
 export default {

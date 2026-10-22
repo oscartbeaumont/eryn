@@ -416,6 +416,13 @@ the flows rather than the providers:
 describes a `key` method — so connecting OpenRouter, Anthropic, Google, or
 anything else needs no provider-specific code.
 
+Worth knowing: **OpenCode Go and the OpenCode Console are different providers**,
+with different keys and different catalogues (the Console's is much the larger,
+covering models from several upstreams), and they share the environment variable
+name `OPENCODE_API_KEY`. So a Console key filed under Go looks configured and
+quietly offers — and reaches — the wrong models. Pick the one the key was issued
+by.
+
 `oauth` covers the providers that only sign in, and it is only usable when the
 provider brings the browser back to *us*. Some of OpenCode's flows do not: they
 open a listener on `127.0.0.1` and hardcode `redirect_uri=http://127.0.0.1:<port>`
