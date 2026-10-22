@@ -94,6 +94,23 @@ export class DiscordStream {
 		}
 	}
 
+	/**
+	 * Give up on the message without writing to it.
+	 *
+	 * This is for a thread that no longer exists: the spinner and any queued
+	 * edit have nowhere to go, and leaving the animation running would keep
+	 * requesting a deleted channel. Nothing is written, because there is no one
+	 * left to read it.
+	 */
+	abandon(): void {
+		this.finished = true;
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = undefined;
+		}
+		this.stopLoading();
+	}
+
 	private stopLoading(): void {
 		this.loading = false;
 		if (this.loader) {

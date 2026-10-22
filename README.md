@@ -180,6 +180,11 @@ receive arbitrary Discord messages without a persistent gateway connection.
   the thread-members API, no ping), so they follow it and Discord notifies them.
 - **Stop.** Run `/stop`, or say `stop` / `cancel` / `!stop` in the thread, to
   interrupt the running turn. The session is kept.
+- **Deleted threads.** Deleting a thread cancels the turn still running in it,
+  rather than letting it finish with nowhere to write the answer, and the record
+  that says the thread is ours goes with it. Deleting the parent channel is the
+  one case that cannot be seen, because Discord need not name the threads it
+  takes with it.
 - **Unconfigured servers.** A mention in a server with no key gets a short reply
   pointing at the setup page instead of running inference.
 
@@ -197,6 +202,9 @@ cp .dev.vars.example .dev.vars
 1. Create an application at <https://discord.com/developers/applications> and
    add a bot. Copy the token to `DISCORD_BOT_TOKEN`.
 2. Enable **Message Content Intent** under *Bot → Privileged Gateway Intents*.
+   Eryn also requests the standard `GUILDS` intent, which is what carries the
+   thread deletions a running turn is cancelled by; standard intents need no
+   toggle.
 3. Under *OAuth2*, copy the **Client Secret** to `DISCORD_CLIENT_SECRET` and add
    the redirect URI `https://eryn.otbeaumont.me/auth/callback`.
 4. Invite the bot with the `bot` scope and the *Send Messages*, *Create Public

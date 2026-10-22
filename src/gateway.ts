@@ -35,7 +35,7 @@ import {
 	type DiscordRest,
 } from "./discord/api";
 import type { DiscordContext } from "./discord/context";
-import { DiscordGateway, type DiscordInteraction, type DiscordMessage } from "./discord/gateway";
+import { DiscordGateway, type DiscordChannel, type DiscordInteraction, type DiscordMessage } from "./discord/gateway";
 import { getGuildKey, type GuildKey } from "./registry-client";
 
 const WAKE_PATH = "/wake";
@@ -95,6 +95,11 @@ export class ErynGateway extends DurableObject<Env> {
 			onInteraction: (interaction) => {
 				void this.onInteraction(interaction).catch((error) =>
 					log(`interaction handling failed: ${describeError(error)}`),
+				);
+			},
+			onChannelDelete: (channel) => {
+				void this.onChannelDelete(channel).catch((error) =>
+					log(`channel deletion handling failed: ${describeError(error)}`),
 				);
 			},
 		});
@@ -261,6 +266,27 @@ export class ErynGateway extends DurableObject<Env> {
 		void this.stopThread(guildId, channelId).catch((error) => log(`stop failed: ${describeError(error)}`));
 	}
 
+	/**
+	 * A deleted thread can never receive the reply, so a turn still running in it
+	 * is cancelled rather than left to finish into nothing, and the record that
+	 * says we own the thread goes with it.
+	 *
+	 * A thread is a channel, so Discord names its own deletion THREAD_DELETE but
+	 * can report it as CHANNEL_DELETE too; the channel's type is what tells the
+	 * two apart here. Deleting a parent channel deletes its threads without
+	 * necessarily naming each one, which is the case this cannot see.
+	 */
+	private async onChannelDelete(channel: DiscordChannel): Promise<void> {
+		if (!THREAD_TYPES.has(channel.type ?? 0)) return;
+		const guildId = channel.guild_id;
+		if (guildId === undefined) return;
+		if (!(await this.ownsThread(channel.id))) return;
+		await this.stopThread(guildId, channel.id, true).catch((error) =>
+			log(`could not stop the turn in deleted thread ${channel.id}: ${describeError(error)}`),
+		);
+		await this.ctx.storage.delete(THREAD_PREFIX + channel.id);
+	}
+
 	// --- Session object plumbing ------------------------------------------------
 
 	/** The guild's credential from the registry, or undefined when unconfigured. */
@@ -325,13 +351,18 @@ export class ErynGateway extends DurableObject<Env> {
 		});
 	}
 
-	private async stopThread(guildId: string | undefined, threadId: string): Promise<void> {
+	/**
+	 * Cancel a thread's running turn. `gone` marks a thread that no longer
+	 * exists, which the session object needs to know: there is nowhere to write
+	 * the outcome, so it drops the reply instead of trying to send it.
+	 */
+	private async stopThread(guildId: string | undefined, threadId: string, gone = false): Promise<void> {
 		if (guildId === undefined) return;
 		const stub = this.sessionStub(guildId);
 		await stub.fetch("https://eryn/session/interrupt", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ threadId }),
+			body: JSON.stringify({ threadId, gone }),
 		});
 	}
 

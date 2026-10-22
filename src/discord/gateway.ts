@@ -13,8 +13,14 @@
 import { describeError, type DiscordUser } from "./api";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
-/** GUILD_MESSAGES | MESSAGE_CONTENT. Message content must also be enabled in the portal. */
-const INTENTS = (1 << 9) | (1 << 15);
+/**
+ * GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT.
+ *
+ * GUILDS is what carries THREAD_DELETE, which is how a turn is cancelled when
+ * its thread is deleted. It is a standard intent, so there is nothing to enable
+ * in the portal. MESSAGE_CONTENT is privileged and must also be enabled there.
+ */
+const INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
 const RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 /** Cloudflare stops pinning a Durable Object 15 minutes after an outbound connection opens. */
 const CONNECTION_RECYCLE_MS = 10 * 60_000;
@@ -38,6 +44,16 @@ export interface DiscordMessage {
 	thread?: { id: string; parent_id?: string };
 }
 
+/**
+ * The subset of a deleted channel this bot reads. A thread is a channel, so a
+ * thread's deletion arrives in this shape too.
+ */
+export interface DiscordChannel {
+	id: string;
+	type?: number;
+	guild_id?: string;
+}
+
 /** The subset of a Discord interaction this bot reads. */
 export interface DiscordInteraction {
 	id: string;
@@ -54,6 +70,8 @@ export interface DiscordInteraction {
 export interface DiscordGatewayHandlers {
 	onMessage(message: DiscordMessage): void;
 	onInteraction(interaction: DiscordInteraction): void;
+	/** A channel or thread was deleted. Threads are channels, so both arrive here. */
+	onChannelDelete(channel: DiscordChannel): void;
 }
 
 interface GatewayPayload {
@@ -239,6 +257,14 @@ export class DiscordGateway {
 					const interaction = payload.d as DiscordInteraction | undefined;
 					if (interaction && typeof interaction.id === "string" && typeof interaction.token === "string") {
 						this.handlers.onInteraction(interaction);
+					}
+				} else if (payload.t === "THREAD_DELETE" || payload.t === "CHANNEL_DELETE") {
+					// A thread is a channel: Discord names the thread's own deletion
+					// THREAD_DELETE but can also report it as CHANNEL_DELETE, so both
+					// are passed on and the channel's type decides what to do.
+					const channel = payload.d as DiscordChannel | undefined;
+					if (channel && typeof channel.id === "string") {
+						this.handlers.onChannelDelete(channel);
 					}
 				}
 				break;

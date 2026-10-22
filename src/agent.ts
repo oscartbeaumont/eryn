@@ -92,6 +92,8 @@ interface Turn {
 	done: boolean;
 	interrupted: boolean;
 	failed: boolean;
+	/** Set when the thread was deleted, so the reply has nowhere to go. */
+	gone: boolean;
 	/** Why the turn failed, when the provider or agent reported a reason. */
 	error?: string;
 	readonly resolve: () => void;
@@ -111,6 +113,7 @@ function createTurn(threadId: string): Turn {
 		done: false,
 		interrupted: false,
 		failed: false,
+		gone: false,
 		resolve,
 		completed,
 	};
@@ -364,8 +367,8 @@ export class ErynSession extends DurableObject<Env> {
 			}
 		}
 		if (request.method === "POST" && pathname === "/session/interrupt") {
-			const body = (await request.json().catch(() => ({}))) as { threadId?: string };
-			return Response.json({ stopped: await this.interrupt(body.threadId) });
+			const body = (await request.json().catch(() => ({}))) as { threadId?: string; gone?: boolean };
+			return Response.json({ stopped: await this.interrupt(body.threadId, body.gone === true) });
 		}
 		if (request.method === "POST" && pathname === "/session/models") {
 			return await this.modelsResponse(request);
@@ -457,10 +460,18 @@ export class ErynSession extends DurableObject<Env> {
 			const finished = await this.wait(turn);
 			if (!finished) await this.interrupt(request.threadId).catch(() => undefined);
 
-			const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
-			const body = turn.error ? failureNote(turn.error) : (final ?? renderTurn(turn));
-			const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
-			await stream.finish(body, suffix);
+			if (turn.gone) {
+				// The thread was deleted mid-turn: there is nowhere to put the
+				// reply and no one left to read it, so the spinner is stopped
+				// without writing anything to a channel that no longer exists.
+				stream.abandon();
+				log(`thread ${request.threadId} was deleted, so the reply was dropped`);
+			} else {
+				const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
+				const body = turn.error ? failureNote(turn.error) : (final ?? renderTurn(turn));
+				const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
+				await stream.finish(body, suffix);
+			}
 		} catch (error) {
 			log(`prompt failed: ${describeError(error)}`);
 			// Always say something: a silent failure is indistinguishable from a
@@ -540,11 +551,18 @@ export class ErynSession extends DurableObject<Env> {
 		}
 	}
 
-	/** Cancel a thread's running turn, keeping its session for later messages. */
-	private async interrupt(threadId: string | undefined): Promise<boolean> {
+	/**
+	 * Cancel a thread's running turn, keeping its session for later messages.
+	 *
+	 * `gone` means the thread itself was deleted, which is not the same as a
+	 * stopped turn: there is no message left to write the outcome into, so the
+	 * reply is dropped rather than attempted.
+	 */
+	private async interrupt(threadId: string | undefined, gone = false): Promise<boolean> {
 		const run = threadId ? this.runs.get(threadId) : undefined;
 		const sessionID = threadId ? await this.sessionFor(threadId) : undefined;
 		if (!run?.turn || !this.host || !sessionID) return false;
+		if (gone) run.turn.gone = true;
 		const host = await this.host.promise;
 		await host.sessions.interrupt({ sessionID });
 		return true;
