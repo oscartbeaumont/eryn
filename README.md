@@ -192,6 +192,30 @@ from Discord once per object — so a server's tools are the owner's, not an
 admin's. Tokens and the registered client live in `ErynRegistry` sealed under
 `ENCRYPTION_KEY`, alongside provider keys.
 
+### Discord tools
+
+Eight tools let a model work with Discord: list servers, list a server's
+channels, read one channel, read a channel's messages with `before`/`after`
+pagination, search a server's history by text, list active or archived threads,
+post a message, and open a thread.
+
+They live on the MCP endpoint rather than in the agent, so one set serves both.
+The agent is told which channel it was invoked in by the `eryn.discord` plugin,
+and these take that id and read around it — which is the point: the bot can
+gather its own context instead of relying on what someone pasted in.
+
+**They act as the bot, not as the account that connects them.** The bot is the
+only identity with the intents and permissions to read history, so the tools are
+as visible as the bot is rather than scoped to one Discord server. Turning them
+on is therefore a deliberate act — the MCP page's Connect — and one that
+reverses: the tools stay registered and their visibility follows the connection,
+so disconnecting withdraws them without tearing anything down.
+
+Two limits are worth knowing. Messages are flattened to text, attachments are
+named rather than fetched, and a message is cut at 900 characters. And posting
+never parses mentions, so a message the model writes cannot ping a role or
+everyone by accident.
+
 ### The gateway
 
 `/mcp` fronts those servers, so a harness points at one URL and drops its own
@@ -409,6 +433,8 @@ credential that came from a sign-in was never in the registry at all.
 - A gateway outage between an eviction and the next alarm is not replayed unless
   Discord still holds the resumable session, so a mention in that window can be
   missed.
-- The MCP's consent screen issues tokens to anyone who can reach it. Today that
-  only exposes a random number generator; enabling the Discord or GitHub tools
-  must gate approval on a linked account.
+- The MCP's consent screen issues tokens to anyone who can reach it and can sign
+  in with Discord, so a token is only as trustworthy as that sign-in. The Discord
+  tools are gated on the account explicitly connecting them, but they act as the
+  bot — as visible as the bot is, across every server it has been added to, not
+  scoped to one. GitHub's tools are still parked.

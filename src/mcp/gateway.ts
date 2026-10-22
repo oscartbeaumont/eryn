@@ -23,8 +23,10 @@ import { DurableObject } from "cloudflare:workers";
 import { Context, Effect, Layer, Scheduler } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { McpProtocol, McpSchema, McpServer } from "effect/ai";
-import { describeError } from "../discord/api";
+import { describeError, discordRest, type DiscordRest } from "../discord/api";
 import { callTool, listTools, type McpTool, type McpToolResult } from "./client";
+import { DISCORD_TOOLS, discordFailure, discordTool } from "./discord";
+import { readDiscordLink, type DiscordLink } from "./link";
 import { MCP_PATH, allowedOrigins, INSTRUCTIONS, randomNumber, runRandomNumber } from "./server";
 import { ensureToken, namespaced, readMcpServers, type McpServerRecord } from "./servers";
 
@@ -114,6 +116,12 @@ export class ErynMcp extends DurableObject<Env> {
 	private readonly descriptors = new Map<string, McpSchema.Tool>();
 	/** The servers that are switched on right now; a tool's visibility reads this. */
 	private live = new Set<string>();
+	/** Whether this user has connected Discord, so its tools are visible. */
+	private discord = false;
+	private link: DiscordLink | undefined;
+	private linkAt = 0;
+	/** The bot's own REST client, which is what the Discord tools act as. */
+	private readonly rest: DiscordRest;
 	/** What the registry last looked like, so a change is what sends a notification. */
 	private signature = "";
 	private syncing: Promise<void> | undefined;
@@ -121,6 +129,7 @@ export class ErynMcp extends DurableObject<Env> {
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
 		this.userId = state.id.name ?? "";
+		this.rest = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -182,6 +191,19 @@ export class ErynMcp extends DurableObject<Env> {
 		}
 		// The endpoint's own tools are always present, whatever the user connects.
 		await this.add(randomNumber, () => true);
+		// Discord's are registered once and left invisible until it is connected,
+		// so connecting is a flip of a flag rather than a rebuild.
+		for (const tool of DISCORD_TOOLS) {
+			await this.add(
+				new McpSchema.Tool({
+					name: tool.name,
+					title: tool.title,
+					description: tool.description,
+					inputSchema: tool.inputSchema as never,
+				}),
+				() => this.discord,
+			);
+		}
 	}
 
 	/** The user's servers, re-read only when the cached copy has gone stale. */
@@ -190,6 +212,14 @@ export class ErynMcp extends DurableObject<Env> {
 		this.config = await readMcpServers(this.env, this.userId).catch(() => [] as McpServerRecord[]);
 		this.configAt = Date.now();
 		return this.config;
+	}
+
+	/** Whether Discord is connected, re-read only when the cached copy is stale. */
+	private async discordLink(): Promise<DiscordLink | undefined> {
+		if (Date.now() - this.linkAt < CONFIG_TTL_MS) return this.link;
+		this.link = await readDiscordLink(this.env, this.userId).catch(() => undefined);
+		this.linkAt = Date.now();
+		return this.link;
 	}
 
 	/** One server's catalogue, cached so a harness listing tools is not a fan-out. */
@@ -231,6 +261,7 @@ export class ErynMcp extends DurableObject<Env> {
 		// Written before anything is registered, because every visibility predicate
 		// reads it: switching a server off is what makes its tools disappear.
 		this.live = new Set(enabled.map((server) => server.id));
+		this.discord = (await this.discordLink()) !== undefined;
 
 		// Asked for together, because the first request after a cold start waits for
 		// all of them and a sequential fan-out would add up.
@@ -249,7 +280,7 @@ export class ErynMcp extends DurableObject<Env> {
 			if (!wanted.has(exposed)) await this.hide(exposed);
 		}
 
-		const signature = `${[...wanted.keys()].sort().join(",")}|${[...this.live].sort().join(",")}`;
+		const signature = `${[...wanted.keys()].sort().join(",")}|${[...this.live].sort().join(",")}|${this.discord}`;
 		if (signature !== this.signature) {
 			this.signature = signature;
 			await this.notify();
@@ -321,6 +352,16 @@ export class ErynMcp extends DurableObject<Env> {
 	 */
 	private async invoke(exposed: string, args: unknown): Promise<McpSchema.CallToolResult> {
 		if (exposed === randomNumber.name) return runRandomNumber(args);
+		const discord = discordTool(exposed);
+		if (discord) {
+			try {
+				return toResult({
+					content: [{ type: "text", text: await discord.run(this.rest, (args ?? {}) as Record<string, unknown>) }],
+				});
+			} catch (error) {
+				return toFailure(discordFailure(error));
+			}
+		}
 		const owner = this.owned.get(exposed);
 		if (!owner) return toFailure(`\`${exposed}\` is no longer available.`);
 		const server = (await this.servers()).find((entry) => entry.id === owner.serverId);

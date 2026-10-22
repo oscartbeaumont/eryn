@@ -48,6 +48,7 @@ import {
 	type McpClientRegistration,
 } from "./mcp/auth";
 import { listTools, McpUnauthorized } from "./mcp/client";
+import { readDiscordLink, writeDiscordLink } from "./mcp/link";
 import { ensureToken, newServerId, readMcpServers, summarise, writeMcpServers, type McpServerRecord } from "./mcp/servers";
 import {
 	getGuildConfig,
@@ -511,9 +512,42 @@ async function handleMcpServerList(
 	request: HttpServerRequest.HttpServerRequest,
 ): Promise<HttpServerResponse.HttpServerResponse> {
 	const session = await readSession(request);
-	if (!session) return json({ signedIn: false, servers: [] });
-	const servers = await readMcpServers(env, session.uid);
-	return json({ signedIn: true, servers: servers.map(summarise) });
+	if (!session) return json({ signedIn: false, servers: [], discord: null });
+	const [servers, link] = await Promise.all([
+		readMcpServers(env, session.uid),
+		readDiscordLink(env, session.uid),
+	]);
+	return json({
+		signedIn: true,
+		servers: servers.map(summarise),
+		discord: link ? { id: link.id, name: link.name } : null,
+	});
+}
+
+/**
+ * Turn the Discord tools on or off for one account.
+ *
+ * The account is the one already signed in — the console knows who this is, so
+ * connecting asks for nothing but the decision. It matters that it is a
+ * decision: the tools act as the bot, so they are as visible as the bot is,
+ * rather than scoped to a single Discord server.
+ */
+async function handleMcpDiscord(
+	request: HttpServerRequest.HttpServerRequest,
+	form: Schema.Schema.Type<typeof McpServerRequestSchema>,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ error: "Please sign in again." }, 401);
+
+	if (form.action === "disconnect") {
+		await writeDiscordLink(env, session.uid, undefined);
+		await refreshGateway(session.uid);
+		return json({ ok: true, message: "The Discord tools are off." });
+	}
+
+	await writeDiscordLink(env, session.uid, { id: session.uid, name: session.name, connectedAt: Date.now() });
+	await refreshGateway(session.uid);
+	return json({ ok: true, message: "The Discord tools are on." });
 }
 
 /**
@@ -969,6 +1003,13 @@ const Routes = Layer.mergeAll(
 			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
 			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleMcpOAuthStart(request, form).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/mcp/discord", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleMcpDiscord(request, form).catch((error) => setupFailure(error)));
 		}),
 	),
 	HttpRouter.add("GET", MCP_OAUTH_CALLBACK, (request) =>

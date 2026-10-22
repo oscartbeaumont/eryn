@@ -36,9 +36,11 @@ export function allowedOrigins(): ReadonlyArray<string> {
 }
 
 export const INSTRUCTIONS = [
-	"Eryn is a personal agent. Its MCP tools are intentionally small:",
-	"they are the capabilities the Discord bot and its cloud sessions share.",
-	"Discord and GitHub tools are planned but not yet enabled.",
+	"This endpoint fronts the remote MCP servers the caller has connected, and adds",
+	"tools of its own. The Discord tools act as the bot: list servers and channels,",
+	"read a channel's messages with pagination, search a server's history, list",
+	"threads, post a message, and open a thread. They appear once the account has",
+	"connected Discord on the MCP page.",
 ].join(" ");
 
 const DEFAULT_MAX = 100;

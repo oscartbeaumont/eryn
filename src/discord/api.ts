@@ -31,9 +31,36 @@ export interface DiscordChannelRef {
 	type: number;
 	parent_id?: string;
 	name?: string;
+	topic?: string;
+	position?: number;
+	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
 }
 
 /** The subset of a guild role this bot reads. Managed bot roles carry `tags.bot_id`. */
+/** The subset of a guild channel this bot reads. */
+export interface DiscordGuildChannel {
+	id: string;
+	type: number;
+	name?: string;
+	parent_id?: string;
+	topic?: string;
+	position?: number;
+	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
+}
+
+/** The subset of a message this bot reads. */
+export interface DiscordMessageView {
+	id: string;
+	channel_id: string;
+	content?: string;
+	timestamp?: string;
+	author?: { id?: string; username?: string; global_name?: string; bot?: boolean };
+	attachments?: { filename?: string; url?: string }[];
+	embeds?: unknown[];
+	referenced_message?: { id?: string } | null;
+}
+
+/** The subset of a role this bot reads. */
 export interface DiscordRole {
 	id: string;
 	name: string;
@@ -145,6 +172,11 @@ export function discordRest(token: string) {
 				type: result.type,
 				...(typeof result.parent_id === "string" ? { parent_id: result.parent_id } : {}),
 				...(typeof result.name === "string" ? { name: result.name } : {}),
+				...(typeof result.topic === "string" ? { topic: result.topic } : {}),
+				...(typeof result.position === "number" ? { position: result.position } : {}),
+				...(result.thread_metadata && typeof result.thread_metadata === "object"
+					? { thread_metadata: result.thread_metadata as { archived?: boolean } }
+					: {}),
 			};
 		},
 
@@ -194,6 +226,98 @@ export function discordRest(token: string) {
 		async guildRoles(guildId: string): Promise<DiscordRole[]> {
 			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
 			return Array.isArray(result) ? result : [];
+		},
+
+		/** A guild's channels, including categories and threads the bot can see. */
+		async guildChannels(guildId: string): Promise<DiscordGuildChannel[]> {
+			const result = await request<DiscordGuildChannel[]>("GET", `/guilds/${guildId}/channels`);
+			return Array.isArray(result) ? result : [];
+		},
+
+		/**
+		 * A channel's messages, newest first.
+		 *
+		 * Discord pages by message id: `before` walks backwards through history and
+		 * `after` forwards from an id, so a caller that has one message can read
+		 * either side of it.
+		 */
+		async channelMessages(
+			channelId: string,
+			options: { limit?: number; before?: string; after?: string } = {},
+		): Promise<DiscordMessageView[]> {
+			const query = new URLSearchParams();
+			query.set("limit", String(Math.min(Math.max(options.limit ?? 50, 1), 100)));
+			if (options.before) query.set("before", options.before);
+			if (options.after) query.set("after", options.after);
+			const result = await request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
+			return Array.isArray(result) ? result : [];
+		},
+
+		/** One message, so a caller can read what it is about to reply to. */
+		async message(channelId: string, messageId: string): Promise<DiscordMessageView | undefined> {
+			return await request<DiscordMessageView>("GET", `/channels/${channelId}/messages/${messageId}`);
+		},
+
+		/** A guild's active threads, which is the only place Discord lists them. */
+		async activeThreads(guildId: string): Promise<DiscordGuildChannel[]> {
+			const result = await request<{ threads?: DiscordGuildChannel[] }>("GET", `/guilds/${guildId}/threads/active`);
+			return Array.isArray(result?.threads) ? result.threads : [];
+		},
+
+		/** A channel's archived threads, newest first. Private ones need a bot that is a member. */
+		async archivedThreads(
+			channelId: string,
+			options: { limit?: number; before?: string; private?: boolean } = {},
+		): Promise<DiscordGuildChannel[]> {
+			const query = new URLSearchParams({ limit: String(Math.min(Math.max(options.limit ?? 50, 1), 100)) });
+			if (options.before) query.set("before", options.before);
+			const kind = options.private ? "private" : "public";
+			const result = await request<{ threads?: DiscordGuildChannel[] }>(
+				"GET",
+				`/channels/${channelId}/threads/archived/${kind}?${query}`,
+			);
+			return Array.isArray(result?.threads) ? result.threads : [];
+		},
+
+		/**
+		 * Search a guild's messages.
+		 *
+		 * Discord returns results grouped by thread, so the arrays are flattened
+		 * here and the caller sees messages in the order the index returned them.
+		 */
+		async searchMessages(
+			guildId: string,
+			options: { content?: string; authorId?: string; channelId?: string; limit?: number; offset?: number } = {},
+		): Promise<{ total: number; messages: DiscordMessageView[] }> {
+			const query = new URLSearchParams();
+			if (options.content) query.set("content", options.content);
+			if (options.authorId) query.append("author_id", options.authorId);
+			if (options.channelId) query.append("channel_id", options.channelId);
+			query.set("limit", String(Math.min(Math.max(options.limit ?? 25, 1), 25)));
+			if (options.offset) query.set("offset", String(options.offset));
+			const result = await request<{ messages?: DiscordMessageView[][]; total_results?: number }>(
+				"GET",
+				`/guilds/${guildId}/messages/search?${query}`,
+			);
+			const grouped = Array.isArray(result?.messages) ? result.messages : [];
+			return {
+				total: typeof result?.total_results === "number" ? result.total_results : 0,
+				messages: grouped.flat().filter(Boolean),
+			};
+		},
+
+		/** Start a thread in a channel, not attached to any message. */
+		async startThread(
+			channelId: string,
+			name: string,
+			options: { autoArchiveDuration?: number } = {},
+		): Promise<{ id: string }> {
+			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/threads`, {
+				name,
+				auto_archive_duration: options.autoArchiveDuration ?? 1_440,
+			});
+			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
+			return { id: result.id };
 		},
 
 		/** A guild's owner, whose MCP tools the agent in that guild acts with. */

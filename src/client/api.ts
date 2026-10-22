@@ -236,6 +236,8 @@ export interface McpServer {
 export interface McpServersResult {
 	signedIn: boolean;
 	servers: McpServer[];
+	/** The Discord account linked to the endpoint, when the tools are on. */
+	discord: { id: string; name: string } | null;
 }
 
 export interface McpServerResult extends ApiResult {
@@ -260,6 +262,15 @@ export function mcpServerAction(input: {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(input),
+	});
+}
+
+/** Turn the Discord tools on or off for this account. */
+export function discordToolAction(action: "connect" | "disconnect"): Promise<ApiResult> {
+	return request<ApiResult>("/api/mcp/discord", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ action }),
 	});
 }
 

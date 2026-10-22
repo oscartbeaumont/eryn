@@ -109,6 +109,7 @@ export class ErynRegistry extends DurableObject<Env> {
 		if (path[0] !== "registry") return json({ error: "not found" }, 404);
 		if (path[1] === "guild" && path[2]) return this.guild(request, path[2], path[3] === "key");
 		if (path[1] === "mcp" && path[2]) return this.mcpServers(request, decodeURIComponent(path[2]));
+		if (path[1] === "discord" && path[2]) return this.discordLink(request, decodeURIComponent(path[2]));
 		if (path[1] === "user" && path[2] && path[3] === "guilds") return this.userGuilds(request, path[2]);
 		return json({ error: "not found" }, 404);
 	}
@@ -280,6 +281,42 @@ export class ErynRegistry extends DurableObject<Env> {
 				})),
 			};
 			return json(summary);
+		}
+
+		return json({ error: "not found" }, 404);
+	}
+
+	/**
+	 * The Discord account a user linked to the MCP endpoint.
+	 *
+	 * Sealed like everything else, though it holds no secret: what it records is
+	 * that a decision was made, and which account made it.
+	 */
+	private async discordLink(request: Request, userId: string): Promise<Response> {
+		const storageKey = `discord:${userId}`;
+		const secret = this.env.ENCRYPTION_KEY;
+
+		if (request.method === "PUT") {
+			if (!secret) return json({ error: "registry is not configured" }, 500);
+			const body = (await request.json().catch(() => ({}))) as { link?: unknown };
+			if (body.link === null || body.link === undefined) {
+				await this.ctx.storage.delete(storageKey);
+				return json({ ok: true });
+			}
+			await this.ctx.storage.put<Sealed>(storageKey, await encryptSecret(secret, JSON.stringify(body.link)));
+			return json({ ok: true });
+		}
+
+		if (request.method === "GET") {
+			const stored = await this.ctx.storage.get<Sealed>(storageKey);
+			if (!stored?.data || !secret) return json({ link: null });
+			const plaintext = await decryptSecret(secret, stored).catch(() => undefined);
+			if (!plaintext) return json({ link: null });
+			try {
+				return json({ link: JSON.parse(plaintext) });
+			} catch {
+				return json({ link: null });
+			}
 		}
 
 		return json({ error: "not found" }, 404);

@@ -2,6 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { capture } from "./analytics";
 import {
 	callMcp,
+	discordToolAction,
 	exchangeMcpCode,
 	fetchMcpServers,
 	mcpServerAction,
@@ -28,20 +29,13 @@ const TOOLS = [
 ];
 
 /**
- * Integrations that need an account before their tools can exist.
+ * Integrations that still need an account before their tools can exist.
  *
- * They are wired end to end — the OAuth server, the scope mechanism, and the
- * tool registry all accommodate them — and deliberately parked: flipping
- * `enabled` (and adding the matching tool) is the whole change. Until then the
- * rows render greyed out so nobody wonders where the buttons are.
+ * The endpoints are built and reachable; the tools behind them land in a later
+ * change, so the row renders greyed out rather than offering a button that would
+ * do nothing.
  */
 const INTEGRATIONS = [
-	{
-		name: "Discord",
-		description: "Read channels, post updates, and search a server's history.",
-		link: "Sign in with Discord",
-		enabled: false,
-	},
 	{
 		name: "GitHub",
 		description: "Read issues, open branches, and raise pull requests.",
@@ -274,10 +268,12 @@ export default function ConsoleMcp() {
 
 					<h2 class="mb-4 mt-12 font-mono text-[15px] font-semibold">Connections</h2>
 					<p class="mb-4 max-w-[62ch] text-sm text-muted">
-						These grant the MCP access to an account. The endpoints are built and reachable; the tools behind them
-						land in a later change, so the buttons are parked.
+						These grant the MCP access to an account, so the tools can act outside this session.
 					</p>
 					<div class="divide-y divide-line border border-line bg-surface">
+						<DiscordConnection
+							onNotice={(kind, message) => setStatus({ kind: kind === "error" ? "error" : "ok", message })}
+						/>
 						<For each={INTEGRATIONS}>
 							{(integration) => (
 								<div class="flex flex-wrap items-center gap-4 px-5 py-4 opacity-45">
@@ -491,6 +487,73 @@ function McpServers(props: { onNotice: (kind: "ok" | "error", message: string) =
 					Add
 				</button>
 			</form>
+		</div>
+	);
+}
+
+/**
+ * The Discord tools, and the switch that turns them on.
+ *
+ * They act as the bot rather than as the account that connects them, so they are
+ * as visible as the bot is — every server it has been added to, not one — and
+ * connecting is therefore a deliberate act that can be reversed. The agent is
+ * told which channel it was invoked in, and these take that id and read around
+ * it.
+ */
+function DiscordConnection(props: { onNotice: (kind: "ok" | "error", message: string) => void }) {
+	const [link, setLink] = createSignal<{ id: string; name: string } | null>(null);
+	const [loaded, setLoaded] = createSignal(false);
+	const [busy, setBusy] = createSignal(false);
+
+	async function reload() {
+		try {
+			setLink((await fetchMcpServers()).discord ?? null);
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setLoaded(true);
+		}
+	}
+	void reload();
+
+	async function toggle(action: "connect" | "disconnect") {
+		setBusy(true);
+		try {
+			const result = await discordToolAction(action);
+			props.onNotice("ok", result.message ?? "Done.");
+			await reload();
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<div class="flex flex-wrap items-center gap-4 px-5 py-4">
+			<div class="min-w-0 flex-1">
+				<div class="flex items-center gap-2">
+					<span class="font-mono text-sm font-semibold">Discord</span>
+					<Show when={link()}>
+						<Chip on>On</Chip>
+					</Show>
+				</div>
+				<p class="mt-1 text-sm text-muted">
+					List servers and channels, read a channel's messages with pagination, search a server's history, list
+					threads, post a message, and open a thread. The tools act as the bot, so they reach any server the bot is
+					in — a connected account is what turns them on, not what scopes them.
+				</p>
+			</div>
+			<Show when={loaded()}>
+				<button
+					type="button"
+					class={link() ? buttonClass.danger : buttonClass.primary}
+					disabled={busy()}
+					onClick={() => void toggle(link() ? "disconnect" : "connect")}
+				>
+					{link() ? "Disconnect" : "Connect Discord"}
+				</button>
+			</Show>
 		</div>
 	);
 }
