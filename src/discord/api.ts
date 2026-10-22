@@ -21,6 +21,8 @@ export const DEFAULT_THREAD_NAME = "eryn";
 export interface DiscordUser {
 	id: string;
 	username?: string;
+	/** The user's display name, when they have one. Preferred over the handle. */
+	global_name?: string;
 	bot?: boolean;
 }
 

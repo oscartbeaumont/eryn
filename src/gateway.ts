@@ -31,8 +31,10 @@ import {
 	THREAD_TYPES,
 	describeError,
 	discordRest,
+	type DiscordChannelRef,
 	type DiscordRest,
 } from "./discord/api";
+import type { DiscordContext } from "./discord/context";
 import { DiscordGateway, type DiscordInteraction, type DiscordMessage } from "./discord/gateway";
 import { getGuildKey, type GuildKey } from "./registry-client";
 
@@ -69,6 +71,14 @@ export class ErynGateway extends DurableObject<Env> {
 	private readonly locks = new Map<string, Promise<void>>();
 	/** Bot managed-role id per guild, resolved lazily. */
 	private readonly roleCache = new Map<string, string>();
+	/**
+	 * Channels the agent's context needs, by id. Only a thread's parent is ever
+	 * looked up here, so this is one request per thread rather than one per
+	 * message. The gateway is long-lived, so the cache outlives a conversation.
+	 */
+	private readonly channels = new Map<string, DiscordChannelRef>();
+	/** Guild names by id, filled from one listing. */
+	private readonly guildNames = new Map<string, string>();
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
@@ -172,7 +182,19 @@ export class ErynGateway extends DurableObject<Env> {
 				await this.requireSetup(channel.id);
 				return;
 			}
-			await this.forward(guildId, channel.id, this.threadName(text), text, message, config);
+			// The agent is told about the channel the request came from, which for a
+			// message inside a thread is the thread's parent — the thread is where
+			// the reply goes, the parent is the room it belongs to.
+			const parent = channel.parent_id ? await this.channelRef(channel.parent_id) : undefined;
+			await this.forward(
+				guildId,
+				channel.id,
+				this.threadName(text),
+				text,
+				message,
+				config,
+				await this.discordContext(guildId, parent, channel),
+			);
 			return;
 		}
 
@@ -209,7 +231,15 @@ export class ErynGateway extends DurableObject<Env> {
 			await this.requireSetup(threadId);
 			return;
 		}
-		await this.forward(guildId, threadId, name, text, message, config);
+		await this.forward(
+			guildId,
+			threadId,
+			name,
+			text,
+			message,
+			config,
+			await this.discordContext(guildId, channel, { id: threadId, name }),
+		);
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
@@ -261,6 +291,7 @@ export class ErynGateway extends DurableObject<Env> {
 		text: string,
 		message: DiscordMessage,
 		config: GuildKey,
+		discord: DiscordContext,
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const stub = this.sessionStub(guildId);
@@ -273,10 +304,11 @@ export class ErynGateway extends DurableObject<Env> {
 						threadId,
 						title,
 						text,
-						author: message.author?.username ?? "someone",
+						author: this.authorName(message),
 						apiKey: config.apiKey,
 						model: config.model,
 						github: config.github,
+						discord,
 					}),
 				});
 				if (response.ok) return;
@@ -328,6 +360,65 @@ export class ErynGateway extends DurableObject<Env> {
 	}
 
 	// --- Helpers ----------------------------------------------------------------
+
+	/**
+	 * The name the speaker goes by in this guild, so the agent knows who it is
+	 * answering. Discord's own precedence: server nickname, then display name,
+	 * then the handle.
+	 */
+	private authorName(message: DiscordMessage): string {
+		return (
+			message.member?.nick?.trim() ||
+			message.author?.global_name?.trim() ||
+			message.author?.username?.trim() ||
+			"someone"
+		);
+	}
+
+	/**
+	 * Describe where the agent was invoked, for the session to store and the
+	 * `eryn.discord` plugin to put in front of the model.
+	 *
+	 * The names matter more than the ids here: the agent cannot look a channel
+	 * up, so this is the only way it can tell a user which room it is working
+	 * in. Anything Discord will not name is left out rather than guessed.
+	 */
+	private async discordContext(
+		guildId: string,
+		invocation: DiscordChannelRef | undefined,
+		thread: { id: string; name?: string },
+	): Promise<DiscordContext> {
+		const channel = invocation ?? thread;
+		const guildName = await this.guildName(guildId);
+		return {
+			guild: guildName ? { id: guildId, name: guildName } : { id: guildId },
+			channel: channel.name ? { id: channel.id, name: channel.name } : { id: channel.id },
+			thread: thread.name ? { id: thread.id, name: thread.name } : { id: thread.id },
+		};
+	}
+
+	/**
+	 * A channel or thread, cached: a thread's parent is looked up once, not per
+	 * message. Only a real answer is remembered — a lookup that failed is not a
+	 * channel that is missing, and the next message should try again.
+	 */
+	private async channelRef(channelId: string): Promise<DiscordChannelRef | undefined> {
+		const cached = this.channels.get(channelId);
+		if (cached) return cached;
+		const channel = await this.rest.channel(channelId).catch(() => undefined);
+		if (channel) this.channels.set(channelId, channel);
+		return channel;
+	}
+
+	/** A guild's name, from one cached listing. A failed listing is not cached. */
+	private async guildName(guildId: string): Promise<string | undefined> {
+		const cached = this.guildNames.get(guildId);
+		if (cached) return cached;
+		const guilds = await this.rest.guilds().catch(() => undefined);
+		if (!guilds) return undefined;
+		for (const guild of guilds) this.guildNames.set(guild.id, guild.name);
+		return this.guildNames.get(guildId);
+	}
 
 	private mentionPattern(): RegExp | undefined {
 		return this.botUserId ? new RegExp(`<@!?${this.botUserId}>`, "g") : undefined;

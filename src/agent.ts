@@ -24,8 +24,10 @@ import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import type { Configuration } from "@opencode/sdk/workerd";
 import { DEFAULT_MODEL, intFromEnv } from "./config";
 import { DEFAULT_THREAD_NAME, describeError, discordRest, type DiscordRest } from "./discord/api";
+import { DISCORD_METADATA_KEY, type DiscordContext } from "./discord/context";
 import { DiscordStream } from "./discord/stream";
 import { fileStore, type FileStore } from "./opencode/store";
+import { discordPlugin } from "./opencode/discord";
 import { workspacePlugin } from "./opencode/workspace";
 import { createGitHub } from "./github";
 import { githubPlugin } from "./opencode/github";
@@ -69,12 +71,15 @@ interface PromptRequest {
 	threadId: string;
 	title?: string;
 	text: string;
+	/** The name the speaker goes by, so the agent knows who it is answering. */
 	author?: string;
 	/** The guild's own OpenCode Go credential, supplied by the gateway. */
 	apiKey: string;
 	model?: string;
 	/** GitHub App binding for this guild, when configured. */
 	github?: { installationId?: string; repo?: string };
+	/** Where the request came from in Discord, recorded on the session for the agent. */
+	discord?: DiscordContext;
 }
 
 /** Accumulated assistant output for one turn, keyed by message then part. */
@@ -147,6 +152,18 @@ function failureNote(error: string): string {
 	return `**That turn failed.**\n> ${error}${hint}`;
 }
 
+/**
+ * The message as the model should read it.
+ *
+ * Discord threads are multi-user and the transcript does not otherwise record
+ * who spoke: without this the agent cannot tell whether it is answering the
+ * person who opened the thread or someone else who just joined it.
+ */
+function userMessage(request: PromptRequest): string {
+	const author = request.author?.trim();
+	return author ? `${author}: ${request.text}` : request.text;
+}
+
 /** Render the streamed text so far, preferring messages that belong to a step. */
 function renderTurn(turn: Turn): string {
 	const messages: string[] = [];
@@ -205,6 +222,11 @@ export class ErynSession extends DurableObject<Env> {
 	private models: ModelOption[] | undefined;
 	/** The model already selected on a thread's session, so we only switch once. */
 	private readonly appliedModels = new Map<string, string>();
+	/**
+	 * The Discord context already written to a thread's session, so a renamed
+	 * thread updates its metadata once instead of on every turn.
+	 */
+	private readonly appliedContext = new Map<string, string>();
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -233,7 +255,7 @@ export class ErynSession extends DurableObject<Env> {
 			this.abort?.abort();
 			this.abort = new AbortController();
 
-			const plugins = [workspacePlugin(this.files)];
+			const plugins = [workspacePlugin(this.files), discordPlugin()];
 			const appId = this.env.GITHUB_APP_ID?.trim();
 			const privateKey = this.env.GITHUB_APP_PRIVATE_KEY?.trim();
 			if (github?.installationId && appId && privateKey) {
@@ -425,10 +447,13 @@ export class ErynSession extends DurableObject<Env> {
 			// one starts; otherwise the turn would run blind until it timed out.
 			this.startConsuming(host);
 			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
+			// The context has to be on the session before the first request, because
+			// that is where the plugin reads it from.
+			await this.applyDiscord(host, request.threadId, sessionID, request.discord);
 			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 			await this.applyModel(host, request.threadId, sessionID, request.model ?? MODEL);
 
-			await host.sessions.prompt({ sessionID, text: request.text });
+			await host.sessions.prompt({ sessionID, text: userMessage(request) });
 			const finished = await this.wait(turn);
 			if (!finished) await this.interrupt(request.threadId).catch(() => undefined);
 
@@ -477,6 +502,41 @@ export class ErynSession extends DurableObject<Env> {
 			this.appliedModels.set(threadId, model);
 		} catch (error) {
 			log(`could not select model ${model}: ${describeError(error)}`);
+		}
+	}
+
+	/**
+	 * Record where the request came from on the thread's session, so the
+	 * `eryn.discord` plugin can tell the agent about it.
+	 *
+	 * It is stored on the session rather than held by the plugin, because the
+	 * plugin is per host and the host serves every thread in the guild: the
+	 * context has to travel with the request. A rename or a move updates it, so
+	 * the write is skipped while the context is unchanged — every turn but the
+	 * first, and the first after a rename.
+	 */
+	private async applyDiscord(
+		host: OpenCodeWorkerd.Interface,
+		threadId: string,
+		sessionID: string,
+		discord: DiscordContext | undefined,
+	): Promise<void> {
+		if (!discord) return;
+		const signature = JSON.stringify(discord);
+		if (this.appliedContext.get(threadId) === signature) return;
+		try {
+			const session = await host.sessions.get({ sessionID });
+			await host.sessions.update({
+				sessionID,
+				// Merged, so a context write cannot drop metadata some other
+				// plugin put on the session.
+				metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: discord },
+			});
+			this.appliedContext.set(threadId, signature);
+		} catch (error) {
+			// A context the agent cannot read costs it a hint; it must never cost
+			// the turn, so this is logged and dropped.
+			log(`could not record the Discord context for ${threadId}: ${describeError(error)}`);
 		}
 	}
 

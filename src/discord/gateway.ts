@@ -31,6 +31,8 @@ export interface DiscordMessage {
 	content?: string;
 	webhook_id?: string;
 	author?: DiscordUser;
+	/** The author's guild membership, which carries their server nickname. */
+	member?: { nick?: string };
 	mentions?: DiscordUser[];
 	mention_roles?: string[];
 	thread?: { id: string; parent_id?: string };
