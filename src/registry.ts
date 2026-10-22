@@ -104,8 +104,27 @@ const LEGACY_INTEGRATION = "opencode-go";
  */
 const CONSOLE_INTEGRATION = "opencode";
 
-/** Marks the one-off refile as done, so it happens once per deployment. */
-const REFILE_KEY = "migration:console-provider";
+/**
+ * Marks the one-off refile as done, so it happens once per deployment.
+ *
+ * Versioned because the first pass moved the key alone, and a record whose model
+ * still names Go has to be visited again.
+ */
+const REFILE_KEY = "migration:console-provider:v2";
+
+/**
+ * Move a model reference that named OpenCode Go to the Console.
+ *
+ * The key and the model have to agree: a model naming a provider this deployment
+ * holds no key for resolves to nothing, so a record whose key moves and whose
+ * model does not is left worse than it started.
+ */
+export function refileModel(model: string | undefined): string | undefined {
+	if (!model) return undefined;
+	const at = model.indexOf("/");
+	if (at <= 0 || model.slice(0, at) !== LEGACY_INTEGRATION) return undefined;
+	return `${CONSOLE_INTEGRATION}${model.slice(at)}`;
+}
 
 /**
  * Move a key filed under OpenCode Go to the Console provider.
@@ -158,7 +177,7 @@ export class ErynRegistry extends DurableObject<Env> {
 		// Cheap after the first call: the marker is remembered for the lifetime of
 		// the object, so a request pays one boolean check rather than a read.
 		const moved = await this.refile();
-		if (path[0] === "registry" && path[1] === "migrate") return json({ moved });
+		if (path[0] === "registry" && path[1] === "migrate") return json(moved);
 		if (path[0] !== "registry") return json({ error: "not found" }, 404);
 		if (path[1] === "guild" && path[2]) return this.guild(request, path[2], path[3] === "key");
 		if (path[1] === "mcp" && path[2]) return this.mcpServers(request, decodeURIComponent(path[2]));
@@ -210,39 +229,47 @@ export class ErynRegistry extends DurableObject<Env> {
 	 * it runs on any request rather than at a particular endpoint so a deploy
 	 * applies it without anything having to remember to ask.
 	 */
-	private async refile(): Promise<number> {
-		if (this.refiled) return 0;
+	private async refile(): Promise<{ keys: number; models: number }> {
+		const done = { keys: 0, models: 0 };
+		if (this.refiled) return done;
 		const secret = this.env.ENCRYPTION_KEY;
-		if (!secret) return 0;
+		if (!secret) return done;
 		if (await this.ctx.storage.get<boolean>(REFILE_KEY)) {
 			this.refiled = true;
-			return 0;
+			return done;
 		}
 
-		let moved = 0;
+		const moved = { keys: 0, models: 0 };
 		try {
 			for (const [storageKey] of await this.ctx.storage.list<StoredGuild>({ prefix: "guild:" })) {
 				// `load` first, so a record still on the pre-providers single key is
 				// folded into a connection and then refiled in the same pass.
 				const stored = await this.load(storageKey);
 				const refiled = refileConsoleKey(await this.connections(stored), stored?.prefixes);
-				if (!refiled) continue;
-				moved += refiled.moved;
+				const model = refileModel(stored?.model);
+				if (!refiled && !model) continue;
+				moved.keys += refiled?.moved ?? 0;
+				if (model) moved.models += 1;
+				const connections = refiled?.connections ?? (await this.connections(stored));
 				await this.ctx.storage.put<StoredGuild>(storageKey, {
-					model: stored?.model ?? DEFAULT_MODEL,
+					model: model ?? stored?.model ?? DEFAULT_MODEL,
 					updatedAt: Date.now(),
 					...(stored?.configuredBy ? { configuredBy: stored.configuredBy } : {}),
 					...(stored?.github ? { github: stored.github } : {}),
-					credentials: await encryptSecret(secret, JSON.stringify(refiled.connections)),
-					...(Object.keys(refiled.prefixes).length ? { prefixes: refiled.prefixes } : {}),
+					credentials: await encryptSecret(secret, JSON.stringify(connections)),
+					...((refiled?.prefixes ?? stored?.prefixes)
+						? { prefixes: refiled?.prefixes ?? stored?.prefixes }
+						: {}),
 				});
 			}
 			await this.ctx.storage.put(REFILE_KEY, true);
 			this.refiled = true;
-			if (moved) console.log(`[eryn:registry] refiled ${moved} key(s) to the OpenCode Console provider`);
+			if (moved.keys || moved.models) {
+				console.log(`[eryn:registry] console refile: ${moved.keys} key(s), ${moved.models} model reference(s)`);
+			}
 		} catch (error) {
 			// Deliberately unmarked, so a failure is retried rather than leaving a
-			// key under the wrong provider for good.
+			// record under the wrong provider for good.
 			console.log(`[eryn:registry] could not refile: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		return moved;

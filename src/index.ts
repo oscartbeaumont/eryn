@@ -1161,8 +1161,10 @@ async function wake(env: Env): Promise<void> {
 		// touching it here applies them without waiting for a request to arrive.
 		env.REGISTRY.get(env.REGISTRY.idFromName("registry")).fetch("https://eryn.internal/registry/migrate"),
 	]).catch(() => [undefined, undefined]);
-	const body = (await registry?.json().catch(() => ({}))) as { moved?: number } | undefined;
-	if (body?.moved) console.log(`[eryn] refiled ${body.moved} key(s) to the OpenCode Console provider`);
+	const body = (await registry?.json().catch(() => ({}))) as { keys?: number; models?: number } | undefined;
+	if (body?.keys || body?.models) {
+		console.log(`[eryn] console refile: ${body.keys ?? 0} key(s), ${body.models ?? 0} model reference(s)`);
+	}
 }
 
 export default {
