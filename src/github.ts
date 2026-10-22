@@ -39,7 +39,13 @@ function pemToDer(pem: string): Uint8Array {
 	return base64ToBytes(base64);
 }
 
-async function appJwt(appId: string, privateKey: string): Promise<string> {
+/**
+ * A JWT for the App itself, which is what mints an installation token.
+ *
+ * Exported because the MCP tools authenticate as the same App when a user
+ * chooses it over a personal token; the agent's own client is unchanged.
+ */
+export async function appJwt(appId: string, privateKey: string): Promise<string> {
 	const key = await crypto.subtle.importKey(
 		"pkcs8",
 		pemToDer(privateKey),

@@ -5,6 +5,7 @@ import {
 	discordToolAction,
 	exchangeMcpCode,
 	fetchMcpServers,
+	githubToolAction,
 	mcpServerAction,
 	registerMcpClient,
 	startMcpSignIn,
@@ -12,7 +13,7 @@ import {
 	type McpTokens,
 } from "./api";
 import { session } from "./session";
-import { A, buttonClass, Chip, Code, CopyButton, Footer, Header, Kicker, Notice } from "./ui";
+import { A, buttonClass, Chip, Code, CopyButton, Footer, Header, Kicker, Notice, SecretInput } from "./ui";
 
 /** The endpoint path, kept in step with `MCP_PATH` in `src/mcp/oauth.ts`. */
 const MCP_PATH = "/mcp";
@@ -35,14 +36,12 @@ const TOOLS = [
  * change, so the row renders greyed out rather than offering a button that would
  * do nothing.
  */
-const INTEGRATIONS = [
-	{
-		name: "GitHub",
-		description: "Read issues, open branches, and raise pull requests.",
-		link: "Install the GitHub App",
-		enabled: false,
-	},
-];
+const INTEGRATIONS: {
+	name: string;
+	description: string;
+	link: string;
+	enabled: boolean;
+}[] = [];
 
 interface Status {
 	kind: "idle" | "busy" | "ok" | "error";
@@ -272,6 +271,9 @@ export default function ConsoleMcp() {
 					</p>
 					<div class="divide-y divide-line border border-line bg-surface">
 						<DiscordConnection
+							onNotice={(kind, message) => setStatus({ kind: kind === "error" ? "error" : "ok", message })}
+						/>
+						<GitHubConnection
 							onNotice={(kind, message) => setStatus({ kind: kind === "error" ? "error" : "ok", message })}
 						/>
 						<For each={INTEGRATIONS}>
@@ -553,6 +555,125 @@ function DiscordConnection(props: { onNotice: (kind: "ok" | "error", message: st
 				>
 					{link() ? "Disconnect" : "Connect Discord"}
 				</button>
+			</Show>
+		</div>
+	);
+}
+
+/**
+ * The GitHub tools, and the credential they act with.
+ *
+ * Two ways, because the name on an action usually matters: a personal token
+ * makes it the user's own, while Eryn's app installed on their account makes it
+ * the app's, acting on their behalf.
+ */
+function GitHubConnection(props: { onNotice: (kind: "ok" | "error", message: string) => void }) {
+	const [state, setState] = createSignal<{ kind: string; login: string | null } | null>(null);
+	const [installUrl, setInstallUrl] = createSignal<string | null>(null);
+	const [loaded, setLoaded] = createSignal(false);
+	const [busy, setBusy] = createSignal(false);
+
+	async function reload() {
+		try {
+			const result = await fetchMcpServers();
+			setState(result.github ?? null);
+			setInstallUrl(result.githubInstallUrl ?? null);
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setLoaded(true);
+		}
+	}
+	void reload();
+
+	async function connect(event: SubmitEvent) {
+		event.preventDefault();
+		const entered = String(new FormData(event.currentTarget as HTMLFormElement).get("token") ?? "").trim();
+		if (!entered) return;
+		setBusy(true);
+		try {
+			const result = await githubToolAction({ action: "connect", token: entered });
+			props.onNotice("ok", result.message ?? "Connected.");
+			await reload();
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function disconnect() {
+		setBusy(true);
+		try {
+			const result = await githubToolAction({ action: "disconnect" });
+			props.onNotice("ok", result.message ?? "Disconnected.");
+			await reload();
+		} catch (error) {
+			props.onNotice("error", describe(error));
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<div class="px-5 py-4">
+			<div class="flex flex-wrap items-center gap-4">
+				<div class="min-w-0 flex-1">
+					<div class="flex items-center gap-2">
+						<span class="font-mono text-sm font-semibold">GitHub</span>
+						<Show when={state()}>
+							{(current) => (
+								<>
+									<Chip on>On</Chip>
+									<span class="font-mono text-xs text-faint">
+										{current().kind === "pat" ? `as ${current().login ?? "you"}` : `as Eryn's app on ${current().login ?? "your account"}`}
+									</span>
+								</>
+							)}
+						</Show>
+					</div>
+					<p class="mt-1 text-sm text-muted">
+						List and search issues and pull requests, read one in full, open them, comment, review, and check CI.
+						A personal token makes every action carry your name; the app carries its own, acting on your behalf.
+					</p>
+				</div>
+				<Show when={state()}>
+					<button type="button" class={buttonClass.danger} disabled={busy()} onClick={() => void disconnect()}>
+						Disconnect
+					</button>
+				</Show>
+			</div>
+
+			<Show when={loaded() && !state()}>
+				<div class="mt-4 flex flex-col gap-3">
+					<form class="flex flex-wrap items-end gap-3" onSubmit={connect}>
+						<label class="min-w-0 flex-1">
+							<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+								Personal access token
+							</span>
+							<SecretInput name="token" placeholder="github_pat_… or ghp_…" />
+						</label>
+						<button type="submit" class={buttonClass.primary} disabled={busy()}>
+							Connect token
+						</button>
+					</form>
+					<Show when={installUrl()}>
+						{(url) => (
+							<p class="text-sm text-muted">
+								Or{" "}
+								<a href={url()} class="border-b border-line-strong text-fg">
+									install Eryn's GitHub App
+								</a>{" "}
+								so actions are attributed to the app on your behalf.
+							</p>
+						)}
+					</Show>
+					<Show when={!installUrl()}>
+						<p class="font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+							The GitHub App is not configured on this deployment, so a token is the only way in.
+						</p>
+					</Show>
+				</div>
 			</Show>
 		</div>
 	);

@@ -109,7 +109,8 @@ export class ErynRegistry extends DurableObject<Env> {
 		if (path[0] !== "registry") return json({ error: "not found" }, 404);
 		if (path[1] === "guild" && path[2]) return this.guild(request, path[2], path[3] === "key");
 		if (path[1] === "mcp" && path[2]) return this.mcpServers(request, decodeURIComponent(path[2]));
-		if (path[1] === "discord" && path[2]) return this.discordLink(request, decodeURIComponent(path[2]));
+		if (path[1] === "discord" && path[2]) return this.connection(request, `discord:${decodeURIComponent(path[2])}`);
+		if (path[1] === "github" && path[2]) return this.connection(request, `github:${decodeURIComponent(path[2])}`);
 		if (path[1] === "user" && path[2] && path[3] === "guilds") return this.userGuilds(request, path[2]);
 		return json({ error: "not found" }, 404);
 	}
@@ -287,13 +288,13 @@ export class ErynRegistry extends DurableObject<Env> {
 	}
 
 	/**
-	 * The Discord account a user linked to the MCP endpoint.
+	 * An account a user connected for the MCP endpoint to act through.
 	 *
-	 * Sealed like everything else, though it holds no secret: what it records is
-	 * that a decision was made, and which account made it.
+	 * Sealed like everything else. Discord's holds no secret — what it records is
+	 * that a decision was made and by which account — while GitHub's holds either
+	 * a personal token or the installation Eryn's app is working through.
 	 */
-	private async discordLink(request: Request, userId: string): Promise<Response> {
-		const storageKey = `discord:${userId}`;
+	private async connection(request: Request, storageKey: string): Promise<Response> {
 		const secret = this.env.ENCRYPTION_KEY;
 
 		if (request.method === "PUT") {

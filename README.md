@@ -219,6 +219,38 @@ Messages are flattened to text, attachments are named rather than fetched, and a
 message is cut at 900 characters. And posting never parses mentions, so a
 message the model writes cannot ping a role or everyone by accident.
 
+### GitHub tools
+
+Fourteen tools, for the work a coding agent does around a repository rather than
+inside it: `github_whoami`, `github_repos`, `github_repo`, `github_issues`,
+`github_issue`, `github_create_issue`, `github_update_issue`, `github_comment`,
+`github_search`, `github_pulls`, `github_pull`, `github_create_pull`,
+`github_review`, and `github_ci`.
+
+**Two credentials, because the name on an action usually matters.** A personal
+access token makes every action carry the user's own name. Eryn's GitHub App,
+installed on their account, makes them carry the app's, acting on their behalf —
+which is what an installation is for. The same tools serve both; the only
+difference is where the bearer token comes from, and `github_whoami` reports
+which one is in play. Either is connected on the MCP page.
+
+The app path needs three things, and a deployment can be missing any of them:
+`GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (secrets), `GITHUB_APP_SLUG` (a text
+binding, so the install link can be built), and an actual installation. The MCP
+page says so plainly when the app is unavailable rather than offering a button
+that would fail, and a token always works.
+
+A personal token is checked against `GET /user` before it is stored, so a typo is
+caught when it is pasted rather than by the first tool call a model makes.
+
+**Two GitHub surfaces now exist, and they are different.** These tools are the
+MCP endpoint's: REST only, against any repository the credential reaches, for
+both a harness and the bot. The agent's older `github_*` tools
+(`src/opencode/github.ts`) are the *workspace* ones — clone a tarball into the
+virtual filesystem, branch, commit the files, open a pull request — bound per
+Discord server by the GitHub App installation on the Bot page. Neither replaces
+the other: one reads and writes through the API, the other moves a working tree.
+
 ### The gateway
 
 `/mcp` fronts those servers, so a harness points at one URL and drops its own

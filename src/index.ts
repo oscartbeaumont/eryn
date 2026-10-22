@@ -48,7 +48,7 @@ import {
 	type McpClientRegistration,
 } from "./mcp/auth";
 import { listTools, McpUnauthorized } from "./mcp/client";
-import { readDiscordLink, writeDiscordLink } from "./mcp/link";
+import { readDiscordLink, readGitHubConnection, writeDiscordLink, writeGitHubConnection } from "./mcp/link";
 import { ensureToken, newServerId, readMcpServers, summarise, writeMcpServers, type McpServerRecord } from "./mcp/servers";
 import {
 	getGuildConfig,
@@ -105,6 +105,8 @@ const McpServerRequestSchema = Schema.Struct({
 	id: Schema.optional(Schema.String),
 	name: Schema.optional(Schema.String),
 	url: Schema.optional(Schema.String),
+	/** A personal access token, when connecting GitHub that way. */
+	token: Schema.optional(Schema.String),
 });
 
 /** Where an MCP server sends the browser back once the user has approved. */
@@ -215,11 +217,21 @@ function handleLogout(request: HttpServerRequest.HttpServerRequest): HttpServerR
 async function handleGitHubCallback(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const url = new URL(request.originalUrl);
 	const installationId = url.searchParams.get("installation_id");
-	const state = await verify<{ guild: string; exp: number }>(url.searchParams.get("state") ?? undefined, env.SESSION_SECRET);
-	if (!installationId || !state || state.exp < Date.now()) {
+	// The same App serves two scopes: a guild's own binding, and a user's MCP
+	// tools. Which one this is comes from the state the install link carried.
+	const state = await verify<{ guild?: string; user?: string; exp: number }>(
+		url.searchParams.get("state") ?? undefined,
+		env.SESSION_SECRET,
+	);
+	if (!installationId || !state || state.exp < Date.now() || (!state.guild && !state.user)) {
 		return authError(url.origin, "That GitHub installation could not be verified.");
 	}
-	await setGuildInstallation(env, state.guild, installationId);
+	if (state.user) {
+		await writeGitHubConnection(env, state.user, { kind: "app", installationId, connectedAt: Date.now() });
+		await refreshGateway(state.user);
+		return HttpServerResponse.redirect(`/console/mcp?ok=${encodeURIComponent("GitHub connected through the app.")}`);
+	}
+	await setGuildInstallation(env, state.guild!, installationId);
 	return HttpServerResponse.redirect(`/console?ok=${encodeURIComponent("GitHub connected.")}`);
 }
 
@@ -512,16 +524,73 @@ async function handleMcpServerList(
 	request: HttpServerRequest.HttpServerRequest,
 ): Promise<HttpServerResponse.HttpServerResponse> {
 	const session = await readSession(request);
-	if (!session) return json({ signedIn: false, servers: [], discord: null });
-	const [servers, link] = await Promise.all([
+	if (!session) return json({ signedIn: false, servers: [], discord: null, github: null, githubInstallUrl: null });
+	const [servers, link, github] = await Promise.all([
 		readMcpServers(env, session.uid),
 		readDiscordLink(env, session.uid),
+		readGitHubConnection(env, session.uid),
 	]);
+
+	// The install link is only worth offering when the app itself is configured
+	// and this account has not already installed it.
+	const slug = env.GITHUB_APP_SLUG?.trim();
+	const appConfigured = Boolean(slug && env.GITHUB_APP_ID?.trim() && env.GITHUB_APP_PRIVATE_KEY?.trim());
+	const githubInstallUrl =
+		appConfigured && !github
+			? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(
+					await sign({ user: session.uid, exp: Date.now() + 600_000 }, env.SESSION_SECRET),
+				)}`
+			: null;
+
 	return json({
 		signedIn: true,
 		servers: servers.map(summarise),
 		discord: link ? { id: link.id, name: link.name } : null,
+		github: github ? { kind: github.kind, login: github.kind === "pat" ? github.login ?? null : github.account ?? null } : null,
+		githubInstallUrl,
 	});
+}
+
+/**
+ * The GitHub tools, and the credential they act with.
+ *
+ * A personal token is checked against GitHub before it is stored, so a typo is
+ * caught here rather than by the first tool call a model makes, and it is the
+ * only thing in this Worker that reports whose account a token belongs to.
+ */
+async function handleMcpGitHub(
+	request: HttpServerRequest.HttpServerRequest,
+	form: Schema.Schema.Type<typeof McpServerRequestSchema>,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const session = await readSession(request);
+	if (!session) return json({ error: "Please sign in again." }, 401);
+
+	if (form.action === "disconnect") {
+		await writeGitHubConnection(env, session.uid, undefined);
+		await refreshGateway(session.uid);
+		return json({ ok: true, message: "The GitHub tools are off." });
+	}
+
+	const token = form.token?.trim();
+	if (!token) return json({ error: "Paste a personal access token, or install the app." }, 400);
+
+	const response = await fetch("https://api.github.com/user", {
+		headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "eryn" },
+	}).catch(() => undefined);
+	if (!response?.ok) {
+		return json({ error: `GitHub rejected that token (HTTP ${response?.status ?? "unreachable"}).` }, 400);
+	}
+	const user = (await response.json().catch(() => ({}))) as { login?: unknown };
+	const login = typeof user.login === "string" ? user.login : undefined;
+
+	await writeGitHubConnection(env, session.uid, {
+		kind: "pat",
+		token,
+		...(login ? { login } : {}),
+		connectedAt: Date.now(),
+	});
+	await refreshGateway(session.uid);
+	return json({ ok: true, message: `Connected as ${login ?? "your account"}.` });
 }
 
 /**
@@ -1010,6 +1079,13 @@ const Routes = Layer.mergeAll(
 			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
 			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleMcpDiscord(request, form).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/mcp/github", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(McpServerRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleMcpGitHub(request, form).catch((error) => setupFailure(error)));
 		}),
 	),
 	HttpRouter.add("GET", MCP_OAUTH_CALLBACK, (request) =>

@@ -26,7 +26,8 @@ import { McpProtocol, McpSchema, McpServer } from "effect/ai";
 import { describeError, discordRest, type DiscordRest } from "../discord/api";
 import { callTool, listTools, type McpTool, type McpToolResult } from "./client";
 import { DISCORD_TOOLS, discordFailure, discordTool } from "./discord";
-import { readDiscordLink, type DiscordLink } from "./link";
+import { credentialFor, githubApi, GITHUB_TOOLS, githubTool, type GitHubApi } from "./github";
+import { readDiscordLink, readGitHubConnection, type DiscordLink, type GitHubConnection } from "./link";
 import { MCP_PATH, allowedOrigins, INSTRUCTIONS, randomNumber, runRandomNumber } from "./server";
 import { ensureToken, namespaced, readMcpServers, type McpServerRecord } from "./servers";
 
@@ -122,8 +123,13 @@ export class ErynMcp extends DurableObject<Env> {
 	private linkAt = 0;
 	/** The bot's own REST client, which is what the Discord tools act as. */
 	private readonly rest: DiscordRest;
+	/** The GitHub client, rebuilt when the credential behind it changes. */
+	private github: GitHubApi | undefined;
+	private githubCredential: GitHubConnection | undefined;
+	private githubAt = 0;
 	/** What the registry last looked like, so a change is what sends a notification. */
 	private signature = "";
+	private githubSignature = "";
 	private syncing: Promise<void> | undefined;
 
 	constructor(state: DurableObjectState, env: Env) {
@@ -191,8 +197,8 @@ export class ErynMcp extends DurableObject<Env> {
 		}
 		// The endpoint's own tools are always present, whatever the user connects.
 		await this.add(randomNumber, () => true);
-		// Discord's are registered once and left invisible until it is connected,
-		// so connecting is a flip of a flag rather than a rebuild.
+		// Discord's and GitHub's are registered once and left invisible until they
+		// are connected, so connecting is a flip of a flag rather than a rebuild.
 		for (const tool of DISCORD_TOOLS) {
 			await this.add(
 				new McpSchema.Tool({
@@ -202,6 +208,17 @@ export class ErynMcp extends DurableObject<Env> {
 					inputSchema: tool.inputSchema as never,
 				}),
 				() => this.discord,
+			);
+		}
+		for (const tool of GITHUB_TOOLS) {
+			await this.add(
+				new McpSchema.Tool({
+					name: tool.name,
+					title: tool.title,
+					description: tool.description,
+					inputSchema: tool.inputSchema as never,
+				}),
+				() => this.github !== undefined,
 			);
 		}
 	}
@@ -220,6 +237,14 @@ export class ErynMcp extends DurableObject<Env> {
 		this.link = await readDiscordLink(this.env, this.userId).catch(() => undefined);
 		this.linkAt = Date.now();
 		return this.link;
+	}
+
+	/** The user's GitHub credential, re-read only when the cached copy is stale. */
+	private async githubConnection(): Promise<GitHubConnection | undefined> {
+		if (Date.now() - this.githubAt < CONFIG_TTL_MS) return this.githubCredential;
+		this.githubCredential = await readGitHubConnection(this.env, this.userId).catch(() => undefined);
+		this.githubAt = Date.now();
+		return this.githubCredential;
 	}
 
 	/** One server's catalogue, cached so a harness listing tools is not a fan-out. */
@@ -263,6 +288,21 @@ export class ErynMcp extends DurableObject<Env> {
 		this.live = new Set(enabled.map((server) => server.id));
 		this.discord = (await this.discordLink()) !== undefined;
 
+		// The client is kept across requests so an installation token is minted
+		// once an hour rather than once a call, and rebuilt only when the
+		// credential behind it changes.
+		const appId = this.env.GITHUB_APP_ID?.trim();
+		const privateKey = this.env.GITHUB_APP_PRIVATE_KEY?.trim();
+		const credential = credentialFor(
+			await this.githubConnection(),
+			appId && privateKey ? { appId, privateKey, installationId: "" } : undefined,
+		);
+		const githubSignature = credential ? `${credential.kind}` : "";
+		if (githubSignature !== this.githubSignature) {
+			this.githubSignature = githubSignature;
+			this.github = credential ? githubApi(credential) : undefined;
+		}
+
 		// Asked for together, because the first request after a cold start waits for
 		// all of them and a sequential fan-out would add up.
 		const catalogues = await Promise.all(enabled.map(async (server) => [server, await this.toolsFor(server)] as const));
@@ -280,7 +320,7 @@ export class ErynMcp extends DurableObject<Env> {
 			if (!wanted.has(exposed)) await this.hide(exposed);
 		}
 
-		const signature = `${[...wanted.keys()].sort().join(",")}|${[...this.live].sort().join(",")}|${this.discord}`;
+		const signature = `${[...wanted.keys()].sort().join(",")}|${[...this.live].sort().join(",")}|${this.discord}|${this.github !== undefined}`;
 		if (signature !== this.signature) {
 			this.signature = signature;
 			await this.notify();
@@ -360,6 +400,17 @@ export class ErynMcp extends DurableObject<Env> {
 				});
 			} catch (error) {
 				return toFailure(discordFailure(error));
+			}
+		}
+		const github = githubTool(exposed);
+		if (github) {
+			if (!this.github) return toFailure("GitHub is not connected, so that tool is unavailable.");
+			try {
+				return toResult({
+					content: [{ type: "text", text: await github.run(this.github, (args ?? {}) as Record<string, unknown>) }],
+				});
+			} catch (error) {
+				return toFailure(describeError(error));
 			}
 		}
 		const owner = this.owned.get(exposed);

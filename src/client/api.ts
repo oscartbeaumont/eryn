@@ -238,6 +238,10 @@ export interface McpServersResult {
 	servers: McpServer[];
 	/** The Discord account linked to the endpoint, when the tools are on. */
 	discord: { id: string; name: string } | null;
+	/** The GitHub credential the tools act with, and whose name they carry. */
+	github: { kind: string; login: string | null } | null;
+	/** Where to install Eryn's app, when that is configured and not yet done. */
+	githubInstallUrl: string | null;
 }
 
 export interface McpServerResult extends ApiResult {
@@ -262,6 +266,15 @@ export function mcpServerAction(input: {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(input),
+	});
+}
+
+/** Connect GitHub with a personal token, or turn the tools off. */
+export function githubToolAction(input: { action: "connect" | "disconnect"; token?: string }): Promise<ApiResult> {
+	return request<ApiResult>("/api/mcp/github", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ action: input.action, token: input.token }),
 	});
 }
 
