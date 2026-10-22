@@ -382,10 +382,16 @@ that server's own OpenCode instance rather than a hardcoded set — the same
 catalogue a turn would resolve against, so it cannot drift from what the agent
 can use. Any `provider/model` reference can still be typed by hand.
 
-Every provider that instance knows is listed, not only the ones connected here:
-a provider someone configured elsewhere still has a catalogue worth seeing, and
-the picker marks the models that cannot run yet. Connected providers come first,
-and the hint under the field says how many of the listed models are usable.
+**Several providers can be connected at once** — a guild brings its own keys, and
+there is no reason for one to be the only one — and the picker works the way
+OpenCode's does: a provider is chosen first, and only its models are ever listed.
+That is what makes a catalogue of a few thousand models usable.
+
+Providers this server can use come first, labelled as connected. The models of a
+provider it has not connected are still listed, marked unavailable, so a provider
+you configured elsewhere is not invisible; the hint under the picker says how many
+of that provider's models can actually run, and names the provider to connect when
+none of them can.
 
 The provider catalogue behind **Connect a provider** is read defensively, per
 provider: a provider whose methods are not shaped like the rest is logged and

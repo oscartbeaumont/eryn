@@ -24,36 +24,29 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_MODEL, isValidModel } from "./config";
 import { decryptSecret, encryptSecret, type Sealed } from "./crypto";
+import {
+	KEY_PREFIX_LENGTH,
+	LEGACY_INTEGRATION,
+	mergeConnections,
+	prefixesFor,
+	refileConsoleKey,
+	refileModel,
+	type GuildConnection,
+	type GuildConnectionSummary,
+} from "./registry-connections";
+
+export type { GuildConnection, GuildConnectionSummary } from "./registry-connections";
+
+/**
+ * Marks the one-off refile as done, so it happens once per deployment.
+ *
+ * Versioned because the first pass moved the key alone, and a record whose model
+ * still names Go has to be visited again.
+ */
+const REFILE_KEY = "migration:console-provider:v2";
 
 /** How long a user's guild list stays cached. */
 export const USER_GUILDS_TTL_MS = 5 * 60_000;
-
-/**
- * One provider credential a guild has connected.
- *
- * `integrationID` is an OpenCode integration id — `opencode-go`, `openrouter`,
- * and every other provider models.dev describes. Nothing here is specific to a
- * provider: which ones exist and how they authenticate is the host's business,
- * so a new provider needs no change in this object.
- */
-export interface GuildConnection {
-	integrationID: string;
-	/** The flow it was connected with: `key` or `oauth`. */
-	method: string;
-	/**
-	 * The secret, for a `key` connection. A sign-in leaves its credential in the
-	 * guild's own object instead, so this is empty and only the fact that the
-	 * connection exists is recorded here.
-	 */
-	key: string;
-}
-
-/** What the console is told about a connection: never the secret. */
-export interface GuildConnectionSummary {
-	integrationID: string;
-	/** The start of the key, so the console can show which one is configured. */
-	prefix?: string;
-}
 
 interface StoredGuild {
 	model: string;
@@ -89,75 +82,6 @@ export interface GuildSummary {
 }
 
 /** How much of a key to show when identifying which one is configured. */
-const KEY_PREFIX_LENGTH = 18;
-
-/** The integration the one-key era used, so an old record can be migrated. */
-const LEGACY_INTEGRATION = "opencode-go";
-
-/**
- * The OpenCode Console, which is a different provider from OpenCode Go.
- *
- * They have separate keys and separate catalogues — the Console's is the larger
- * one, covering models from several upstreams — but share an environment
- * variable name, so a key filed under the wrong one looks fine and simply
- * offers, or reaches, the wrong models.
- */
-const CONSOLE_INTEGRATION = "opencode";
-
-/**
- * Marks the one-off refile as done, so it happens once per deployment.
- *
- * Versioned because the first pass moved the key alone, and a record whose model
- * still names Go has to be visited again.
- */
-const REFILE_KEY = "migration:console-provider:v2";
-
-/**
- * Move a model reference that named OpenCode Go to the Console.
- *
- * The key and the model have to agree: a model naming a provider this deployment
- * holds no key for resolves to nothing, so a record whose key moves and whose
- * model does not is left worse than it started.
- */
-export function refileModel(model: string | undefined): string | undefined {
-	if (!model) return undefined;
-	const at = model.indexOf("/");
-	if (at <= 0 || model.slice(0, at) !== LEGACY_INTEGRATION) return undefined;
-	return `${CONSOLE_INTEGRATION}${model.slice(at)}`;
-}
-
-/**
- * Move a key filed under OpenCode Go to the Console provider.
- *
- * Every key was filed as Go for as long as Go was the only choice, so a key
- * issued by the Console ended up under the wrong provider. Only the name
- * changes: the secret is carried across untouched, because the point is that
- * nobody should have to paste it again. A Console connection already present
- * wins, since two entries cannot share one integration.
- */
-export function refileConsoleKey(
-	connections: GuildConnection[],
-	prefixes: Record<string, string> | undefined,
-): { connections: GuildConnection[]; prefixes: Record<string, string>; moved: number } | undefined {
-	if (!connections.some((connection) => connection.integrationID === LEGACY_INTEGRATION)) return undefined;
-	const alreadyConsole = connections.some((connection) => connection.integrationID === CONSOLE_INTEGRATION);
-	const next: GuildConnection[] = [];
-	const kept: Record<string, string> = {};
-	let moved = 0;
-	for (const connection of connections) {
-		if (connection.integrationID !== LEGACY_INTEGRATION) {
-			next.push(connection);
-			const prefix = prefixes?.[connection.integrationID];
-			if (prefix) kept[connection.integrationID] = prefix;
-			continue;
-		}
-		moved += 1;
-		if (alreadyConsole) continue;
-		next.push({ ...connection, integrationID: CONSOLE_INTEGRATION });
-		kept[CONSOLE_INTEGRATION] = prefixes?.[LEGACY_INTEGRATION] ?? connection.key.slice(0, KEY_PREFIX_LENGTH);
-	}
-	return { connections: next, prefixes: kept, moved };
-}
 
 export interface CachedGuilds {
 	guilds: unknown[];
@@ -338,29 +262,13 @@ export class ErynRegistry extends DurableObject<Env> {
 			const model = body.model?.trim() || existing?.model || DEFAULT_MODEL;
 			if (!isValidModel(model)) return json({ error: "model must be a provider/model reference" }, 400);
 
-			// Connect and disconnect are applied to the stored list, so a save
-			// that only changes the model cannot drop a provider by omission.
-			const current = await this.connections(existing);
-			const byIntegration = new Map(current.map((connection) => [connection.integrationID, connection]));
-			for (const connection of body.connect ?? []) {
-				const integrationID = connection?.integrationID?.trim();
-				const method = connection?.method?.trim() || "key";
-				const key = connection?.key?.trim() ?? "";
-				if (!integrationID) return json({ error: "a connection needs an integration" }, 400);
-				// Only the key flow carries material. A sign-in leaves its credential
-				// in the guild's own object, so recording the connection is enough.
-				if (method === "key" && !key) return json({ error: "a key connection needs a key" }, 400);
-				byIntegration.set(integrationID, { integrationID, method, key });
-			}
-			for (const integrationID of body.disconnect ?? []) byIntegration.delete(integrationID);
-			const connections = [...byIntegration.values()];
-
-			const prefixes: Record<string, string> = {};
-			for (const connection of connections) {
-				const provided = body.connect?.find((entry) => entry?.integrationID === connection.integrationID)?.key?.trim();
-				const prefix = provided?.slice(0, KEY_PREFIX_LENGTH) || existing?.prefixes?.[connection.integrationID];
-				if (prefix) prefixes[connection.integrationID] = prefix;
-			}
+			// Connect and disconnect are applied to the stored list, so a save that
+			// only changes the model cannot drop a provider by omission, and a guild
+			// can hold several providers at once.
+			const merged = mergeConnections(await this.connections(existing), body.connect, body.disconnect);
+			if (merged.error) return json({ error: merged.error }, 400);
+			const connections = merged.connections;
+			const prefixes = prefixesFor(connections, body.connect, existing?.prefixes);
 
 			const github: GitHubBinding = {
 				installationId: body.githubInstallationId ?? existing?.github?.installationId,

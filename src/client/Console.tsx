@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { capture } from "./analytics";
 import {
 	fetchModels,
@@ -298,6 +298,8 @@ function GuildCard(props: {
 }) {
 	const [busy, setBusy] = createSignal(false);
 	const [model, setModel] = createSignal(props.guild.model);
+	/** Which provider the picker is showing models for. */
+	const [provider, setProvider] = createSignal(providerOf(props.guild.model));
 	const [models, setModels] = createSignal<ModelOption[]>([]);
 	const [catalogue, setCatalogue] = createSignal<"loading" | "ready" | "error">("loading");
 	const [catalogueError, setCatalogueError] = createSignal<string>();
@@ -386,16 +388,99 @@ function GuildCard(props: {
 		return providers().find((provider) => provider.id === integrationID)?.name ?? integrationID;
 	}
 
+	/** The provider a model reference names, which is the part before the first slash. */
+	function providerOf(reference: string): string {
+		const at = reference.indexOf("/");
+		return at > 0 ? reference.slice(0, at) : reference;
+	}
+
+	/** A provider's display name, from the catalogue the console already loaded. */
+	function providerLabel(id: string): string {
+		const name = providers().find((entry) => entry.id === id)?.name;
+		return name && name !== id ? name : id;
+	}
+
+	/**
+	 * The catalogue grouped by provider, the ones this server can use first.
+	 *
+	 * Grouping is what makes a catalogue of a few thousand models usable: a
+	 * provider is chosen first and only its models are ever listed.
+	 */
+	const catalogueProviders = createMemo(() => {
+		const grouped = new Map<string, ModelOption[]>();
+		for (const entry of models()) {
+			const list = grouped.get(entry.provider) ?? [];
+			list.push(entry);
+			grouped.set(entry.provider, list);
+		}
+		return [...grouped.entries()]
+			.map(([id, list]) => ({
+				id,
+				connected: list.some((entry) => entry.connected),
+				usable: list.filter((entry) => entry.enabled).length,
+				total: list.length,
+			}))
+			.sort(
+				(a, b) =>
+					Number(b.connected) - Number(a.connected) ||
+					Number(b.usable) - Number(a.usable) ||
+					a.id.localeCompare(b.id),
+			);
+	});
+
+	/** The provider choices, including one the catalogue does not describe. */
+	const providerChoices = createMemo(() => {
+		const choices = catalogueProviders().map((entry) => ({
+			id: entry.id,
+			label: `${providerLabel(entry.id)} — ${entry.total} model${entry.total === 1 ? "" : "s"}${entry.connected ? ", connected" : ""}`,
+		}));
+		if (choices.some((choice) => choice.id === provider())) return choices;
+		return [{ id: provider(), label: `${provider()} — not in this catalogue` }, ...choices];
+	});
+
+	/** Only the chosen provider's models, named without their provider prefix. */
+	const modelChoices = createMemo(() => {
+		const prefix = `${provider()}/`;
+		return models()
+			.filter((entry) => entry.provider === provider())
+			.map((entry) => ({
+				id: entry.id,
+				name: entry.id.startsWith(prefix) ? entry.id.slice(prefix.length) : entry.id,
+				note: entry.name,
+				disabled: !entry.enabled,
+			}));
+	});
+
+	/**
+	 * Show another provider's models.
+	 *
+	 * The model chosen from the last one is not in this list, so the first this
+	 * provider can actually run is selected rather than leaving a reference that
+	 * belongs to a provider nobody was looking at.
+	 */
+	function chooseProvider(id: string) {
+		setProvider(id);
+		const candidates = models().filter((entry) => entry.provider === id);
+		if (candidates.some((entry) => entry.id === model())) return;
+		const next = candidates.find((entry) => entry.enabled) ?? candidates[0];
+		if (next) setModel(next.id);
+	}
+
 	/** One line under the picker explaining what the list currently is. */
 	function catalogueHint(): string {
 		if (!props.guild.configured) return "Connect a provider to load the models it can reach.";
 		if (catalogue() === "loading") return "Loading models from this server's OpenCode instance…";
 		if (catalogue() === "error") return `Could not load models: ${catalogueError()}`;
-		if (models().length === 0) return "This provider reported no models. You can still type a reference.";
-		// Every provider is listed, so the useful number is how many can actually
-		// run here — the rest are shown so a configured provider is not invisible.
-		const usable = models().filter((model) => model.enabled).length;
-		return `${models().length} models, ${usable} usable with the providers connected here. Search, or type any provider/model reference.`;
+		const list = models().filter((entry) => entry.provider === provider());
+		if (list.length === 0) return "This provider reported no models. You can still type any provider/model reference.";
+		const usable = list.filter((entry) => entry.enabled).length;
+		// Every provider is listed, so the useful number is how many of this one's
+		// models can actually run — the rest show so a configured provider is not
+		// invisible, and this says which one to connect.
+		if (usable === 0) {
+			return `${list.length} models from ${providerLabel(provider())}, none usable — connect it above to use them.`;
+		}
+		return `${list.length} models from ${providerLabel(provider())}, ${usable} usable. Search, or type any provider/model reference.`;
 	}
 
 	return (
@@ -454,24 +539,34 @@ function GuildCard(props: {
 			/>
 
 			<form onSubmit={onSubmit}>
-				<label class="mt-5 mb-3.5 block">
-					<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Model</span>
-					<Combobox
-						name="model"
-						value={model()}
-						options={models().map((entry) => ({
-							id: entry.id,
-							name: entry.id,
-							note: entry.name,
-							disabled: !entry.enabled,
-						}))}
-						disabled={!props.guild.configured}
-						placeholder={props.guild.configured ? "Search models…" : "Connect a provider first"}
-						emptyText={models().length === 0 ? "No models loaded." : "No model matches that search."}
-						onInput={setModel}
-					/>
-					<span class="mt-2 block text-xs text-faint">{catalogueHint()}</span>
-				</label>
+				<div class="mt-5 mb-2 grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+					<label class="block">
+						<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Provider</span>
+						{/* A select rather than a search box: there are a hundred or so, and
+						    a chosen provider is a filter, not a value that gets submitted. */}
+						<select
+							value={provider()}
+							disabled={!props.guild.configured}
+							onChange={(event) => chooseProvider(event.currentTarget.value)}
+							class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg disabled:cursor-not-allowed disabled:border-line disabled:text-faint"
+						>
+							<For each={providerChoices()}>{(choice) => <option value={choice.id}>{choice.label}</option>}</For>
+						</select>
+					</label>
+					<label class="block">
+						<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Model</span>
+						<Combobox
+							name="model"
+							value={model()}
+							options={modelChoices()}
+							disabled={!props.guild.configured}
+							placeholder={props.guild.configured ? "Search models…" : "Connect a provider first"}
+							emptyText={models().length === 0 ? "No models loaded." : "No model matches that search."}
+							onInput={setModel}
+						/>
+					</label>
+				</div>
+				<span class="mb-3.5 block text-xs text-faint">{catalogueHint()}</span>
 
 				<Show
 					when={props.githubConfigured}
