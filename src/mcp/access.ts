@@ -100,12 +100,14 @@ export async function mintTokens(
 	return { accessToken, refreshToken, expiresIn: Math.floor(ACCESS_TTL_MS / 1_000), scope: input.scope.join(" ") };
 }
 
-/** A token Eryn's own sessions use, so the agent's MCP needs no OAuth round trip. */
-export function mintInternalToken(secret: string): Promise<string> {
-	return seal(
-		{ typ: "access", sub: "internal", scope: [MCP_SCOPE], exp: Date.now() + REFRESH_TTL_MS },
-		secret,
-	);
+/**
+ * A token Eryn's own sessions use, so the agent's MCP needs no OAuth round trip.
+ *
+ * The subject is the Discord user the turn acts for — the guild's owner — which
+ * is what routes the call to that user's own MCP gateway.
+ */
+export function mintInternalToken(secret: string, subject: string): Promise<string> {
+	return seal({ typ: "access", sub: subject, scope: [MCP_SCOPE], exp: Date.now() + REFRESH_TTL_MS }, secret);
 }
 
 /** A fresh, unguessable value for places that just need entropy (e.g. client ids). */

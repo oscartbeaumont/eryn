@@ -367,8 +367,8 @@ export class ErynSession extends DurableObject<Env> {
 	 */
 	private readonly sessionByThread = new Map<string, string>();
 	private readonly threadBySession = new Map<string, string>();
-	/** The minted MCP bearer token, reused for the object's lifetime. */
-	private mcpToken: Promise<string | undefined> | undefined;
+	/** The minted MCP bearer token, per subject, reused for the object's lifetime. */
+	private mcpToken: { subject: string; promise: Promise<string | undefined> } | undefined;
 	/** The guild's owner, resolved once. `null` records that Discord would not say. */
 	private owner: string | null | undefined;
 	/** Signature of the owner's MCP servers, so a change rebuilds the host. */
@@ -500,18 +500,9 @@ export class ErynSession extends DurableObject<Env> {
 	 * an agent that cannot answer at all.
 	 */
 	private async mcpConfig(): Promise<Configuration["mcp"]> {
-		this.mcpToken ??= (async () => {
-			const secret = this.env.SESSION_SECRET?.trim();
-			if (!secret) return undefined;
-			return await mintInternalToken(secret);
-		})().catch((error) => {
-			log(`could not mint an MCP token, the MCP will be omitted: ${describeError(error)}`);
-			this.mcpToken = undefined;
-			return undefined;
-		});
-
-		const servers: Record<string, RemoteMcpServer> = { ...(await this.ownerMcpServers()) };
-		const token = await this.mcpToken;
+		const ownerId = await this.ownerId();
+		const servers: Record<string, RemoteMcpServer> = { ...(await this.ownerMcpServers(ownerId)) };
+		const token = await this.mcpTokenFor(ownerId);
 		if (token) {
 			const url = this.env.MCP_INTERNAL_URL?.trim() || `${this.publicOrigin()}${MCP_PATH}`;
 			servers.eryn = {
@@ -527,6 +518,29 @@ export class ErynSession extends DurableObject<Env> {
 	}
 
 	/**
+	 * The internal MCP token for a subject.
+	 *
+	 * Minted once per subject and reused, because the subject is what decides
+	 * which user's gateway the agent's MCP calls reach — and that is the guild's
+	 * owner, whose servers are the ones a turn should act with.
+	 */
+	private mcpTokenFor(subject: string | undefined): Promise<string | undefined> {
+		const key = subject ?? "internal";
+		if (this.mcpToken?.subject === key) return this.mcpToken.promise;
+		const promise = (async () => {
+			const secret = this.env.SESSION_SECRET?.trim();
+			if (!secret) return undefined;
+			return await mintInternalToken(secret, key);
+		})().catch((error) => {
+			log(`could not mint an MCP token, the MCP will be omitted: ${describeError(error)}`);
+			this.mcpToken = undefined;
+			return undefined;
+		});
+		this.mcpToken = { subject: key, promise };
+		return promise;
+	}
+
+	/**
 	 * The MCP servers the guild's owner has connected, as the agent's own config.
 	 *
 	 * They are the owner's rather than the guild's because they are a person's
@@ -536,9 +550,11 @@ export class ErynSession extends DurableObject<Env> {
 	 * client cannot complete an OAuth flow inside a Worker, because it waits for
 	 * the callback on a `127.0.0.1` listener.
 	 */
-	private async ownerMcpServers(): Promise<Record<string, RemoteMcpServer>> {
-		const ownerId = await this.ownerId();
-		if (!ownerId) return {};
+	private async ownerMcpServers(ownerId: string | undefined): Promise<Record<string, RemoteMcpServer>> {
+		if (!ownerId) {
+			this.mcpSignature = "";
+			return {};
+		}
 		const servers = await readMcpServers(this.env, ownerId).catch(() => [] as McpServerRecord[]);
 		const enabled = servers.filter((server) => server.enabled && server.name !== "eryn");
 		this.mcpSignature = enabled.map((server) => `${server.name}:${server.url}`).join("|");

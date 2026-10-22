@@ -30,7 +30,7 @@ const DEFAULT_ORIGIN = "https://eryn.otbeaumont.me";
  * console's self-test would be refused by its own server. Non-browser clients
  * (OpenCode, Claude, Cursor) send no `Origin` at all and are unaffected.
  */
-function allowedOrigins(): ReadonlyArray<string> {
+export function allowedOrigins(): ReadonlyArray<string> {
 	const configured = env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "");
 	return configured && configured !== DEFAULT_ORIGIN ? [configured, DEFAULT_ORIGIN] : [DEFAULT_ORIGIN];
 }
@@ -70,7 +70,8 @@ function randomBetween(min: number, max: number): number {
 	return min + (value % span);
 }
 
-const randomNumber = new McpSchema.Tool({
+/** The tool the gateway registers for every caller, whatever else it fronts. */
+export const randomNumber = new McpSchema.Tool({
 	name: "random_number",
 	title: "Random number",
 	description:

@@ -48,6 +48,9 @@ export default defineConfig({
 			GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "ErynGateway" }),
 			SESSION: bindings.durableObject({ worker: "eryn", exportName: "ErynSession" }),
 			REGISTRY: bindings.durableObject({ worker: "eryn", exportName: "ErynRegistry" }),
+			// The MCP gateway: one per Discord user, so a harness sees only that
+			// user's tools.
+			MCP: bindings.durableObject({ worker: "eryn", exportName: "ErynMcp" }),
 
 			// Discord bot token. The bot is disabled when this is empty.
 			DISCORD_BOT_TOKEN: bindings.secret(),
@@ -87,6 +90,7 @@ export default defineConfig({
 			ErynGateway: exports.durableObject({ storage: "sqlite" }),
 			ErynSession: exports.durableObject({ storage: "sqlite" }),
 			ErynRegistry: exports.durableObject({ storage: "sqlite" }),
+			ErynMcp: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 });

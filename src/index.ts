@@ -13,7 +13,7 @@ import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "e
 import { CLIENT_ID, DEFAULT_MODEL, isValidModel } from "./config";
 import { randomToken, sign, verify } from "./crypto";
 import { discordRest } from "./discord/api";
-import { mcpServer } from "./mcp/server";
+import { allowedOrigins } from "./mcp/server";
 import {
 	AS_METADATA_PATH,
 	MCP_PATH,
@@ -62,6 +62,7 @@ import {
 export { ErynGateway } from "./gateway";
 export { ErynSession } from "./agent";
 export { ErynRegistry } from "./registry";
+export { ErynMcp } from "./mcp/gateway";
 
 const SESSION_COOKIE = "eryn_session";
 const STATE_COOKIE = "eryn_state";
@@ -549,6 +550,7 @@ async function handleMcpServers(
 		}
 		const record: McpServerRecord = { id: newServerId(), name, url, enabled: true, createdAt: Date.now() };
 		await writeMcpServers(env, session.uid, [...servers, record]);
+		await refreshGateway(session.uid);
 		return json({ ok: true, message: `${name} added.`, servers: [...servers, record].map(summarise) });
 	}
 
@@ -557,6 +559,7 @@ async function handleMcpServers(
 
 	if (form.action === "remove") {
 		await writeMcpServers(env, session.uid, servers.filter((server) => server.id !== target.id));
+		await refreshGateway(session.uid);
 		return json({ ok: true, message: `${target.name} removed.` });
 	}
 
@@ -567,6 +570,7 @@ async function handleMcpServers(
 			session.uid,
 			servers.map((server) => (server.id === target.id ? { ...server, enabled } : server)),
 		);
+		await refreshGateway(session.uid);
 		return json({ ok: true, message: `${target.name} ${enabled ? "enabled" : "disabled"}.` });
 	}
 
@@ -688,6 +692,7 @@ async function handleMcpOAuthCallback(
 					: server,
 			),
 		);
+		await refreshGateway(pending.userId);
 	} catch (error) {
 		return mcpRedirect(origin, "error", describe(error));
 	}
@@ -809,21 +814,63 @@ async function handleAuthorizeDecide(
  * the `WWW-Authenticate` challenge that starts OAuth discovery. Intercepting
  * here keeps the MCP layer itself free of authentication concerns.
  */
-async function guardMcp(request: Request): Promise<Response | undefined> {
+/**
+ * A browser preflight carries no credential, and the object a request would
+ * reach is the one its token names — so there is nothing to route it to and it
+ * is answered here.
+ */
+function mcpPreflight(request: Request): Response {
+	const origin = request.headers.get("origin");
+	const headers = new Headers({
+		"access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+		"access-control-allow-headers": "content-type, authorization, mcp-session-id, mcp-protocol-version, accept",
+		"access-control-max-age": "86400",
+	});
+	if (origin && allowedOrigins().includes(origin)) {
+		headers.set("access-control-allow-origin", origin);
+		headers.set("vary", "origin");
+	}
+	return new Response(null, { status: 204, headers });
+}
+
+/**
+ * Authenticate the MCP endpoint, then hand it to the caller's own gateway.
+ *
+ * The token's subject is the Discord user the caller acts for: an external
+ * harness gets its own, and Eryn's sessions get the guild owner's. That is what
+ * makes one URL safe — the tools a caller sees are the ones in the object it is
+ * routed to, and nothing else's.
+ */
+async function routeMcp(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
 	if (url.pathname !== MCP_PATH) return undefined;
-	if (request.method === "OPTIONS") return undefined;
+	if (request.method === "OPTIONS") return mcpPreflight(request);
+
 	const secret = mcpSecret();
 	const token = bearerToken(request);
 	const grant = secret ? await verifyAccessToken(token, secret).catch(() => undefined) : undefined;
-	if (grant) return undefined;
-	return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }), {
-		status: 401,
-		headers: {
-			"content-type": "application/json",
-			"www-authenticate": challenge(url.origin, token ? "invalid_token" : undefined),
-		},
-	});
+	if (!grant) {
+		return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }), {
+			status: 401,
+			headers: {
+				"content-type": "application/json",
+				"www-authenticate": challenge(url.origin, token ? "invalid_token" : undefined),
+			},
+		});
+	}
+	return await env.MCP.get(env.MCP.idFromName(grant.sub)).fetch(request);
+}
+
+/**
+ * Tell a user's gateway that its configuration changed.
+ *
+ * The object re-reads the registry on its next request anyway; this is so a
+ * harness holding a stream open hears about it now rather than then.
+ */
+async function refreshGateway(userId: string): Promise<void> {
+	await env.MCP.get(env.MCP.idFromName(userId))
+		.fetch("https://eryn.internal/mcp/refresh", { method: "POST" })
+		.catch(() => undefined);
 }
 
 // --- PostHog proxy ------------------------------------------------------------
@@ -976,7 +1023,6 @@ const Routes = Layer.mergeAll(
 			return yield* Effect.promise(() => handleAuthorizeDecide(request, text).catch((error) => oauthFailure(error)));
 		}),
 	),
-	mcpServer,
 ).pipe(Layer.provide(HttpServer.layerServices));
 
 // The Workers scheduler is synchronous; see the `HttpRouter.toWebHandler` notes.
@@ -1004,8 +1050,8 @@ export default {
 		}
 		// `/mcp` is authenticated before the MCP layer sees it, so the layer stays
 		// concerned only with the protocol.
-		const unauthorized = await guardMcp(request).catch(() => undefined);
-		if (unauthorized) return unauthorized;
+		const mcp = await routeMcp(request).catch(() => undefined);
+		if (mcp) return mcp;
 		const response = await app.handler(request);
 		if (request.method === "GET" && new URL(request.url).pathname === "/health") {
 			ctx.waitUntil(wake(env).catch(() => undefined));

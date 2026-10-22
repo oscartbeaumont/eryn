@@ -82,10 +82,11 @@ Point a client at the URL and it discovers, registers, and authorizes itself:
 { "mcp": { "servers": { "eryn": { "type": "remote", "url": "https://eryn.otbeaumont.me/mcp" } } } }
 ```
 
-Visiting `/console/mcp` shows the setup and can run the whole flow in the
-browser as a self-test. Discord and GitHub connections are staged there but
-parked: the tools behind them land in a later change, and today the only tool is
-`random_number`.
+Visiting `/console/mcp` shows the setup, runs the whole flow in the browser as a
+self-test, and is where your own remote MCP servers are connected. The endpoint
+itself is served by the caller's own Durable Object — see
+[the gateway](#the-gateway) — and every caller gets `random_number` whatever
+else it fronts.
 
 **Eryn's own sessions need no setup.** When a guild's object builds its OpenCode
 host it mints a short-lived bearer token with the same secret the endpoint
@@ -191,13 +192,28 @@ from Discord once per object — so a server's tools are the owner's, not an
 admin's. Tokens and the registered client live in `ErynRegistry` sealed under
 `ENCRYPTION_KEY`, alongside provider keys.
 
-**Not yet: the gateway.** Today each connected server is wired into the agent
-directly. Exposing their tools *through* Eryn's own `/mcp` — so a harness points
-at one URL and drops its local copies, with `notifications/tools/list_changed`
-when the dashboard toggles one — is the next change. It needs a per-caller tool
-registry, which Effect's `McpServer` does not provide: one instance per isolate
-serves one `tools` array, so a shared endpoint would show every user's tool
-names to every other user.
+### The gateway
+
+`/mcp` fronts those servers, so a harness points at one URL and drops its own
+copies. The endpoint is **one Durable Object per Discord user**, and the token's
+subject is what routes a request to it: an external harness gets its own, and
+Eryn's sessions get the guild owner's. That is what makes a single URL safe —
+Effect's `McpServer` keeps one tool registry per isolate, so a shared endpoint
+would answer `tools/list` with every user's tool names and schemas.
+
+Tools are exposed as `<server>_<tool>`, because tool names are flat, and a call
+is forwarded to the server it came from with a token refreshed on the way out.
+Content is flattened to text: a gateway cannot know which content parts a
+harness will accept, and one rejected part would fail the whole call.
+
+**Enable and disable is a visibility flip, not a re-registration.** A tool's
+visibility comes from an `EnabledWhen` annotation, so the predicate reads the
+object's live set of switched-on servers. That matters twice over: no session is
+dropped when the dashboard changes something, and `notifications/tools/list_changed`
+can be sent to harnesses that are already connected. The dashboard pokes the
+object after a change so the notification goes out immediately rather than on
+the next request; the object also re-reads the registry on every request, so a
+missed poke only costs promptness.
 
 ## Behaviour
 
