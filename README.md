@@ -5,10 +5,12 @@ server and it opens a thread for the request, runs it through an embedded
 OpenCode server, and streams the reply as it is written. Reply in the thread and
 the agent keeps going in the same session.
 
-**Every server brings its own OpenCode Go key.** A server admin signs in with
+**Every server brings its own provider keys.** A server admin signs in with
 Discord at `https://eryn.otbeaumont.me/console`, picks a server they administer,
-and pastes their own key. Inference is billed to them — nothing runs on the
-operator's account. Keys are encrypted at rest and used only for that server.
+and connects one or more providers — OpenCode Go, OpenRouter, or anything else
+the embedded OpenCode server knows about. Inference is billed to them — nothing
+runs on the operator's account. Keys are encrypted at rest and used only for
+that server.
 
 Everything runs on Cloudflare: the HTTP surface is an
 [Effect](https://effect.website) `HttpRouter`, the Discord gateway lives in a
@@ -31,14 +33,14 @@ harness (OpenCode, Claude, Cursor, …) over OAuth 2.1 — see
                      │  /console  /auth/callback       │
                      │  /mcp  /.well-known  /oauth     │
                      └──────────────┬───────────────┘
-                                    │ encrypted key
+                                    │ encrypted keys
                                     ▼
                               ErynRegistry (singleton DO, SQLite)
                                     ▲
-                                    │ apiKey + model
+                                    │ connections + model
 Discord ── gateway WS ─▶ ErynGateway (singleton DO) ──fetch──▶ ErynSession (one DO per guild)
                              ▲                                        │
-                             └──────────── Discord REST ◀────────────┘   embedded OpenCode → OpenCode Go
+                             └──────────── Discord REST ◀────────────┘   embedded OpenCode → providers
 
 harness ── OAuth 2.1 + Streamable HTTP ──▶ /mcp  (bearer token, signed by the Worker)
 ```
@@ -185,8 +187,8 @@ receive arbitrary Discord messages without a persistent gateway connection.
   that says the thread is ours goes with it. Deleting the parent channel is the
   one case that cannot be seen, because Discord need not name the threads it
   takes with it.
-- **Unconfigured servers.** A mention in a server with no key gets a short reply
-  pointing at the setup page instead of running inference.
+- **Unconfigured servers.** A mention in a server with no provider connected
+  gets a short reply pointing at the setup page instead of running inference.
 
 ## Operator setup
 
@@ -255,23 +257,46 @@ redirect URI, so sign-in only works against the deployed origin.
 
 1. Install Eryn from the landing page's **Install** button.
 2. Open `https://eryn.otbeaumont.me/console` and sign in with Discord.
-3. Pick the server, paste an OpenCode Go API key, and save.
-4. Choose a model from the picker — a searchable list of what that key can
-   actually reach.
+3. Pick the server and connect a provider — search the list, paste an API key,
+   or start the provider's own sign-in.
+4. Choose a model from the picker — a searchable list of what the connected
+   providers can actually reach.
 
-The card makes the state explicit. A server with no key shows a red **Offline**
-pill and a **Not ready** banner, because Eryn cannot answer there at all; once a
-key is set it shows a green **Ready** pill and the key's prefix with **Replace**
-and **Clear** buttons. Keys can be revealed while typing. The model picker is
-disabled until a key is configured, because there is nothing to ask the provider
-without one, and its list is filled from that server's own OpenCode instance
-rather than a hardcoded set — the same catalogue a turn would resolve against,
-so it cannot drift from what the agent can use. Any `provider/model` reference
-can still be typed by hand.
+The card makes the state explicit. A server with nothing connected shows a red
+**Offline** pill and a **Not ready** banner, because Eryn cannot answer there at
+all; once a provider is connected it shows a green **Ready** pill and one row per
+provider with its key prefix and a **Disconnect** button. Keys can be revealed
+while typing. The model picker is disabled until something is connected, because
+there is nothing to ask a provider without a key, and its list is filled from
+that server's own OpenCode instance rather than a hardcoded set — the same
+catalogue a turn would resolve against, so it cannot drift from what the agent
+can use. Any `provider/model` reference can still be typed by hand.
 
 The Bot page lists only servers the user can manage
 (`MANAGE_GUILD`/`ADMINISTRATOR`/owner), and every save re-checks that permission
-against Discord. Removing a key takes effect for new turns immediately.
+against Discord. Disconnecting a provider takes effect for new turns immediately.
+
+### Providers
+
+The provider list is not Eryn's: it comes from the embedded OpenCode server, so
+a provider added upstream appears in the console with no change here. Each
+provider declares the **flows** it can be connected with, and Eryn implements
+the flows rather than the providers:
+
+| Flow       | What it does                                  | Works in a Worker |
+| ---------- | --------------------------------------------- | ----------------- |
+| `key`      | Paste an API key, stored encrypted per server | Yes               |
+| `oauth`    | The provider's own browser sign-in            | Where the flow needs no local listener |
+| `env`      | Read a credential from the environment        | No — there is no per-server environment |
+| `command`  | Run a provider's CLI to log in                | No — a Worker has no process plane |
+| `external` | Use a credential chain the platform provides  | No |
+
+`key` is what almost every provider offers — models.dev gives every provider it
+describes a `key` method — so connecting OpenRouter, Anthropic, Google, or
+anything else needs no provider-specific code. `oauth` covers the providers that
+only sign in, such as GitHub Copilot and xAI; it runs on the guild's own object,
+and a flow that needs a listener on `127.0.0.1` (Poe, ChatGPT, DigitalOcean)
+cannot work here and reports that rather than failing silently.
 
 ## Configuration
 
@@ -293,20 +318,21 @@ against Discord. Removing a key takes effect for new turns immediately.
 | `DISCORD_KEEPALIVE_SECONDS`    | text   | `840`                         | Gateway keepalive alarm interval                    |
 | `DISCORD_TURN_TIMEOUT_SECONDS` | text   | `900`                         | Seconds before a turn is interrupted                |
 
-Each guild's key is stored in `ErynRegistry` encrypted with AES-GCM under
-`ENCRYPTION_KEY`. The plaintext is read only by the gateway, over the internal
-Durable Object binding, and passed to the guild's object for that turn.
+Each guild's provider keys are stored in `ErynRegistry` encrypted with AES-GCM
+under `ENCRYPTION_KEY`, as one sealed list keyed by integration id. The
+plaintext is read only by the gateway and the console's own API, over the
+internal Durable Object binding, and passed to the guild's object for that turn.
 
 Only the first characters of a key are kept in the clear, and only so the
-console can show which key is configured. Everything else exists solely as
+console can show which provider is configured. Everything else exists solely as
 ciphertext, and the API never returns more than that prefix.
 
-### How the key reaches OpenCode
+### How a credential reaches OpenCode
 
 It is delivered as an **integration credential**, not as provider config:
 
 ```ts
-await host.integration.connect.key({ integrationID: "opencode-go", key: apiKey, location })
+await host.integration.connect.key({ integrationID, key, location })
 ```
 
 This matters. `providers["opencode-go"].settings.apiKey` is accepted by the
@@ -316,6 +342,10 @@ with `Model unavailable`. The integration store is the channel the provider
 registry actually reads. It also lives in the guild object's own database, so
 the credential is scoped to that guild's object rather than to an environment
 variable shared by whatever else the isolate is running.
+
+The same store is what a sign-in leaves behind, which is why disconnecting a
+provider clears it in the guild's own object as well as in the registry: a
+credential that came from a sign-in was never in the registry at all.
 
 ## Known limits
 

@@ -6,12 +6,68 @@ export interface Guild {
 	icon: string | null;
 	configured: boolean;
 	model: string;
-	/** The start of the configured key, or null when none is set. */
-	keyPrefix: string | null;
+	/** The providers this server has connected. */
+	connections: GuildConnection[];
 	updatedAt: number | null;
 	githubRepo: string | null;
 	githubInstalled: boolean;
 	githubInstallUrl: string | null;
+}
+
+/** A provider a server has connected. The key itself never leaves the backend. */
+export interface GuildConnection {
+	integrationID: string;
+	/** The start of the key, or undefined when it was set another way. */
+	prefix?: string;
+}
+
+/** One input a flow needs before it can start, as the provider declares it. */
+export interface ProviderField {
+	key: string;
+	type: "string" | "number" | "integer" | "boolean";
+	title?: string;
+	description?: string;
+	placeholder?: string;
+	required?: boolean;
+	default?: string | number | boolean;
+	/** A string field restricted to a fixed set of choices. */
+	options?: { value: string; label: string; description?: string }[];
+	/** Only ask for this field while these conditions hold. */
+	when?: { key: string; op: "eq" | "neq"; value: string | number | boolean }[];
+}
+
+/** One way a provider can be connected, as its own OpenCode server describes it. */
+export interface ProviderMethod {
+	type: string;
+	/** OAuth methods are addressed by id when a flow is started. */
+	id?: string;
+	label: string;
+	/** Whether this deployment can run the flow at all. */
+	supported: boolean;
+	/** What the flow needs before it can start, such as a deployment type. */
+	fields?: ProviderField[];
+}
+
+/** A provider a server could connect, and how connecting it would work. */
+export interface Provider {
+	id: string;
+	name: string;
+	connected: boolean;
+	methods: ProviderMethod[];
+}
+
+/** A sign-in the backend has started, and where to send the user. */
+export interface OAuthAttempt {
+	attemptID: string;
+	url: string;
+	instructions: string;
+	/** `auto` finishes on its own; `code` needs the code the provider showed. */
+	mode: "auto" | "code";
+}
+
+export interface OAuthAttemptStatus {
+	status: "pending" | "complete" | "failed" | "expired";
+	message?: string;
 }
 
 /** A model the guild's key can reach, as reported by its own OpenCode server. */
@@ -62,8 +118,10 @@ export interface ClientConfig {
 }
 
 export interface SaveGuildInput {
-	action: "save" | "remove";
+	/** `save` stores the model and GitHub binding, `remove` drops everything. */
+	action: "save" | "remove" | "connect" | "disconnect";
 	guildId: string;
+	integrationId?: string;
 	apiKey?: string;
 	model?: string;
 	githubRepo?: string;
@@ -115,9 +173,50 @@ export function saveGuild(input: SaveGuildInput): Promise<ApiResult> {
 		body: JSON.stringify({
 			action: input.action,
 			guild_id: input.guildId,
+			integration_id: input.integrationId,
 			api_key: input.apiKey,
 			model: input.model,
 			github_repo: input.githubRepo,
+		}),
+	});
+}
+
+/**
+ * The providers a server could connect, from its own embedded OpenCode server.
+ *
+ * Which providers exist, and how each one authenticates, is OpenCode's business:
+ * this is the same catalogue a turn resolves against, so a provider added
+ * upstream shows up here without a change to Eryn.
+ */
+export function fetchProviders(guildId: string): Promise<{ integrations: Provider[] }> {
+	return request<{ integrations: Provider[] }>("/api/providers", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ guild_id: guildId }),
+	});
+}
+
+/** One step of a provider sign-in: start it, poll it, finish it, or drop it. */
+export function oauth(input: {
+	action: "start" | "status" | "complete" | "cancel";
+	guildId: string;
+	integrationId: string;
+	methodId?: string;
+	attemptId?: string;
+	code?: string;
+	answer?: Record<string, unknown>;
+}): Promise<{ attempt?: OAuthAttempt; status?: OAuthAttemptStatus; ok?: boolean }> {
+	return request("/api/oauth", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			action: input.action,
+			guild_id: input.guildId,
+			integration_id: input.integrationId,
+			method_id: input.methodId,
+			attempt_id: input.attemptId,
+			code: input.code,
+			answer: input.answer,
 		}),
 	});
 }

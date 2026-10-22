@@ -8,10 +8,15 @@ export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
 export { CLIENT_ID } from "./discord-ids";
 
-/** Models must stay on the OpenCode Go provider, which is what the key is for. */
-const MODEL_PATTERN = /^opencode-go\/[A-Za-z0-9._-]+$/;
+/**
+ * A model reference is `provider/model`, where the model itself may contain
+ * slashes (models.dev has ids like `siliconflow/deepseek-v3-0324`), and may
+ * carry a `#variant` suffix. The provider never contains a slash, which is what
+ * makes the first one the separator.
+ */
+const MODEL_PATTERN = /^[A-Za-z0-9._-]+\/\S+$/;
 
-/** Whether a value is a usable `opencode-go/<model>` reference. */
+/** Whether a value is a usable `provider/model` reference. */
 export function isValidModel(value: string): boolean {
 	return MODEL_PATTERN.test(value);
 }

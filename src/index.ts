@@ -37,7 +37,16 @@ import {
 	type ConsentRequest,
 } from "./mcp/oauth";
 import { authorizeUrl, canManage, currentUser, DiscordApiError, exchangeCode, listUserGuilds, type DiscordGuild } from "./oauth";
-import { getGuildKey, getGuildSummary, getUserGuilds, putGuild, putUserGuilds, removeGuild, setGuildInstallation } from "./registry-client";
+import type { IntegrationOption, OAuthAttempt, OAuthAttemptStatus } from "./providers";
+import {
+	getGuildConfig,
+	getGuildSummary,
+	getUserGuilds,
+	putGuild,
+	putUserGuilds,
+	removeGuild,
+	setGuildInstallation,
+} from "./registry-client";
 
 export { ErynGateway } from "./gateway";
 export { ErynSession } from "./agent";
@@ -58,6 +67,7 @@ interface Session {
 const SetupRequestSchema = Schema.Struct({
 	action: Schema.String,
 	guild_id: Schema.String,
+	integration_id: Schema.optional(Schema.String),
 	api_key: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
 	github_repo: Schema.optional(Schema.String),
@@ -65,6 +75,16 @@ const SetupRequestSchema = Schema.Struct({
 
 const ModelsRequestSchema = Schema.Struct({
 	guild_id: Schema.String,
+});
+
+const OAuthRequestSchema = Schema.Struct({
+	action: Schema.String,
+	guild_id: Schema.String,
+	integration_id: Schema.String,
+	method_id: Schema.optional(Schema.String),
+	attempt_id: Schema.optional(Schema.String),
+	code: Schema.optional(Schema.String),
+	answer: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 });
 
 function describe(error: unknown): string {
@@ -181,6 +201,65 @@ function handleConfig(): HttpServerResponse.HttpServerResponse {
 	});
 }
 
+/**
+ * The signed-in user's right to configure a guild, re-checked against Discord
+ * rather than trusting the submitted id, plus the bot's own installation there.
+ */
+async function authorizedGuild(
+	request: HttpServerRequest.HttpServerRequest,
+	guildId: string,
+): Promise<{ ok: true; session: Session } | { ok: false; response: HttpServerResponse.HttpServerResponse }> {
+	const session = await readSession(request);
+	if (!session) return { ok: false, response: json({ error: "Please sign in again." }, 401) };
+
+	const guilds = await manageableGuilds(session);
+	if (!guilds.some((guild) => guild.id === guildId && canManage(guild))) {
+		return { ok: false, response: json({ error: "You cannot manage that server." }, 403) };
+	}
+
+	// A server must be installed before it can be configured.
+	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
+	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
+	if (!installed.has(guildId)) {
+		return { ok: false, response: json({ error: "Add Eryn to that server before configuring it." }, 400) };
+	}
+	return { ok: true, session };
+}
+
+/**
+ * Call a route on a guild's own session object, handing it the credentials that
+ * only this Worker reads out of the registry. The browser never sees them.
+ */
+async function providerRequest<T>(guildId: string, path: string, body: Record<string, unknown>): Promise<T> {
+	const config = await getGuildConfig(env, guildId);
+	const stub = env.SESSION.get(env.SESSION.idFromName(guildId));
+	const response = await stub.fetch(`https://eryn${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			guildId,
+			connections: config?.connections ?? [],
+			model: config?.model,
+			github: config?.github,
+			...body,
+		}),
+	});
+	const payload = (await response.json().catch(() => ({}))) as T & { error?: string };
+	if (!response.ok) throw new Error(payload.error ?? `The provider request failed (HTTP ${response.status}).`);
+	return payload;
+}
+
+/** Every provider a guild could connect, from its own embedded OpenCode server. */
+async function listIntegrations(guildId: string): Promise<IntegrationOption[]> {
+	try {
+		const body = await providerRequest<{ integrations?: IntegrationOption[] }>(guildId, "/session/integrations", {});
+		return Array.isArray(body.integrations) ? body.integrations : [];
+	} catch {
+		// A guild whose object cannot answer has no providers to offer.
+		return [];
+	}
+}
+
 async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Promise<HttpServerResponse.HttpServerResponse> {
 	const session = await readSession(request);
 	if (!session) return json({ signedIn: false });
@@ -207,7 +286,7 @@ async function handleSetupGet(request: HttpServerRequest.HttpServerRequest): Pro
 				icon: guild.icon ?? null,
 				configured: summary.configured,
 				model: summary.model ?? DEFAULT_MODEL,
-				keyPrefix: summary.keyPrefix ?? null,
+				connections: summary.connections,
 				updatedAt: summary.updatedAt ?? null,
 				githubRepo: summary.github?.repo ?? null,
 				githubInstalled: Boolean(installationId),
@@ -235,33 +314,52 @@ async function handleSetupPost(
 	request: HttpServerRequest.HttpServerRequest,
 	form: Schema.Schema.Type<typeof SetupRequestSchema>,
 ): Promise<HttpServerResponse.HttpServerResponse> {
-	const session = await readSession(request);
-	if (!session) return json({ error: "Please sign in again." }, 401);
-
-	// Re-check the guild against Discord rather than trusting the submitted id.
-	const guilds = await manageableGuilds(session);
-	if (!guilds.some((guild) => guild.id === form.guild_id && canManage(guild))) {
-		return json({ error: "You cannot manage that server." }, 403);
-	}
-
-	// A server must be installed before it can be configured.
-	const bot = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
-	const installed = new Set((await bot.guilds()).map((guild) => guild.id));
-	if (!installed.has(form.guild_id)) {
-		return json({ error: "Add Eryn to that server before configuring it." }, 400);
-	}
+	const allowed = await authorizedGuild(request, form.guild_id);
+	if (!allowed.ok) return allowed.response;
+	const { session } = allowed;
 
 	if (form.action === "remove") {
 		await removeGuild(env, form.guild_id);
-		return json({ ok: true, message: "The key was removed." });
+		return json({ ok: true, message: "Every provider was disconnected." });
+	}
+
+	if (form.action === "disconnect") {
+		const integrationID = form.integration_id?.trim();
+		if (!integrationID) return json({ error: "Which provider?" }, 400);
+		// A key lives in the registry, but a signed-in provider's credential lives
+		// in the guild's own object, so both have to be dropped.
+		await providerRequest(form.guild_id, "/session/disconnect", { integrationID }).catch(() => undefined);
+		await putGuild(env, form.guild_id, { disconnect: [integrationID], configuredBy: session.uid });
+		return json({ ok: true, message: "That provider was disconnected." });
+	}
+
+	if (form.action === "connect") {
+		const integrationID = form.integration_id?.trim();
+		const apiKey = form.api_key?.trim();
+		if (!integrationID) return json({ error: "Choose a provider." }, 400);
+		if (!apiKey) return json({ error: "Paste that provider's API key." }, 400);
+
+		// The provider has to be one this deployment's own catalogue offers, so a
+		// stale browser cannot store a credential nothing will ever read.
+		const integration = (await listIntegrations(form.guild_id)).find((entry) => entry.id === integrationID);
+		if (!integration) return json({ error: "That provider is not one this deployment offers." }, 400);
+
+		try {
+			await putGuild(env, form.guild_id, {
+				connect: [{ integrationID, method: "key", key: apiKey }],
+				configuredBy: session.uid,
+			});
+		} catch (error) {
+			return json({ error: describe(error) }, 400);
+		}
+		return json({ ok: true, message: `${integration.name} connected.` });
 	}
 
 	const model = form.model?.trim() || DEFAULT_MODEL;
-	if (!isValidModel(model)) return json({ error: "The model must be an opencode-go/<model> reference." }, 400);
+	if (!isValidModel(model)) return json({ error: "The model must be a provider/model reference." }, 400);
 
 	try {
 		await putGuild(env, form.guild_id, {
-			apiKey: form.api_key?.trim(),
 			model,
 			configuredBy: session.uid,
 			githubRepo: form.github_repo,
@@ -280,43 +378,86 @@ function setupFailure(error: unknown): HttpServerResponse.HttpServerResponse {
 	return json({ error: describe(error) }, 500);
 }
 
+/** Every provider a guild could connect, and how each one would be connected. */
+async function handleProviders(
+	request: HttpServerRequest.HttpServerRequest,
+	guildId: string,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const allowed = await authorizedGuild(request, guildId);
+	if (!allowed.ok) return allowed.response;
+	return json({ integrations: await listIntegrations(guildId) });
+}
+
 /**
- * The models a guild's key can reach, for the console's model picker.
+ * The models a guild's connected providers can reach, for the console's picker.
  *
  * The catalogue comes from that guild's own embedded OpenCode server, so the
  * list is exactly what a turn would be able to use and none of the provider's
- * discovery logic is duplicated here. The key never reaches the browser: it is
+ * discovery logic is duplicated here. The keys never reach the browser: they are
  * read from the registry and forwarded over the internal Durable Object binding.
  */
-async function handleModels(request: HttpServerRequest.HttpServerRequest, guildId: string): Promise<HttpServerResponse.HttpServerResponse> {
-	const session = await readSession(request);
-	if (!session) return json({ error: "Please sign in again." }, 401);
+async function handleModels(
+	request: HttpServerRequest.HttpServerRequest,
+	guildId: string,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const allowed = await authorizedGuild(request, guildId);
+	if (!allowed.ok) return allowed.response;
 
-	// Re-check the guild against Discord, exactly as saving a key does.
-	const guilds = await manageableGuilds(session);
-	if (!guilds.some((guild) => guild.id === guildId && canManage(guild))) {
-		return json({ error: "You cannot manage that server." }, 403);
+	const config = await getGuildConfig(env, guildId);
+	// With nothing connected there is nothing to ask a provider about, so the
+	// picker stays empty rather than showing a guess.
+	if (!config) return json({ models: [], default: DEFAULT_MODEL, reason: "no-provider" });
+
+	try {
+		const body = await providerRequest<{ models?: unknown }>(guildId, "/session/models", {});
+		return json({ models: Array.isArray(body.models) ? body.models : [], default: config.model });
+	} catch (error) {
+		return json({ error: describe(error) }, 502);
 	}
+}
 
-	const config = await getGuildKey(env, guildId);
-	// Without a key there is nothing to ask the provider about, and the console
-	// keeps the picker disabled rather than showing a guess.
-	if (!config) return json({ models: [], reason: "no-key" });
+/**
+ * One step of a provider sign-in, proxied to the guild's own object.
+ *
+ * The host performs the flow — it opens the browser round trip and keeps the
+ * credential that comes back — so the console only starts it, polls it, and
+ * hands over a code when the provider asks for one.
+ */
+async function handleOAuth(
+	request: HttpServerRequest.HttpServerRequest,
+	form: Schema.Schema.Type<typeof OAuthRequestSchema>,
+): Promise<HttpServerResponse.HttpServerResponse> {
+	const allowed = await authorizedGuild(request, form.guild_id);
+	if (!allowed.ok) return allowed.response;
 
-	const stub = env.SESSION.get(env.SESSION.idFromName(guildId));
-	const response = await stub.fetch("https://eryn/session/models", {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ guildId, apiKey: config.apiKey, model: config.model, github: config.github }),
-	});
-	const body = (await response.json().catch(() => ({}))) as { models?: unknown; error?: string };
-	if (!response.ok) {
-		return json({ error: body.error ?? `The model catalogue could not be read (HTTP ${response.status}).` }, 502);
+	try {
+		const body = await providerRequest<{ attempt?: OAuthAttempt; status?: OAuthAttemptStatus; ok?: boolean }>(
+			form.guild_id,
+			"/session/oauth",
+			{
+				action: form.action,
+				integrationID: form.integration_id,
+				methodID: form.method_id,
+				attemptID: form.attempt_id,
+				code: form.code,
+				answer: form.answer,
+			},
+		);
+		// A finished sign-in leaves its credential in the guild's own object, so
+		// the registry only records that the provider is now connected. Without
+		// this the console would not know to show it, or to offer its models.
+		if (body.status?.status === "complete" || (form.action === "complete" && body.ok)) {
+			await putGuild(env, form.guild_id, {
+				connect: [{ integrationID: form.integration_id, method: "oauth", key: "" }],
+				configuredBy: allowed.session.uid,
+			}).catch((error) =>
+				console.log(`[eryn] could not record the ${form.integration_id} sign-in: ${describe(error)}`),
+			);
+		}
+		return json(body);
+	} catch (error) {
+		return json({ error: describe(error) }, 502);
 	}
-	return json({
-		models: Array.isArray(body.models) ? body.models : [],
-		default: config.model ?? DEFAULT_MODEL,
-	});
 }
 
 // --- MCP ----------------------------------------------------------------------
@@ -508,6 +649,20 @@ const Routes = Layer.mergeAll(
 			const form = yield* HttpServerRequest.schemaBodyJson(ModelsRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
 			if (!form) return json({ error: "The request could not be read." }, 400);
 			return yield* Effect.promise(() => handleModels(request, form.guild_id).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/providers", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(ModelsRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleProviders(request, form.guild_id).catch((error) => setupFailure(error)));
+		}),
+	),
+	HttpRouter.add("POST", "/api/oauth", (request) =>
+		Effect.gen(function* () {
+			const form = yield* HttpServerRequest.schemaBodyJson(OAuthRequestSchema).pipe(Effect.orElseSucceed(() => undefined));
+			if (!form) return json({ error: "The request could not be read." }, 400);
+			return yield* Effect.promise(() => handleOAuth(request, form).catch((error) => setupFailure(error)));
 		}),
 	),
 	HttpRouter.add("GET", "/auth/discord", (request) =>

@@ -36,7 +36,7 @@ import {
 } from "./discord/api";
 import type { DiscordContext } from "./discord/context";
 import { DiscordGateway, type DiscordChannel, type DiscordInteraction, type DiscordMessage } from "./discord/gateway";
-import { getGuildKey, type GuildKey } from "./registry-client";
+import { getGuildConfig, type GuildConfig } from "./registry-client";
 
 const WAKE_PATH = "/wake";
 const THREAD_PREFIX = "thread:";
@@ -290,8 +290,8 @@ export class ErynGateway extends DurableObject<Env> {
 	// --- Session object plumbing ------------------------------------------------
 
 	/** The guild's credential from the registry, or undefined when unconfigured. */
-	private async guildConfig(guildId: string): Promise<GuildKey | undefined> {
-		return await getGuildKey(this.env, guildId).catch(() => undefined);
+	private async guildConfig(guildId: string): Promise<GuildConfig | undefined> {
+		return await getGuildConfig(this.env, guildId).catch(() => undefined);
 	}
 
 	/** Ask a server admin to connect a key before the agent can run. */
@@ -300,7 +300,7 @@ export class ErynGateway extends DurableObject<Env> {
 		await this.rest
 			.sendMessage(
 				threadId,
-				`This server has not connected an OpenCode Go key yet, so I cannot run inference here. A server admin can add one at ${origin}/console`,
+				`This server has not connected a provider yet, so I cannot run inference here. A server admin can add one at ${origin}/console`,
 			)
 			.catch(() => undefined);
 	}
@@ -316,7 +316,7 @@ export class ErynGateway extends DurableObject<Env> {
 		title: string,
 		text: string,
 		message: DiscordMessage,
-		config: GuildKey,
+		config: GuildConfig,
 		discord: DiscordContext,
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
@@ -331,7 +331,7 @@ export class ErynGateway extends DurableObject<Env> {
 						title,
 						text,
 						author: this.authorName(message),
-						apiKey: config.apiKey,
+						connections: config.connections,
 						model: config.model,
 						github: config.github,
 						discord,

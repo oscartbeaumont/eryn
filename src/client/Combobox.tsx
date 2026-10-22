@@ -1,26 +1,41 @@
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
-import type { ModelOption } from "./api";
 
 const MAX_VISIBLE = 60;
 
+/** One row in a {@link Combobox}. */
+export interface ComboOption {
+	/** The value written into the field. */
+	id: string;
+	/** The primary text, shown in mono because it is usually a reference. */
+	name: string;
+	/** Secondary text, right-aligned. */
+	note?: string;
+	/** Shown as unavailable without being hidden. */
+	disabled?: boolean;
+}
+
 /**
- * A searchable model picker.
+ * A searchable picker.
  *
- * It is a plain text input first — so a reference the catalogue does not mention
- * can still be typed, and the form submits whatever is in the box — and a
- * filtered listbox second. Keyboard: ↑/↓ move, Enter picks, Escape closes.
+ * It is a plain text input first — so a reference the list does not mention can
+ * still be typed, and the surrounding form submits whatever is in the box — and
+ * a filtered listbox second. Keyboard: ↑/↓ move, Enter picks, Escape closes.
  */
-export function ModelSelect(props: {
+export function Combobox(props: {
 	name: string;
 	value: string;
-	models: ModelOption[];
+	options: ComboOption[];
 	disabled?: boolean;
 	placeholder?: string;
+	/** Shown when nothing matches, or when there is nothing to match. */
+	emptyText?: string;
 	onInput: (value: string) => void;
+	/** Fired only when an option is picked, never when the user types. */
+	onPick?: (option: ComboOption) => void;
 }) {
 	const [open, setOpen] = createSignal(false);
 	// Empty means "show everything"; it only narrows once the user types, so
-	// focusing the field does not hide the model that is already selected.
+	// focusing the field does not hide the value that is already selected.
 	const [query, setQuery] = createSignal("");
 	const [active, setActive] = createSignal(0);
 	let blurTimer: ReturnType<typeof setTimeout> | undefined;
@@ -28,19 +43,18 @@ export function ModelSelect(props: {
 
 	const matches = createMemo(() => {
 		const needle = query().trim().toLowerCase();
-		const all = props.models;
+		const all = props.options;
 		const found = needle
-			? all.filter(
-					(model) => model.id.toLowerCase().includes(needle) || model.name.toLowerCase().includes(needle),
-				)
+			? all.filter((option) => option.id.toLowerCase().includes(needle) || option.name.toLowerCase().includes(needle))
 			: all;
 		return found.slice(0, MAX_VISIBLE);
 	});
 
-	const listId = `${props.name}-models`;
+	const listId = `${props.name}-options`;
 
-	function pick(model: ModelOption): void {
-		props.onInput(model.id);
+	function pick(option: ComboOption): void {
+		props.onInput(option.id);
+		props.onPick?.(option);
 		setQuery("");
 		setOpen(false);
 	}
@@ -66,8 +80,8 @@ export function ModelSelect(props: {
 		// Enter inside a form submits; while the list is open it should pick.
 		if (event.key === "Enter" && open() && matches().length > 0) {
 			event.preventDefault();
-			const model = matches()[Math.min(active(), matches().length - 1)];
-			if (model) pick(model);
+			const option = matches()[Math.min(active(), matches().length - 1)];
+			if (option) pick(option);
 		}
 	}
 
@@ -113,27 +127,23 @@ export function ModelSelect(props: {
 				>
 					<Show
 						when={matches().length > 0}
-						fallback={
-							<p class="px-3 py-3 text-xs text-faint">
-								{props.models.length === 0 ? "No models loaded." : "No model matches that search."}
-							</p>
-						}
+						fallback={<p class="px-3 py-3 text-xs text-faint">{props.emptyText ?? "Nothing to choose from."}</p>}
 					>
 						<For each={matches()}>
-							{(model, index) => (
+							{(option, index) => (
 								<div
 									role="option"
-									aria-selected={model.id === props.value ? "true" : "false"}
+									aria-selected={option.id === props.value ? "true" : "false"}
 									class={`flex cursor-pointer items-baseline gap-3 px-3 py-2.5 ${
 										index() === active() ? "bg-surface-2" : ""
 									}`}
 									onMouseDown={(event) => event.preventDefault()}
 									onMouseEnter={() => setActive(index())}
-									onClick={() => pick(model)}
+									onClick={() => pick(option)}
 								>
-									<span class="font-mono text-sm text-fg">{model.id}</span>
-									<span class="min-w-0 flex-1 truncate text-xs text-muted">{model.name}</span>
-									<Show when={!model.enabled}>
+									<span class="font-mono text-sm text-fg">{option.name}</span>
+									<span class="min-w-0 flex-1 truncate text-xs text-muted">{option.note ?? ""}</span>
+									<Show when={option.disabled}>
 										<span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">unavailable</span>
 									</Show>
 								</div>

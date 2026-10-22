@@ -33,6 +33,8 @@ import { createGitHub } from "./github";
 import { githubPlugin } from "./opencode/github";
 import { mintInternalToken } from "./mcp/access";
 import { MCP_PATH } from "./mcp/oauth";
+import type { IntegrationMethodOption, IntegrationOption, ProviderField } from "./providers";
+import type { GuildConnection } from "./registry";
 
 const MODEL = DEFAULT_MODEL;
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
@@ -41,8 +43,6 @@ const LOCATION = "/eryn";
 const SESSION_PREFIX = "opencode:session:";
 const DEFAULT_TURN_TIMEOUT_SECONDS = 900;
 const DEFAULT_MCP_URL = "https://eryn.otbeaumont.me/mcp";
-/** The provider every guild's OpenCode Go key is for. */
-const PROVIDER = "opencode-go";
 
 function log(message: string): void {
 	console.log(`[eryn:session] ${message}`);
@@ -50,7 +50,7 @@ function log(message: string): void {
 
 /** A model the console can offer, normalised for the dropdown. */
 interface ModelOption {
-	/** The `provider/model` reference the registry accepts, e.g. `opencode-go/kimi-k3`. */
+	/** The `provider/model` reference the registry accepts, e.g. `openrouter/anthropic/claude-sonnet-5`. */
 	id: string;
 	name: string;
 	provider: string;
@@ -58,28 +58,39 @@ interface ModelOption {
 	enabled: boolean;
 }
 
-interface ModelsRequest {
+/**
+ * What every route into this object needs to build a host: the providers the
+ * guild has connected, the model it chose, and its GitHub binding. The
+ * credentials arrive per request from the gateway or the Worker, which are the
+ * only things that read the registry.
+ */
+interface GuildRequest {
 	guildId: string;
-	apiKey: string;
+	connections: GuildConnection[];
 	model?: string;
 	github?: { installationId?: string; repo?: string };
 }
 
-interface PromptRequest {
-	/** The guild this thread belongs to. It must match the object's own name. */
-	guildId: string;
+interface PromptRequest extends GuildRequest {
 	threadId: string;
 	title?: string;
 	text: string;
 	/** The name the speaker goes by, so the agent knows who it is answering. */
 	author?: string;
-	/** The guild's own OpenCode Go credential, supplied by the gateway. */
-	apiKey: string;
-	model?: string;
-	/** GitHub App binding for this guild, when configured. */
-	github?: { installationId?: string; repo?: string };
 	/** Where the request came from in Discord, recorded on the session for the agent. */
 	discord?: DiscordContext;
+}
+
+/** One step of a provider sign-in, as the console drives it. */
+interface OAuthRequest extends GuildRequest {
+	action: "start" | "status" | "complete" | "cancel";
+	integrationID: string;
+	methodID?: string;
+	attemptID?: string;
+	/** The code the provider showed the user, for a flow that needs one. */
+	code?: string;
+	/** What the flow's own form was answered with, when it asked for anything. */
+	answer?: Record<string, unknown>;
 }
 
 /** Accumulated assistant output for one turn, keyed by message then part. */
@@ -182,6 +193,130 @@ function renderTurn(turn: Turn): string {
 	return messages.join("\n\n").trim();
 }
 
+/** How a provider describes one way to connect it, as far as we read it. */
+type HostIntegrationMethod =
+	| { type: "key"; label?: string }
+	| { type: "oauth"; id: string; label: string; form?: readonly unknown[] }
+	| { type: "command"; id: string; label: string }
+	| { type: "external"; id: string; label: string }
+	| { type: "env"; names: readonly string[] };
+
+/**
+ * Which flows this deployment can run.
+ *
+ * `key` is a secret we can hold and replay, and `oauth` is a browser round trip
+ * the host performs. The rest cannot work here, and are reported rather than
+ * hidden so the console can say why a provider cannot be connected: `env` needs
+ * an environment variable per guild, `command` needs a process to run, and
+ * `external` needs a credential chain the platform provides.
+ */
+function describeMethod(method: HostIntegrationMethod): IntegrationMethodOption | undefined {
+	switch (method.type) {
+		case "key":
+			return { type: "key", label: method.label?.trim() || "API key", supported: true };
+		case "oauth": {
+			const fields = (method.form ?? []).map(describeField);
+			return {
+				type: "oauth",
+				id: method.id,
+				label: method.label,
+				// A flow that asks for something is only offered if every field it asks
+				// for is one this console can actually collect.
+				supported: fields.every((field) => field !== undefined),
+				fields: fields.filter((field): field is ProviderField => field !== undefined),
+			};
+		}
+		case "env":
+			return { type: "env", label: `Environment variable (${method.names.join(", ")})`, supported: false };
+		case "command":
+			return { type: "command", label: method.label, supported: false };
+		case "external":
+			return { type: "external", label: method.label, supported: false };
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * Project one field of a flow's form.
+ *
+ * The provider declares these, so this validates rather than trusts: a field of
+ * a kind a Worker cannot render is left out, and the flow it belongs to is then
+ * reported as unavailable rather than asking for something uncollectable.
+ */
+function describeField(value: unknown): ProviderField | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const field = value as Record<string, unknown>;
+	if (typeof field.key !== "string" || !field.key) return undefined;
+	const when = readConditions(field.when);
+	const common = {
+		key: field.key,
+		...(typeof field.title === "string" ? { title: field.title } : {}),
+		...(typeof field.description === "string" ? { description: field.description } : {}),
+		...(field.required === true ? { required: true } : {}),
+		...(when ? { when } : {}),
+	};
+	if (field.type === "string") {
+		const options = readOptions(field.options);
+		return {
+			...common,
+			type: "string",
+			...(typeof field.placeholder === "string" ? { placeholder: field.placeholder } : {}),
+			...(typeof field.default === "string" ? { default: field.default } : {}),
+			...(options ? { options } : {}),
+		};
+	}
+	if (field.type === "number" || field.type === "integer") {
+		return {
+			...common,
+			type: field.type,
+			...(typeof field.default === "number" ? { default: field.default } : {}),
+		};
+	}
+	if (field.type === "boolean") {
+		return {
+			...common,
+			type: "boolean",
+			...(typeof field.default === "boolean" ? { default: field.default } : {}),
+		};
+	}
+	return undefined;
+}
+
+/** A field's visibility conditions, ignoring anything malformed. */
+function readConditions(value: unknown): ProviderField["when"] {
+	if (!Array.isArray(value)) return undefined;
+	const conditions: { key: string; op: "eq" | "neq"; value: string | number | boolean }[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object") continue;
+		const condition = entry as { key?: unknown; op?: unknown; value?: unknown };
+		if (typeof condition.key !== "string") continue;
+		if (condition.op !== "eq" && condition.op !== "neq") continue;
+		const expected = condition.value;
+		if (typeof expected !== "string" && typeof expected !== "number" && typeof expected !== "boolean") continue;
+		conditions.push({ key: condition.key, op: condition.op, value: expected });
+	}
+	return conditions.length ? conditions : undefined;
+}
+
+/** A string field's choices, ignoring anything malformed. */
+function readOptions(value: unknown): ProviderField["options"] {
+	if (!Array.isArray(value)) return undefined;
+	const options = value.flatMap((entry) => {
+		if (!entry || typeof entry !== "object") return [];
+		const option = entry as { value?: unknown; label?: unknown; description?: unknown };
+		if (typeof option.value !== "string" || typeof option.label !== "string") return [];
+		return [
+			{
+				value: option.value,
+				label: option.label,
+				...(typeof option.description === "string" ? { description: option.description } : {}),
+			},
+		];
+	});
+	return options.length ? options : undefined;
+}
+
 /** The live state of one thread inside this guild's object. */
 interface ThreadRun {
 	turn?: Turn;
@@ -190,7 +325,8 @@ interface ThreadRun {
 
 interface Host {
 	promise: Promise<OpenCodeWorkerd.Interface>;
-	apiKey: string;
+	/** Signature of the provider set, so a changed or rotated credential rebuilds the host. */
+	connections: string;
 	model: string;
 	/** Signature of the GitHub binding, so a config change rebuilds the host. */
 	github: string;
@@ -244,16 +380,27 @@ export class ErynSession extends DurableObject<Env> {
 
 	/**
 	 * The embedded OpenCode host for this guild, built on first use with the
-	 * guild's own credential. A changed key or model rebuilds the host so a
-	 * rotated credential takes effect on the next turn.
+	 * providers the guild has connected. A changed provider set or model rebuilds
+	 * the host, so a rotated credential takes effect on the next turn.
 	 */
 	private async hostFor(
-		apiKey: string,
+		connections: GuildConnection[],
 		model: string,
 		github?: { installationId?: string; repo?: string },
 	): Promise<OpenCodeWorkerd.Interface> {
 		const githubKey = github ? `${github.installationId ?? ""}|${github.repo ?? ""}` : "";
-		if (!this.host || this.host.apiKey !== apiKey || this.host.model !== model || this.host.github !== githubKey) {
+		// The signature is what decides a rebuild, so it has to change when a key
+		// is replaced. It lives in memory only and is never logged.
+		const signature = connections
+			.map((connection) => `${connection.integrationID}:${connection.method}:${connection.key}`)
+			.sort()
+			.join("\u0000");
+		if (
+			!this.host ||
+			this.host.connections !== signature ||
+			this.host.model !== model ||
+			this.host.github !== githubKey
+		) {
 			const previous = this.host?.promise;
 			this.abort?.abort();
 			this.abort = new AbortController();
@@ -281,23 +428,38 @@ export class ErynSession extends DurableObject<Env> {
 				},
 				plugins,
 			}).then(async (host) => {
-				// The key is supplied as an integration credential, not as
+				// Every provider is connected the same way: the integration the guild
+				// chose and the key it gave us. Which integrations exist, and which
+				// flows each one offers, is the host's business, so a provider this
+				// Worker has never heard of needs nothing here.
+				//
+				// The credential is supplied as an integration credential, not as
 				// `providers.<id>.settings.apiKey`. That config field is accepted by
 				// the schema but never reaches provider activation, so a provider
 				// configured that way stays invisible: its models do not resolve and
 				// no request can be made against it. The integration store is the
 				// channel the registry actually reads, it lives in this object's own
-				// database, and that keeps a guild's key inside the guild's object.
-				await host.integration.connect.key({
-					integrationID: PROVIDER,
-					key: apiKey,
-					location: { directory: LOCATION },
-				});
+				// database, and that keeps a guild's keys inside the guild's object.
+				for (const connection of connections) {
+					// A connection with no key came from a sign-in, whose credential is
+					// already in this object's own store; connecting an empty key would
+					// overwrite it.
+					if (!connection.key) continue;
+					await host.integration
+						.connect.key({
+							integrationID: connection.integrationID,
+							key: connection.key,
+							location: { directory: LOCATION },
+						})
+						// One unusable credential must not cost the guild every other
+						// provider it connected, so it is logged and skipped.
+						.catch((error) => log(`could not connect ${connection.integrationID}: ${describeError(error)}`));
+				}
 				return host;
 			});
-			this.host = { promise, apiKey, model, github: githubKey };
+			this.host = { promise, connections: signature, model, github: githubKey };
 			this.consuming = undefined;
-			// A different credential or model means a different catalogue.
+			// A different provider set or model means a different catalogue.
 			this.models = undefined;
 			void promise
 				.then((host) => this.startConsuming(host))
@@ -352,7 +514,9 @@ export class ErynSession extends DurableObject<Env> {
 		const { pathname } = new URL(request.url);
 		if (request.method === "POST" && pathname === "/session/prompt") {
 			const body = (await request.json()) as PromptRequest;
-			if (!body.apiKey) return Response.json({ ok: false, error: "missing api key" }, { status: 400 });
+			if (!Array.isArray(body.connections) || body.connections.length === 0) {
+				return Response.json({ ok: false, error: "no provider is connected" }, { status: 400 });
+			}
 			// The gateway names this object after the guild, so a mismatch means a
 			// routing bug rather than an authorised cross-guild request.
 			if (this.guildId && body.guildId && body.guildId !== this.guildId) {
@@ -373,16 +537,25 @@ export class ErynSession extends DurableObject<Env> {
 		if (request.method === "POST" && pathname === "/session/models") {
 			return await this.modelsResponse(request);
 		}
+		if (request.method === "POST" && pathname === "/session/integrations") {
+			return await this.integrationsResponse(request);
+		}
+		if (request.method === "POST" && pathname === "/session/oauth") {
+			return await this.oauthResponse(request);
+		}
+		if (request.method === "POST" && pathname === "/session/disconnect") {
+			return await this.disconnectResponse(request);
+		}
 		if (request.method === "GET" && pathname === "/session/status") {
 			return Response.json({ guildId: this.guildId, busy: this.runs.size > 0 });
 		}
 		return Response.json({ error: "not found" }, { status: 404 });
 	}
 
-	// --- Model catalogue --------------------------------------------------------
+	// --- Provider catalogue -----------------------------------------------------
 
 	/**
-	 * The models this guild's key can reach.
+	 * The models the guild's connected providers can reach.
 	 *
 	 * Read from the embedded OpenCode server rather than by reimplementing
 	 * provider discovery: the SDK already knows how a provider publishes its
@@ -391,12 +564,8 @@ export class ErynSession extends DurableObject<Env> {
 	 * console reload does not pay for it twice.
 	 */
 	private async modelsResponse(request: Request): Promise<Response> {
-		const body = (await request.json().catch(() => undefined)) as ModelsRequest | undefined;
-		if (!body) return Response.json({ error: "the request could not be read" }, { status: 400 });
-		if (this.guildId && body.guildId && body.guildId !== this.guildId) {
-			return Response.json({ error: "guild mismatch" }, { status: 403 });
-		}
-		if (!body.apiKey) return Response.json({ models: [] });
+		const body = await this.guildRequest<GuildRequest>(request);
+		if (body instanceof Response) return body;
 		try {
 			return Response.json({ models: await this.listModels(body) });
 		} catch (error) {
@@ -405,16 +574,30 @@ export class ErynSession extends DurableObject<Env> {
 		}
 	}
 
-	private async listModels(request: ModelsRequest): Promise<ModelOption[]> {
-		const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
+	/** Parse a guild request, or the response to send back when it is unusable. */
+	private async guildRequest<T extends GuildRequest>(request: Request): Promise<T | Response> {
+		const body = (await request.json().catch(() => undefined)) as T | undefined;
+		if (!body) return Response.json({ error: "the request could not be read" }, { status: 400 });
+		if (this.guildId && body.guildId && body.guildId !== this.guildId) {
+			return Response.json({ error: "guild mismatch" }, { status: 403 });
+		}
+		return { ...body, connections: Array.isArray(body.connections) ? body.connections : [] };
+	}
+
+	/**
+	 * The models of every provider the guild has connected.
+	 *
+	 * Nothing connected means an empty list rather than every model in the
+	 * catalogue: offering a model whose provider has no credential would promise
+	 * something a turn cannot do.
+	 */
+	private async listModels(request: GuildRequest): Promise<ModelOption[]> {
+		const host = await this.hostFor(request.connections, request.model ?? MODEL, request.github);
 		if (!this.models) {
+			const connected = await this.connectedProviders(host);
 			const listed = await host.model.list({ location: { directory: LOCATION } });
-			const wanted = listed.data.filter((entry) => entry.providerID === PROVIDER);
-			// The key is issued for one provider. Should the catalogue name it
-			// differently, offer everything rather than presenting an empty list.
-			const provider = wanted.length > 0 ? wanted : listed.data;
-			this.models = provider
-				.filter((entry) => entry.status !== "deprecated")
+			this.models = listed.data
+				.filter((entry) => entry.status !== "deprecated" && connected.has(entry.providerID))
 				.map((entry) => ({
 					id: `${entry.providerID}/${entry.id}`,
 					name: entry.name,
@@ -425,6 +608,143 @@ export class ErynSession extends DurableObject<Env> {
 				.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
 		}
 		return this.models;
+	}
+
+	/**
+	 * The integrations that currently hold a credential.
+	 *
+	 * A provider id and its integration id are the same thing — that is how
+	 * models.dev registers them — which is what lets the model catalogue be
+	 * narrowed to what the guild can actually use.
+	 */
+	private async connectedProviders(host: OpenCodeWorkerd.Interface): Promise<Set<string>> {
+		const listed = await host.integration.list({ location: { directory: LOCATION } });
+		return new Set(listed.data.filter((entry) => entry.connections.length > 0).map((entry) => String(entry.id)));
+	}
+
+	/**
+	 * The providers a guild could connect, and the flows each one offers.
+	 *
+	 * The list is the host's, not ours: models.dev describes the providers and
+	 * each provider's own plugin adds whatever else it supports, so a provider
+	 * added upstream shows up here without a change in this Worker.
+	 */
+	private async integrationsResponse(request: Request): Promise<Response> {
+		const body = await this.guildRequest<GuildRequest>(request);
+		if (body instanceof Response) return body;
+		try {
+			const host = await this.hostFor(body.connections, body.model ?? MODEL, body.github);
+			const listed = await host.integration.list({ location: { directory: LOCATION } });
+			const integrations: IntegrationOption[] = listed.data
+				.map((integration) => ({
+					id: String(integration.id),
+					name: integration.name || String(integration.id),
+					connected: integration.connections.length > 0,
+					methods: integration.methods
+						.map(describeMethod)
+						.filter((method): method is IntegrationMethodOption => method !== undefined),
+				}))
+				// A provider whose methods we cannot describe at all is dropped. Ones we
+				// can describe but cannot run stay, so the console can still name a
+				// provider a server connected before it changed shape.
+				.filter((integration) => integration.methods.length > 0)
+				.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
+			return Response.json({ integrations });
+		} catch (error) {
+			log(`could not list integrations: ${describeError(error)}`);
+			return Response.json({ error: describeError(error) }, { status: 502 });
+		}
+	}
+
+	/**
+	 * Drive one step of a provider sign-in.
+	 *
+	 * The host owns the flow — it opens the browser round trip and keeps the
+	 * credential that comes back — so this only starts it, reports its status,
+	 * and finishes it when the provider asks for a code.
+	 */
+	private async oauthResponse(request: Request): Promise<Response> {
+		const body = await this.guildRequest<OAuthRequest>(request);
+		if (body instanceof Response) return body;
+		if (!body.integrationID) return Response.json({ error: "an integration is required" }, { status: 400 });
+		try {
+			const host = await this.hostFor(body.connections, body.model ?? MODEL, body.github);
+			const location = { directory: LOCATION };
+			if (body.action === "start") {
+				const attempt = await host.integration.oauth.connect({
+					integrationID: body.integrationID,
+					methodID: body.methodID ?? "",
+					// The provider validates this against its own form, so it is passed
+					// through as given rather than shaped here.
+					answer: (body.answer ?? {}) as Record<string, string | number | boolean>,
+					location,
+				});
+				return Response.json({ attempt: attempt.data });
+			}
+			if (!body.attemptID) return Response.json({ error: "an attempt is required" }, { status: 400 });
+			if (body.action === "status") {
+				const status = await host.integration.oauth.status({
+					integrationID: body.integrationID,
+					attemptID: body.attemptID,
+					location,
+				});
+				// A finished sign-in adds a credential, which changes what the model
+				// catalogue should contain.
+				if (status.data.status === "complete") this.models = undefined;
+				return Response.json({ status: status.data });
+			}
+			if (body.action === "complete") {
+				await host.integration.oauth.complete({
+					integrationID: body.integrationID,
+					attemptID: body.attemptID,
+					code: body.code,
+					location,
+				});
+				this.models = undefined;
+				return Response.json({ ok: true });
+			}
+			await host.integration.oauth.cancel({
+				integrationID: body.integrationID,
+				attemptID: body.attemptID,
+				location,
+			});
+			return Response.json({ ok: true });
+		} catch (error) {
+			log(`provider sign-in failed: ${describeError(error)}`);
+			return Response.json({ error: describeError(error) }, { status: 502 });
+		}
+	}
+
+	/**
+	 * Drop every credential for one integration.
+	 *
+	 * A key is forgotten by removing it from the registry, but an OAuth
+	 * credential lives in this object's own store, so it has to be removed here
+	 * too or clearing a provider would leave it connected.
+	 */
+	private async disconnectResponse(request: Request): Promise<Response> {
+		const body = (await request.json().catch(() => undefined)) as
+			| (GuildRequest & { integrationID?: string })
+			| undefined;
+		if (!body?.integrationID) return Response.json({ error: "an integration is required" }, { status: 400 });
+		if (this.guildId && body.guildId && body.guildId !== this.guildId) {
+			return Response.json({ error: "guild mismatch" }, { status: 403 });
+		}
+		try {
+			const host = await this.hostFor(body.connections ?? [], body.model ?? MODEL, body.github);
+			const credentials = await host.credential.list();
+			let removed = 0;
+			for (const entry of credentials) {
+				if (String(entry.integrationID) !== body.integrationID) continue;
+				await host.credential.remove({ credentialID: entry.id });
+				removed += 1;
+			}
+			if (removed > 0) this.models = undefined;
+			return Response.json({ ok: true, removed });
+		} catch (error) {
+			log(`could not disconnect ${body.integrationID}: ${describeError(error)}`);
+			return Response.json({ error: describeError(error) }, { status: 502 });
+		}
 	}
 
 	// --- A turn -----------------------------------------------------------------
@@ -444,7 +764,7 @@ export class ErynSession extends DurableObject<Env> {
 			await stream.start();
 			stopTyping = this.startTyping(request.threadId);
 
-			const host = await this.hostFor(request.apiKey, request.model ?? MODEL, request.github);
+			const host = await this.hostFor(request.connections, request.model ?? MODEL, request.github);
 			// The reply and the completion signal both arrive as events, so a
 			// stream that died since the last turn has to be replaced before this
 			// one starts; otherwise the turn would run blind until it timed out.

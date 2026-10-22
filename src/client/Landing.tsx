@@ -5,7 +5,7 @@ const features = [
 	{
 		num: "[01]",
 		title: "Bring your own key",
-		body: "Sign in with Discord, pick a server you administer, and paste an OpenCode Go key. It is encrypted at rest and used only for that server.",
+		body: "Sign in with Discord, pick a server you administer, and connect a provider — OpenCode Go, OpenRouter, or any other. The key is encrypted at rest and used only for that server.",
 	},
 	{
 		num: "[02]",
@@ -34,7 +34,7 @@ export default function Landing() {
 							works in a real workspace, and streams the answer back.
 						</p>
 						<p class="mb-8 max-w-[62ch] text-muted">
-							Every server runs on <strong class="font-semibold text-fg">its own OpenCode Go key</strong> — nothing is
+							Every server runs on <strong class="font-semibold text-fg">its own provider key</strong> — nothing is
 							billed to the operator and no key is shared.
 						</p>
 						<div class="flex flex-wrap gap-3">
