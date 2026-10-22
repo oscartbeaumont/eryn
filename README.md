@@ -414,10 +414,22 @@ the flows rather than the providers:
 
 `key` is what almost every provider offers — models.dev gives every provider it
 describes a `key` method — so connecting OpenRouter, Anthropic, Google, or
-anything else needs no provider-specific code. `oauth` covers the providers that
-only sign in, such as GitHub Copilot and xAI; it runs on the guild's own object,
-and a flow that needs a listener on `127.0.0.1` (Poe, ChatGPT, DigitalOcean)
-cannot work here and reports that rather than failing silently.
+anything else needs no provider-specific code.
+
+`oauth` covers the providers that only sign in, and it is only usable when the
+provider brings the browser back to *us*. Some of OpenCode's flows do not: they
+open a listener on `127.0.0.1` and hardcode `redirect_uri=http://127.0.0.1:<port>`
+— ChatGPT, Poe, DigitalOcean, GitLab — with an `authorize` that takes no
+arguments, so the address cannot be overridden. That cannot work in a Worker
+twice over, and the browser is sent to the caller's own machine rather than to
+Eryn. Eryn therefore inspects the URL a flow hands back and **refuses** one whose
+callback is a loopback address, cancelling the attempt so its listener is closed,
+and says which provider it was and that an API key is the way in. The check is on
+the redirect rather than on a list of provider names, so it stays right as
+OpenCode's plugins change.
+
+Those providers still have a `key` method from models.dev, so they are connectable
+— just not by signing in.
 
 ## Configuration
 

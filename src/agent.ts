@@ -300,6 +300,26 @@ function describeField(value: unknown): ProviderField | undefined {
 	return undefined;
 }
 
+/**
+ * Whether a sign-in sends the browser back to the machine running this Worker.
+ *
+ * Several of OpenCode's provider flows open a listener on `127.0.0.1` and wait
+ * for the provider to redirect to it. That cannot work here twice over: a Worker
+ * has no inbound socket, and the address it names is the *caller's* own machine,
+ * not this one. The only trace is the redirect in the URL the flow hands back,
+ * so that is what is inspected.
+ */
+function needsLocalCallback(url: string): boolean {
+	try {
+		const redirect = new URL(url).searchParams.get("redirect_uri");
+		if (!redirect) return false;
+		const host = new URL(redirect).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+		return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
+	} catch {
+		return false;
+	}
+}
+
 /** A field's visibility conditions, ignoring anything malformed. */
 function readConditions(value: unknown): ProviderField["when"] {
 	if (!Array.isArray(value)) return undefined;
@@ -795,6 +815,25 @@ export class ErynSession extends DurableObject<Env> {
 					answer: (body.answer ?? {}) as Record<string, string | number | boolean>,
 					location,
 				});
+				// Offering the flow and then bouncing the browser to a port on its own
+				// machine is worse than saying no: the flow is cancelled, which closes
+				// the listener it opened, and the caller is told what to do instead.
+				if (needsLocalCallback(attempt.data.url)) {
+					await host.integration.oauth
+						.cancel({ integrationID: body.integrationID, attemptID: attempt.data.attemptID, location })
+						.catch(() => undefined);
+					// Named, so the message reads as "OpenAI" rather than "openai".
+					const name = await host.integration
+						.get({ integrationID: body.integrationID, location })
+						.then((found) => found.data?.name)
+						.catch(() => undefined);
+					return Response.json(
+						{
+							error: `${name ?? body.integrationID} signs in through a callback on your own machine, which this deployment cannot receive. Connect it with an API key instead.`,
+						},
+						{ status: 400 },
+					);
+				}
 				return Response.json({ attempt: attempt.data });
 			}
 			if (!body.attemptID) return Response.json({ error: "an attempt is required" }, { status: 400 });
