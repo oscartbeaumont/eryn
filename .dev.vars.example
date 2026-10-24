@@ -1,24 +1,34 @@
-# Copy to `.dev.vars` and fill in. `cf deploy --secrets-file .dev.vars` uploads these.
-
-# Discord bot token — Developer Portal → your app → Bot → Reset Token.
+# Copy to .dev.vars and fill in. `pnpm dev` reads this file.
+#
+# Discord: create an application at https://discord.com/developers/applications,
+# add a bot, and enable the Message Content Intent. The same token powers the
+# Discord tools and the gateway's events socket.
 DISCORD_BOT_TOKEN=
-
-# Discord OAuth2 client secret — Developer Portal → your app → OAuth2.
-# Add the redirect URI https://eryn.otbeaumont.me/auth/callback in the same page.
+DISCORD_CLIENT_ID=1561290858668494959
 DISCORD_CLIENT_SECRET=
 
-# base64url, 32 random bytes. Protects guild API keys at rest.
-#   openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+# Generate with:
+#   echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+#   echo "SESSION_SECRET=$(openssl rand -hex 32)"
 ENCRYPTION_KEY=
-
-# Random secret used to sign the OAuth state and session cookies.
-#   openssl rand -hex 32
 SESSION_SECRET=
 
-# GitHub App (optional): powers the agent's GitHub tools (issues, clone, branch,
-# commit, pull request). Create an App, set its Setup URL to
-# https://eryn.otbeaumont.me/github/callback, then copy the App id, its private
-# key (PEM), and its URL slug. Leave as-is to disable the GitHub tools.
-GITHUB_APP_ID=
-GITHUB_APP_PRIVATE_KEY=
-GITHUB_APP_SLUG=
+# Optional. The OAuth App used to connect GitHub accounts. A personal access
+# token works without it.
+GITHUB_OAUTH_CLIENT_ID=
+GITHUB_OAUTH_CLIENT_SECRET=
+
+# Optional. Enables connecting Google Calendar accounts.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+PUBLIC_ORIGIN=https://eryn.otbeaumont.me
+
+# Optional. An empty token disables analytics and the /ingest proxy.
+POSTHOG_KEY=phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2
+POSTHOG_INGEST_HOST=https://us.i.posthog.com
+POSTHOG_ASSETS_HOST=https://us-assets.i.posthog.com
+POSTHOG_UI_HOST=https://us.posthog.com
+
+DISCORD_KEEPALIVE_SECONDS=840
+DISCORD_TURN_TIMEOUT_SECONDS=900

@@ -1,18 +1,18 @@
 {
-	"compilerOptions": {
-		"target": "es2022",
-		"lib": ["es2022", "dom", "dom.iterable"],
-		"module": "preserve",
-		"moduleResolution": "bundler",
-		"jsx": "preserve",
-		"jsxImportSource": "@solidjs/web",
-		"types": [],
-		"strict": true,
-		"noEmit": true,
-		"allowImportingTsExtensions": true,
-		"isolatedModules": true,
-		"verbatimModuleSyntax": true,
-		"skipLibCheck": true
-	},
-	"include": ["src/client", "src/discord-ids.ts"]
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "@solidjs/web",
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["packages/console/src"]
 }

@@ -1,6 +1,15 @@
 import { bindings, defineConfig, exports, triggers } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
+/**
+ * One Worker, three packages.
+ *
+ * `@oscartbeaumont/eryn-gateway` (the MCP server) and
+ * `@oscartbeaumont/eryn-bot` (the Discord bot) are composed by `src/index.ts`;
+ * `@oscartbeaumont/eryn-console` is served as static assets. The packages never
+ * import each other, and each keeps its own standalone entrypoint, so this file
+ * is the only place that knows all three exist.
+ */
 export default defineConfig({
 	worker: {
 		name: "eryn",
@@ -9,9 +18,6 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
-		// Workers Observability: invocation logs and traces are persisted and
-		// searchable in the dashboard, and real-time Issues groups the errors that
-		// would otherwise only show up as noisy log lines.
 		observability: {
 			enabled: true,
 			// Our own routes carry OAuth codes, code challenges, and session state in
@@ -21,22 +27,21 @@ export default defineConfig({
 			traces: { enabled: true, persist: true },
 			issues: { enabled: true },
 		},
-		// A slow safety net for the gateway. The gateway's own Durable Object
-		// alarm is the real mechanism; running this every minute would pay for a
-		// wake-up a minute for no benefit.
+		// A slow safety net for the bot's gateway object. Its own alarm is the real
+		// mechanism; running this every minute would pay for a request for nothing.
 		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
-		// The Solid SPA is served as static assets; unknown paths fall back to
-		// index.html, while API, auth, MCP, and ingest routes go straight to the
-		// Worker.
 		assets: {
 			notFoundHandling: "single-page-application",
 			runWorkerFirst: [
+				// The bot's and gateway's own routes.
 				"/api/*",
 				"/auth/*",
 				"/github/*",
+				"/google/*",
 				"/health",
-				// The MCP endpoint and its OAuth discovery/registration surface.
+				// The gateway's MCP endpoint, its OAuth discovery, and registration.
 				"/mcp",
+				"/mcp/*",
 				"/.well-known/*",
 				"/oauth/*",
 				// The PostHog reverse proxy.
@@ -44,53 +49,64 @@ export default defineConfig({
 			],
 		},
 		env: {
-			// Durable Objects: one singleton gateway, one session per thread, one registry.
-			GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "ErynGateway" }),
-			SESSION: bindings.durableObject({ worker: "eryn", exportName: "ErynSession" }),
-			REGISTRY: bindings.durableObject({ worker: "eryn", exportName: "ErynRegistry" }),
-			// The MCP gateway: one per Discord user, so a harness sees only that
-			// user's tools.
-			MCP: bindings.durableObject({ worker: "eryn", exportName: "ErynMcp" }),
+			// The gateway: one object per Eryn user, plus the singleton events hub
+			// that owns the lazily-opened Discord socket for MCP events.
+			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUser" }),
+			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscord" }),
+			// The bot: the singleton Discord socket, and one session per guild.
+			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGateway" }),
+			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSession" }),
 
-			// Discord bot token. The bot is disabled when this is empty.
+			// Discord: the bot token powers the socket and the Discord tools, and the
+			// client id/secret drive the console's sign-in.
 			DISCORD_BOT_TOKEN: bindings.secret(),
-			// Discord application OAuth2 client secret, for the setup sign-in flow.
+			DISCORD_CLIENT_ID: bindings.text("1561290858668494959"),
 			DISCORD_CLIENT_SECRET: bindings.secret(),
-			// base64url 32-byte key protecting guild credentials at rest.
+
+			// base64url 32-byte key protecting every stored credential at rest.
 			ENCRYPTION_KEY: bindings.secret(),
-			// Random secret signing the OAuth state and session cookies.
+			// Signs sessions, OAuth state, and MCP tokens.
 			SESSION_SECRET: bindings.secret(),
-			// GitHub App credentials, for the agent's GitHub tools (optional).
-			GITHUB_APP_ID: bindings.secret(),
-			GITHUB_APP_PRIVATE_KEY: bindings.secret(),
-			// The App's URL slug, used for the "Install GitHub App" link.
-			GITHUB_APP_SLUG: bindings.text(""),
 
-			// Public origin used in messages linked from Discord.
+			// GitHub accounts are connected with an OAuth App sign-in or a personal
+			// access token; both are a user access token. The client id is public; the
+			// secret is a dashboard secret binding.
+			GITHUB_OAUTH_CLIENT_ID: bindings.text("Ov23li72FJNRRw9YbyIh"),
+			GITHUB_OAUTH_CLIENT_SECRET: bindings.secret(),
+
+			// Google Calendar accounts.
+			GOOGLE_CLIENT_ID: bindings.text("306342405758-qo1be08n6i27ilpvlbjl6kaq7vma0rh1.apps.googleusercontent.com"),
+			GOOGLE_CLIENT_SECRET: bindings.secret(),
+
+			// Public origin used in links and OAuth callbacks.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
-			// Where Eryn's own sessions reach the MCP. Defaults to PUBLIC_ORIGIN/mcp.
-			MCP_INTERNAL_URL: bindings.text(""),
 
-			// PostHog. The project token is a public value that ships in the client
-			// bundle; an empty token disables analytics entirely. Requests are sent
-			// to this origin's /ingest path and proxied onward from here, so they
-			// are first-party and ad blockers leave them alone.
+			// PostHog. The token is public and ships in the console bundle; an empty
+			// token disables analytics. Requests go to this origin's /ingest path and
+			// are proxied onward, so they are first-party and ad blockers leave them
+			// alone.
 			POSTHOG_KEY: bindings.text("phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2"),
 			POSTHOG_INGEST_HOST: bindings.text("https://us.i.posthog.com"),
 			POSTHOG_ASSETS_HOST: bindings.text("https://us-assets.i.posthog.com"),
 			POSTHOG_UI_HOST: bindings.text("https://us.posthog.com"),
 
-			// How often the gateway Durable Object's keepalive alarm fires. Only a
-			// safety net: the socket is persistent, so a long interval is cheaper.
+			// How often the bot gateway's keepalive alarm fires; a long interval is
+			// both safe and cheap because a session resume loses no messages.
 			DISCORD_KEEPALIVE_SECONDS: bindings.text("840"),
 			// Seconds a single agent turn may run before it is interrupted.
 			DISCORD_TURN_TIMEOUT_SECONDS: bindings.text("900"),
 		},
 		exports: {
-			ErynGateway: exports.durableObject({ storage: "sqlite" }),
-			ErynSession: exports.durableObject({ storage: "sqlite" }),
-			ErynRegistry: exports.durableObject({ storage: "sqlite" }),
-			ErynMcp: exports.durableObject({ storage: "sqlite" }),
+			GatewayUser: exports.durableObject({ storage: "sqlite" }),
+			GatewayDiscord: exports.durableObject({ storage: "sqlite" }),
+			BotGateway: exports.durableObject({ storage: "sqlite" }),
+			BotSession: exports.durableObject({ storage: "sqlite" }),
+			// The redesign is a clean break: these four namespaces held the old
+			// single-Worker layout, and their storage is intentionally abandoned.
+			ErynGateway: exports.durableObject({ state: "deleted" }),
+			ErynSession: exports.durableObject({ state: "deleted" }),
+			ErynRegistry: exports.durableObject({ state: "deleted" }),
+			ErynMcp: exports.durableObject({ state: "deleted" }),
 		},
 	},
 });
