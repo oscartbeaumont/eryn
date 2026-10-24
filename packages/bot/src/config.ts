@@ -27,6 +27,8 @@ export const KEYS = {
 	link: "link:",
 	/** A thread's OpenCode session id. */
 	session: "session:",
+	/** A sign-in that has started but not finished, so a code can complete it. */
+	pendingOAuth: "config:oauth",
 	/** The guild's virtual filesystem, one key per absolute path. */
 	fs: "fs:",
 } as const;

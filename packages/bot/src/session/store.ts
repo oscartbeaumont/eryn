@@ -17,9 +17,11 @@ import { botError } from "../errors";
 import {
 	GuildSettingsSchema,
 	McpLinkSchema,
+	PendingOAuthSchema,
 	ProviderConnectionSchema,
 	type GuildSettings,
 	type McpLink,
+	type PendingOAuth,
 	type ProviderConnection,
 } from "./models";
 
@@ -37,6 +39,9 @@ export interface GuildStoreShape {
 	sessionFor(threadId: string): Promise<string | undefined>;
 	putSession(threadId: string, sessionID: string): Promise<void>;
 	clearSession(threadId: string): Promise<void>;
+	putPendingOAuth(pending: PendingOAuth): Promise<void>;
+	pendingOAuth(): Promise<PendingOAuth | undefined>;
+	clearPendingOAuth(): Promise<void>;
 }
 
 class GuildStoreImpl implements GuildStoreShape {
@@ -134,6 +139,20 @@ class GuildStoreImpl implements GuildStoreShape {
 
 	async clearSession(threadId: string): Promise<void> {
 		await this.storage.delete(KEYS.session + threadId);
+	}
+
+	async putPendingOAuth(pending: PendingOAuth): Promise<void> {
+		await this.storage.put(KEYS.pendingOAuth, Schema.encodeSync(PendingOAuthSchema)(pending));
+	}
+
+	async pendingOAuth(): Promise<PendingOAuth | undefined> {
+		const stored = await this.storage.get<unknown>(KEYS.pendingOAuth);
+		const parsed = Schema.decodeUnknownOption(PendingOAuthSchema)(stored);
+		return Option.isSome(parsed) ? parsed.value : undefined;
+	}
+
+	async clearPendingOAuth(): Promise<void> {
+		await this.storage.delete(KEYS.pendingOAuth);
 	}
 }
 

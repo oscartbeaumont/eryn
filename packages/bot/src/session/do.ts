@@ -173,6 +173,11 @@ export class BotSession extends DurableObject<Env> {
 							body.answer ?? {},
 						);
 						if ("error" in result) return json({ error: result.error }, 400);
+						await store.putPendingOAuth({
+							integrationID: body.integrationID,
+							attemptID: result.attemptID,
+							createdAt: Date.now(),
+						});
 						return json({
 							url: result.url,
 							attemptID: result.attemptID,
@@ -180,20 +185,29 @@ export class BotSession extends DurableObject<Env> {
 							instructions: result.instructions,
 						});
 					}
-					if (!body.attemptID) return json({ error: "an attempt is required" }, 400);
+					// A device-code flow finishes from a modal that only carries the
+					// provider id, so the attempt is read back from storage.
+					const pending = await store.pendingOAuth();
+					const attemptID =
+						body.attemptID ??
+						(pending && pending.integrationID === body.integrationID ? pending.attemptID : undefined);
+					if (!attemptID) return json({ error: "Start the sign-in again." }, 400);
 					if (action === "status") {
-						const status = await agent.oauthStatus(config, body.integrationID, body.attemptID);
+						const status = await agent.oauthStatus(config, body.integrationID, attemptID);
 						if (status.status === "complete") {
 							await store.putProvider({ integrationID: body.integrationID, method: "oauth", key: "" });
+							await store.clearPendingOAuth();
 						}
 						return json({ status });
 					}
 					if (action === "complete") {
-						await agent.oauthComplete(config, body.integrationID, body.attemptID, body.code);
+						await agent.oauthComplete(config, body.integrationID, attemptID, body.code);
 						await store.putProvider({ integrationID: body.integrationID, method: "oauth", key: "" });
+						await store.clearPendingOAuth();
 						return json({ ok: true });
 					}
-					await agent.oauthCancel(config, body.integrationID, body.attemptID);
+					await agent.oauthCancel(config, body.integrationID, attemptID);
+					await store.clearPendingOAuth();
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 502))));
 			}

@@ -541,8 +541,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		const attempt = await host.integration.oauth.connect({ integrationID, methodID, answer, location });
 		// Offering the flow and then bouncing the browser to a port on its own
 		// machine is worse than saying no: the flow is cancelled, and the caller is
-		// told what to do instead.
-		if (needsLocalCallback(attempt.data.url)) {
+		// told what to do instead. A device-code flow never sends the browser back
+		// to us, so it is exempt.
+		if (attempt.data.mode !== "code" && needsLocalCallback(attempt.data.url)) {
 			await host.integration.oauth
 				.cancel({ integrationID, attemptID: attempt.data.attemptID, location })
 				.catch(() => undefined);

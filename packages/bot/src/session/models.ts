@@ -156,6 +156,20 @@ export const OAuthStatusSchema = Schema.Struct({
 });
 export type OAuthStatus = typeof OAuthStatusSchema.Type;
 
+/**
+ * A sign-in that has started but not finished.
+ *
+ * A device-code flow finishes out of band, so the attempt has to outlive the
+ * interaction that started it: the code modal only carries the provider id, and
+ * this is where the attempt id comes from.
+ */
+export const PendingOAuthSchema = Schema.Struct({
+	integrationID: Schema.String,
+	attemptID: Schema.String,
+	createdAt: Schema.Number,
+});
+export type PendingOAuth = typeof PendingOAuthSchema.Type;
+
 // --- Internal route bodies -----------------------------------------------------
 
 export const GuildRefSchema = Schema.Struct({ guildId: Schema.String });

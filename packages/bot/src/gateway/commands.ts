@@ -32,11 +32,49 @@ const MAX_SELECT_OPTIONS = 25;
 /** Discord's own id limit; our encoded ids must stay under it. */
 const MAX_CUSTOM_ID = 100;
 
+/**
+ * Providers worth showing first.
+ *
+ * models.dev has far more providers than a Discord select can hold, so the
+ * initial list is the common ones; everything else is reachable by search.
+ */
+const PREFERRED_PROVIDERS = [
+	"opencode",
+	"opencode-go",
+	"openrouter",
+	"openai",
+	"anthropic",
+	"google",
+	"google-vertex",
+	"deepseek",
+	"mistral",
+	"groq",
+	"xai",
+	"cerebras",
+	"togetherai",
+	"fireworks",
+	"deepinfra",
+	"amazon-bedrock",
+	"azure",
+	"github-copilot",
+	"ollama",
+	"lmstudio",
+];
+
+/** Connected first, then the preferred order, then alphabetical. */
+function providerRank(provider: { id: string; connected: boolean }): number {
+	if (provider.connected) return -1;
+	const index = PREFERRED_PROVIDERS.indexOf(provider.id);
+	return index >= 0 ? index : PREFERRED_PROVIDERS.length;
+}
+
 /** The custom_id codec for every component and modal this flow raises. */
 export const CID = {
 	providerSelect: "setup:provider",
+	providerSearch: "setup:search",
 	method: (integrationID: string, methodID: string) => clip(`setup:method:${integrationID}:${methodID}`),
 	keyModal: (integrationID: string) => clip(`setup:key:${integrationID}`),
+	codeModal: (integrationID: string) => clip(`setup:code:${integrationID}`),
 	oauthCheck: (integrationID: string, attemptID: string) => clip(`setup:oauthcheck:${integrationID}:${attemptID}`),
 	modelSelect: "setup:model",
 	modelManual: "setup:model:manual",
@@ -69,6 +107,14 @@ function methodId(guildId: string | undefined, integrationID: string, methodID: 
 
 function keyModalId(guildId: string | undefined, integrationID: string): string {
 	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:key:${integrationID}`) : CID.keyModal(integrationID);
+}
+
+function providerSearchId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:search`) : CID.providerSearch;
+}
+
+function codeModalId(guildId: string | undefined, integrationID: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:code:${integrationID}`) : CID.codeModal(integrationID);
 }
 
 function oauthCheckId(guildId: string | undefined, integrationID: string, attemptID: string): string {
@@ -309,14 +355,22 @@ async function setupProvider(
 		await answer.reply("No provider this deployment can connect is available right now.");
 		return;
 	}
-	const options: DiscordSelectOption[] = providers.slice(0, MAX_SELECT_OPTIONS).map((provider) => ({
+	providers.sort((a, b) => providerRank(a) - providerRank(b) || a.name.localeCompare(b.name));
+	const shown = providers.slice(0, MAX_SELECT_OPTIONS);
+	const options: DiscordSelectOption[] = shown.map((provider) => ({
 		label: provider.name.slice(0, 100),
 		value: provider.id,
 		description: (provider.connected ? "connected" : provider.methods.map((method) => method.label).join(", ")).slice(0, 100),
 	}));
-	await answer.reply("Which provider should this server use for inference?", [
-		selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Pick a provider", options }),
-	]);
+	await answer.reply(
+		providers.length > shown.length
+			? `Which provider should this server use for inference?\nShowing ${shown.length} of ${providers.length}; use **Search providers** for the rest.`
+			: "Which provider should this server use for inference?",
+		[
+			selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Pick a provider", options }),
+			buttonRow([actionButton("Search providers", providerSearchId(dmGuildId), 2)]),
+		],
+	);
 }
 
 async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, session: SessionClient): Promise<void> {
@@ -433,6 +487,51 @@ function keyModal(integrationID: string, dmGuildId?: string): DiscordModal {
 	};
 }
 
+function providerSearchModal(dmGuildId?: string): DiscordModal {
+	return {
+		custom_id: providerSearchId(dmGuildId),
+		title: "Search providers",
+		components: [
+			{
+				type: 1,
+				components: [
+					{
+						type: 4,
+						custom_id: "query",
+						label: "Provider name or id",
+						style: 1,
+						required: true,
+						max_length: 100,
+						placeholder: "openrouter",
+					},
+				],
+			},
+		],
+	};
+}
+
+function codeModal(integrationID: string, dmGuildId?: string): DiscordModal {
+	return {
+		custom_id: codeModalId(dmGuildId, integrationID),
+		title: "Enter the sign-in code",
+		components: [
+			{
+				type: 1,
+				components: [
+					{
+						type: 4,
+						custom_id: "code",
+						label: "Code",
+						style: 1,
+						required: true,
+						max_length: 500,
+					},
+				],
+			},
+		],
+	};
+}
+
 // --- Components ----------------------------------------------------------------
 
 async function handleComponent(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
@@ -454,6 +553,17 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 			return await guarded(ctx, interaction, "update", () =>
 				pickProviderMethod(ctx, interaction, session, interaction.data?.values?.[0] ?? "", dmGuildId),
 			);
+		}
+		if (rest === "search") {
+			return await guarded(ctx, interaction, "reply", async () => {
+				await responder(ctx, interaction).modal(providerSearchModal(dmGuildId));
+			});
+		}
+		if (rest.startsWith("code:")) {
+			const integrationID = rest.slice("code:".length);
+			return await guarded(ctx, interaction, "reply", async () => {
+				await responder(ctx, interaction).modal(codeModal(integrationID, dmGuildId));
+			});
 		}
 		if (rest.startsWith("method:")) {
 			const [, integrationID, methodID] = rest.split(":");
@@ -494,6 +604,17 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		return await guarded(ctx, interaction, "update", () =>
 			pickProviderMethod(ctx, interaction, session, values[0] ?? ""),
 		);
+	}
+	if (customId === CID.providerSearch) {
+		return await guarded(ctx, interaction, "reply", async () => {
+			await responder(ctx, interaction).modal(providerSearchModal());
+		});
+	}
+	if (customId.startsWith("setup:code:")) {
+		const integrationID = customId.slice("setup:code:".length);
+		return await guarded(ctx, interaction, "reply", async () => {
+			await responder(ctx, interaction).modal(codeModal(integrationID));
+		});
 	}
 	if (customId.startsWith("setup:method:")) {
 		const [, , integrationID, methodID] = customId.split(":");
@@ -628,6 +749,21 @@ async function startMethod(
 		await answer.update(`Could not start the sign-in: ${result.error ?? "the provider returned no URL"}`);
 		return;
 	}
+	// A device-code flow shows a code to type on the provider's page rather than
+	// sending the browser back to us, so it finishes with a code, not a poll.
+	if (result.mode === "code") {
+		const buttons: DiscordButton[] = [
+			linkButton("Open sign-in page", result.url),
+			actionButton("Enter code", codeModalId(dmGuildId, integrationID), 1),
+		];
+		await answer.update(
+			`**${integrationID}** needs a code to finish signing in.${
+				result.instructions ? `\n\n${result.instructions}` : ""
+			}\n\nOpen the page, then choose **Enter code**.`,
+			[buttonRow(buttons)],
+		);
+		return;
+	}
 	const buttons: DiscordButton[] = [linkButton("Sign in", result.url)];
 	buttons.push(actionButton("I've finished", oauthCheckId(dmGuildId, integrationID, result.attemptID), 3));
 	await answer.update(
@@ -729,20 +865,99 @@ async function completeLink(
 
 // --- Modals --------------------------------------------------------------------
 
+/** Show the providers matching a search, as a select of at most 25. */
+async function searchProviders(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	query: string,
+	dmGuildId?: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const needle = query.trim().toLowerCase();
+	const providers = (await session.providers()).filter(
+		(provider) => provider.methods.some((method) => method.supported) || provider.connected,
+	);
+	const matches = providers
+		.filter(
+			(provider) =>
+				!needle ||
+				provider.id.toLowerCase().includes(needle) ||
+				provider.name.toLowerCase().includes(needle),
+		)
+		.sort((a, b) => providerRank(a) - providerRank(b) || a.name.localeCompare(b.name))
+		.slice(0, MAX_SELECT_OPTIONS);
+	if (!matches.length) {
+		await answer.reply(`No provider matches “${query.trim()}”. Try a shorter search.`);
+		return;
+	}
+	const options: DiscordSelectOption[] = matches.map((provider) => ({
+		label: provider.name.slice(0, 100),
+		value: provider.id,
+		description: (provider.connected ? "connected" : provider.methods.map((method) => method.label).join(", ")).slice(0, 100),
+	}));
+	await answer.reply(
+		matches.length === MAX_SELECT_OPTIONS
+			? `Providers matching “${query.trim()}” (showing the first ${MAX_SELECT_OPTIONS})`
+			: `Providers matching “${query.trim()}”`,
+		[selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Pick a provider", options })],
+	);
+}
+
+/** Finish a device-code sign-in with the code the provider showed. */
+async function completeCode(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	integrationID: string,
+	code: string,
+	dmGuildId?: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const trimmed = code.trim();
+	if (!trimmed) {
+		await answer.reply("No code was provided.");
+		return;
+	}
+	const result = await session.providerConnect({
+		guildId: dmGuildId ?? interaction.guild_id ?? "",
+		integrationID,
+		action: "complete",
+		code: trimmed,
+	});
+	await answer.reply(
+		result.error
+			? `Could not finish **${integrationID}**: ${result.error}`
+			: `**${integrationID} is connected.** Eryn will use it on the next turn.`,
+	);
+}
+
 async function handleModal(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
 	const customId = interaction.data?.custom_id;
 	const guildId = interaction.guild_id;
 	if (!customId) return;
 	const values = modalValues(interaction);
 
-	// A key modal raised by the install DM carries its guild id.
+	// A modal raised by the install DM carries its guild id.
 	if (customId.startsWith(INSTALL_PREFIX)) {
 		const parts = customId.slice(INSTALL_PREFIX.length).split(":");
 		const dmGuildId = parts.shift() ?? "";
 		const rest = parts.join(":");
+		const session = ctx.session(dmGuildId);
+		if (rest === "search") {
+			return await guarded(ctx, interaction, "reply", () =>
+				searchProviders(ctx, interaction, session, values.query ?? "", dmGuildId),
+			);
+		}
+		if (rest.startsWith("code:")) {
+			return await guarded(ctx, interaction, "reply", () =>
+				completeCode(ctx, interaction, session, rest.slice("code:".length), values.code ?? "", dmGuildId),
+			);
+		}
 		if (!rest.startsWith("key:")) return;
 		const integrationID = rest.slice("key:".length);
-		const session = ctx.session(dmGuildId);
 		return await guarded(ctx, interaction, "reply", async () => {
 			const key = values.key?.trim();
 			if (!key) {
@@ -777,6 +992,16 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 				result.error ? `Could not connect **${integrationID}**: ${result.error}` : `**${integrationID} is connected.** Eryn will use it on the next turn.`,
 			);
 		});
+	}
+	if (customId === CID.providerSearch) {
+		return await guarded(ctx, interaction, "reply", () =>
+			searchProviders(ctx, interaction, session, values.query ?? ""),
+		);
+	}
+	if (customId.startsWith("setup:code:")) {
+		return await guarded(ctx, interaction, "reply", () =>
+			completeCode(ctx, interaction, session, customId.slice("setup:code:".length), values.code ?? ""),
+		);
 	}
 	if (customId === CID.modelModal) {
 		const model = values.model?.trim();
