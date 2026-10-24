@@ -100,7 +100,9 @@ export class BotGateway extends DurableObject<Env> {
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
 		if (pathname === WAKE_PATH) {
-			await this.ensure();
+			// `keepAlive` also arms the alarm, so the first wake starts the cycle
+			// that reconnects the socket before Cloudflare's 15 minute cap.
+			await this.keepAlive();
 			return json({ ok: true, connected: this.socket.open });
 		}
 		return json({ error: "not found" }, 404);
