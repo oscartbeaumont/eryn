@@ -15,7 +15,6 @@ import {
 	type ToolGroup,
 	type ToolOverride,
 } from "./api";
-import { completeSelfTest, hasReturningFlow, startSelfTest, type SelfTestResult } from "./mcp";
 import { session } from "./session";
 import { A, buttonClass, Chip, Code, CopyButton, Footer, Header, Kicker, Notice } from "./ui";
 
@@ -59,7 +58,6 @@ export default function Servers() {
 	const [groups, setGroups] = createSignal<ToolGroup[]>([]);
 	const [notice, setNotice] = createSignal<NoticeState>();
 	const [busy, setBusy] = createSignal(false);
-	const [selfTest, setSelfTest] = createSignal<SelfTestResult>();
 
 	async function reload() {
 		try {
@@ -72,17 +70,6 @@ export default function Servers() {
 		}
 	}
 	void reload();
-
-	// The return leg of a "Connect this browser" run lands back here with a code.
-	if (hasReturningFlow()) {
-		void completeSelfTest()
-			.then((result) => {
-				setSelfTest(result);
-				setNotice({ kind: result.ok ? "ok" : "error", message: result.message });
-				return reload();
-			})
-			.catch((error: unknown) => setNotice({ kind: "error", message: describe(error) }));
-	}
 
 	const flash = (kind: NoticeState["kind"], message: string) => setNotice({ kind, message });
 
@@ -141,7 +128,6 @@ export default function Servers() {
 													accounts={accounts()}
 													groups={groups()}
 													busy={busy()}
-													selfTest={selfTest()}
 													onMutate={(action, success) => void mutate(action, success)}
 													onNotice={flash}
 												/>
@@ -225,7 +211,6 @@ function ServerCard(props: {
 	accounts: AccountSummary[];
 	groups: ToolGroup[];
 	busy: boolean;
-	selfTest?: SelfTestResult;
 	onMutate: (action: ServersAction, success: string) => void;
 	onNotice: (kind: NoticeState["kind"], message: string) => void;
 }) {
@@ -234,7 +219,18 @@ function ServerCard(props: {
 	const [title, setTitle] = createSignal(props.server.title ?? "");
 	const [selected, setSelected] = createSignal<string[]>(props.server.accounts.map((account) => account.id));
 	const [access, setAccess] = createSignal<ToolAccess>(cloneAccess(props.server.tools));
-	const [connecting, setConnecting] = createSignal(false);
+
+	/** Only the groups the accounts assigned to this server can act with. */
+	const visibleGroups = () => {
+		const providers = new Set(props.server.accounts.map((account) => account.provider));
+		return props.groups.filter((group) => {
+			if (group.id === "builtin") return true;
+			if (group.id === "discord") return providers.has("discord");
+			if (group.id === "github") return providers.has("github");
+			if (group.id === "google_calendar") return providers.has("google");
+			return false;
+		});
+	};
 
 	function toggleEnabled() {
 		props.onMutate(
@@ -296,7 +292,7 @@ function ServerCard(props: {
 	function setEveryGroup(level: ToolAccessLevel) {
 		setAccess((current) => {
 			const groups = { ...current.groups };
-			for (const group of props.groups) groups[group.id] = level;
+			for (const group of visibleGroups()) groups[group.id] = level;
 			return { groups, tools: current.tools };
 		});
 	}
@@ -308,16 +304,6 @@ function ServerCard(props: {
 	function revokeGrant(guildId: string) {
 		if (!confirm(`Revoke access for guild ${guildId}?`)) return;
 		props.onMutate({ action: "revoke-grant", id: props.server.id, guildId }, "Access revoked.");
-	}
-
-	async function connectBrowser() {
-		setConnecting(true);
-		try {
-			await startSelfTest({ id: props.server.id, endpoint: props.server.endpoint });
-		} catch (error) {
-			props.onNotice("error", describe(error));
-			setConnecting(false);
-		}
 	}
 
 	const harnessConfig = () =>
@@ -402,20 +388,7 @@ function ServerCard(props: {
 						{props.server.endpoint}
 					</code>
 					<CopyButton value={props.server.endpoint} />
-					<button type="button" class={buttonClass.primary} disabled={connecting()} onClick={() => void connectBrowser()}>
-						{connecting() ? "Working…" : "Connect this browser"}
-					</button>
 				</div>
-				<Show when={props.selfTest?.serverId === props.server.id ? props.selfTest : undefined}>
-					{(result) => (
-						<p class="mt-3 font-mono text-xs text-muted">
-							Tools over the wire: {result().tools.length ? result().tools.join(", ") : "none"}
-						</p>
-					)}
-				</Show>
-				<p class="mt-2 text-xs text-faint">
-					Runs the real OAuth flow, then calls <code class="font-mono">tools/list</code> with the token it receives.
-				</p>
 			</div>
 
 			{/* Accounts assigned to this server's tools. */}
@@ -458,25 +431,36 @@ function ServerCard(props: {
 				</Show>
 			</div>
 
-			{/* Tool access, by group and per tool. */}
+			{/* Tool access, by group and per tool. Gated on an assigned account. */}
 			<div class="mb-5">
 				<div class="mb-2 flex items-center gap-3">
 					<span class="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">Tools</span>
-					<span class="ml-auto flex flex-wrap gap-2">
-						<button type="button" class={buttonClass.small} onClick={() => setEveryGroup("read")}>
-							All read
-						</button>
-						<button type="button" class={buttonClass.small} onClick={() => setEveryGroup("all")}>
-							All read + write
-						</button>
-					</span>
+					<Show when={props.server.accounts.length > 0}>
+						<span class="ml-auto flex flex-wrap gap-2">
+							<button type="button" class={buttonClass.small} onClick={() => setEveryGroup("read")}>
+								All read
+							</button>
+							<button type="button" class={buttonClass.small} onClick={() => setEveryGroup("all")}>
+								All read + write
+							</button>
+						</span>
+					</Show>
 				</div>
 				<Show
-					when={props.groups.length > 0}
-					fallback={<p class="text-sm text-muted">No tool groups are available on this deployment.</p>}
+					when={props.server.accounts.length > 0}
+					fallback={
+						<p class="text-sm text-muted">
+							Assign at least one account above, then save, to choose the tools this server exposes. The
+							groups available depend on which providers those accounts belong to.
+						</p>
+					}
 				>
-					<div class="flex flex-col gap-4">
-						<For each={props.groups}>
+					<Show
+						when={visibleGroups().length > 0}
+						fallback={<p class="text-sm text-muted">None of the assigned accounts has a tool group on this deployment.</p>}
+					>
+						<div class="flex flex-col gap-4">
+							<For each={visibleGroups()}>
 							{(group) => (
 								<div class="border border-line-strong bg-bg">
 									<div class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
@@ -537,10 +521,11 @@ function ServerCard(props: {
 								</div>
 							)}
 						</For>
-					</div>
-					<button type="button" class={`${buttonClass.ghost} mt-3`} disabled={props.busy} onClick={saveTools}>
-						Save tools
-					</button>
+						</div>
+						<button type="button" class={`${buttonClass.ghost} mt-3`} disabled={props.busy} onClick={saveTools}>
+							Save tools
+						</button>
+					</Show>
 				</Show>
 			</div>
 

@@ -21,7 +21,7 @@ import { mintGrantToken } from "../mcp/access";
 import { createEndpoint, type Endpoint } from "../mcp/endpoint";
 import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer } from "../model";
 import { builtinTool } from "../tools/builtin";
-import { catalog, visibleToolNames } from "../tools/catalog";
+import { catalog, groupOf, visibleToolNames } from "../tools/catalog";
 import { discordTool } from "../tools/discord";
 import { githubApi, githubTool, type GitHubApi } from "../tools/github";
 import { googleApi, googleTool } from "../tools/google";
@@ -188,7 +188,9 @@ export class GatewayUser extends DurableObject<Env> {
 			const body = await request.json<{ slug: string }>();
 			const server = await getServerByName(this.ctx.storage, this.secret, body.slug);
 			if (!server) throw new HttpError(404, "no such server");
-			return Response.json({ tools: catalog().filter((tool) => visibleToolNames(server.tools).includes(tool.name)) });
+			const accounts = await listAccounts(this.ctx.storage, this.secret);
+			const allowed = this.allowedFor(server, accounts);
+			return Response.json({ tools: catalog().filter((tool) => allowed.includes(tool.name)) });
 		}
 
 		return Response.json({ error: "not found" }, { status: 404 });
@@ -197,6 +199,26 @@ export class GatewayUser extends DurableObject<Env> {
 	private async servers(): Promise<McpServer[]> {
 		const servers = await listServers(this.ctx.storage, this.secret);
 		return servers.sort((a, b) => a.createdAt - b.createdAt);
+	}
+
+	/**
+	 * The tool names this server can actually run.
+	 *
+	 * A group needs an account of the matching provider to act with, so a group
+	 * that was switched on before its account was removed is not exposed.
+	 */
+	private allowedFor(server: McpServer, accounts: Account[]): string[] {
+		const assigned = new Set(
+			accounts.filter((account) => server.accountIds.includes(account.id)).map((account) => account.provider),
+		);
+		return visibleToolNames(server.tools, catalog()).filter((name) => {
+			const group = groupOf(name);
+			if (!group || group === "builtin") return true;
+			if (group === "discord") return assigned.has("discord");
+			if (group === "github") return assigned.has("github");
+			if (group === "google_calendar") return assigned.has("google");
+			return false;
+		});
 	}
 
 	// --- MCP -------------------------------------------------------------------
@@ -229,7 +251,7 @@ export class GatewayUser extends DurableObject<Env> {
 		const accounts = await listAccounts(this.ctx.storage, this.secret);
 		// A guild link can only ever narrow what the server exposes, so its tool
 		// list is intersected with the server's own.
-		const allowed = visibleToolNames(server.tools, catalog()).filter(
+		const allowed = this.allowedFor(server, accounts).filter(
 			(name) => grantToolNames === undefined || grantToolNames.includes(name),
 		);
 		const signature = `${[...allowed].sort().join(",")}|${[...server.accountIds].sort().join(",")}`;
