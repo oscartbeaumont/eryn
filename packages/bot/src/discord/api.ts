@@ -398,6 +398,27 @@ export function discordRest(token: string) {
 			});
 		},
 
+		/** Acknowledge an interaction without content, so slow work can finish later. */
+		async interactionDefer(interactionId: string, interactionToken: string, ephemeral = true): Promise<void> {
+			await interactionCallback(interactionId, interactionToken, {
+				type: 5,
+				data: { flags: ephemeral ? 64 : 0 },
+			});
+		},
+
+		/** Edit the message a deferred (or already acknowledged) interaction shows. */
+		async interactionEditOriginal(
+			applicationId: string,
+			interactionToken: string,
+			content: string,
+			options: { components?: readonly DiscordComponent[] } = {},
+		): Promise<void> {
+			await request<void>("PATCH", `/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
+				content,
+				...(options.components?.length ? { components: options.components } : {}),
+			});
+		},
+
 		/** Replace the message a component interaction came from. */
 		async interactionUpdate(
 			interactionId: string,

@@ -7,7 +7,7 @@
  * guild's session object, which this file only calls.
  */
 
-import { publicOrigin } from "../config";
+import { CLIENT_ID, publicOrigin } from "../config";
 import { describeError } from "../errors";
 import type { DiscordCommand } from "../discord/api";
 import {
@@ -87,6 +87,13 @@ export interface CommandContext {
 	readonly rest: {
 		interactionReply: (id: string, token: string, content: string, options?: { components?: readonly DiscordComponent[]; ephemeral?: boolean }) => Promise<void>;
 		interactionUpdate: (id: string, token: string, content: string, options?: { components?: readonly DiscordComponent[] }) => Promise<void>;
+		interactionDefer: (id: string, token: string, ephemeral?: boolean) => Promise<void>;
+		interactionEditOriginal: (
+			applicationId: string,
+			token: string,
+			content: string,
+			options?: { components?: readonly DiscordComponent[] },
+		) => Promise<void>;
 		interactionModal: (id: string, token: string, modal: DiscordModal) => Promise<void>;
 	};
 }
@@ -130,16 +137,49 @@ export function erynCommand(): DiscordCommand {
 	};
 }
 
+/**
+ * Interactions that have already been acknowledged.
+ *
+ * A responder can be created more than once for one interaction (a helper hands
+ * off to another), so the "already acknowledged" state has to live outside any
+ * single responder: a second acknowledgement is an error, while an edit is not.
+ */
+const acknowledged = new WeakSet<DiscordInteraction>();
+
 function responder(ctx: CommandContext, interaction: DiscordInteraction) {
+	const edit = (content: string, components?: readonly DiscordComponent[]) =>
+		ctx.rest.interactionEditOriginal(CLIENT_ID, interaction.token, content, {
+			...(components?.length ? { components } : {}),
+		});
 	return {
-		reply: (content: string, components?: readonly DiscordComponent[]) =>
-			ctx.rest.interactionReply(interaction.id, interaction.token, content, {
+		/**
+		 * Acknowledge now, so a slow lookup stays inside Discord's 3-second
+		 * window. A component interaction must acknowledge with an update; a
+		 * command interaction uses a deferred message.
+		 */
+		defer: async () => {
+			if (acknowledged.has(interaction)) return;
+			acknowledged.add(interaction);
+			if (interaction.type === 3) {
+				await ctx.rest.interactionUpdate(interaction.id, interaction.token, "Working…");
+			} else {
+				await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
+			}
+		},
+		reply: (content: string, components?: readonly DiscordComponent[]) => {
+			if (acknowledged.has(interaction)) return edit(content, components);
+			acknowledged.add(interaction);
+			return ctx.rest.interactionReply(interaction.id, interaction.token, content, {
 				...(components?.length ? { components } : {}),
-			}),
-		update: (content: string, components?: readonly DiscordComponent[]) =>
-			ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
+			});
+		},
+		update: (content: string, components?: readonly DiscordComponent[]) => {
+			if (acknowledged.has(interaction)) return edit(content, components);
+			acknowledged.add(interaction);
+			return ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
 				...(components?.length ? { components } : {}),
-			}),
+			});
+		},
 		modal: (modal: DiscordModal) => ctx.rest.interactionModal(interaction.id, interaction.token, modal),
 	};
 }
@@ -261,6 +301,7 @@ async function setupProvider(
 	dmGuildId?: string,
 ): Promise<void> {
 	const answer = responder(ctx, interaction);
+	await answer.defer();
 	const providers = (await session.providers()).filter(
 		(provider) => provider.methods.some((method) => method.supported) || provider.connected,
 	);
@@ -280,6 +321,7 @@ async function setupProvider(
 
 async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, session: SessionClient): Promise<void> {
 	const answer = responder(ctx, interaction);
+	await answer.defer();
 	const models = await session.models();
 	if (!models.length) {
 		await answer.reply("I could not read a model catalogue yet. Connect a provider first with `/eryn setup provider`.");
@@ -422,6 +464,8 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		if (rest.startsWith("oauthcheck:")) {
 			const [, integrationID, attemptID] = rest.split(":");
 			return await guarded(ctx, interaction, "update", async () => {
+				const answer = responder(ctx, interaction);
+				await answer.defer();
 				const result = await session.providerConnect({
 					guildId: dmGuildId,
 					integrationID: integrationID ?? "",
@@ -429,7 +473,7 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 					action: "status",
 				});
 				const status = result.status?.status ?? "pending";
-				await responder(ctx, interaction).update(
+				await answer.update(
 					status === "complete"
 						? `**${integrationID} is connected.** Eryn will use it on the next turn.`
 						: `Sign-in status: **${status}**`,
@@ -461,6 +505,8 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		const attemptID = customId.slice("setup:oauthcheck:".length).split(":").pop() ?? "";
 		const integrationID = customId.slice("setup:oauthcheck:".length).split(":").shift() ?? "";
 		return await guarded(ctx, interaction, "update", async () => {
+			const answer = responder(ctx, interaction);
+			await answer.defer();
 			const result = await session.providerConnect({
 				guildId,
 				integrationID,
@@ -468,7 +514,7 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 				action: "status",
 			});
 			const status = result.status?.status ?? "pending";
-			await responder(ctx, interaction).update(
+			await answer.update(
 				status === "complete"
 					? `**${integrationID} is connected.** Eryn will use it on the next turn.`
 					: `Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}`,
@@ -570,6 +616,7 @@ async function startMethod(
 		await answer.modal(keyModal(integrationID, dmGuildId));
 		return;
 	}
+	await answer.defer();
 	const result = await session.providerConnect({
 		guildId,
 		integrationID,
