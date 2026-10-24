@@ -69,14 +69,14 @@ export default defineConfig({
 			SESSION_SECRET: bindings.secret(),
 
 			// GitHub accounts are connected with an OAuth App sign-in or a personal
-			// access token; both are a user access token. The OAuth app is optional,
-			// so it is a var that defaults to empty rather than a required secret.
-			GITHUB_OAUTH_CLIENT_ID: bindings.text(""),
-			GITHUB_OAUTH_CLIENT_SECRET: bindings.text(""),
+			// access token; both are a user access token. The client id is public; the
+			// secret is a dashboard secret binding.
+			GITHUB_OAUTH_CLIENT_ID: bindings.text("Ov23li72FJNRRw9YbyIh"),
+			GITHUB_OAUTH_CLIENT_SECRET: bindings.secret(),
 
-			// Google Calendar accounts. Optional, for the same reason.
-			GOOGLE_CLIENT_ID: bindings.text(""),
-			GOOGLE_CLIENT_SECRET: bindings.text(""),
+			// Google Calendar accounts.
+			GOOGLE_CLIENT_ID: bindings.text("306342405758-qo1be08n6i27ilpvlbjl6kaq7vma0rh1.apps.googleusercontent.com"),
+			GOOGLE_CLIENT_SECRET: bindings.secret(),
 
 			// Public origin used in links and OAuth callbacks.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
