@@ -75,7 +75,7 @@ export default defineConfig({
 			GITHUB_OAUTH_CLIENT_SECRET: bindings.secret(),
 
 			// Google Calendar accounts.
-			GOOGLE_CLIENT_ID: bindings.text("306342405758-qo1be08n6i27ilpvlbjl6kaq7vma0rh1.apps.googleusercontent.com"),
+			GOOGLE_CLIENT_ID: bindings.text("306342405758-5ig9m9es6gf4m6nqotrf48bd77r4gvtf.apps.googleusercontent.com"),
 			GOOGLE_CLIENT_SECRET: bindings.secret(),
 
 			// Public origin used in links and OAuth callbacks.
