@@ -110,10 +110,7 @@ DISCORD_CLIENT_ID            the application id
 DISCORD_CLIENT_SECRET        the console's sign-in
 ENCRYPTION_KEY               base64url 32-byte key sealing every stored credential
 SESSION_SECRET               signs sessions, OAuth state, and MCP tokens
-GITHUB_APP_ID                the App credential for the GitHub tools (optional)
-GITHUB_APP_PRIVATE_KEY       the App's PEM (optional)
-GITHUB_APP_SLUG              the App's URL slug, for its install link
-GITHUB_OAUTH_CLIENT_ID       the OAuth app, the other way to connect GitHub
+GITHUB_OAUTH_CLIENT_ID       the OAuth App used to connect GitHub accounts
 GITHUB_OAUTH_CLIENT_SECRET
 GOOGLE_CLIENT_ID             for Google Calendar accounts
 GOOGLE_CLIENT_SECRET

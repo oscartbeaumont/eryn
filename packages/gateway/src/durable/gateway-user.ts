@@ -23,7 +23,7 @@ import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer } from ".
 import { builtinTool } from "../tools/builtin";
 import { catalog, visibleToolNames } from "../tools/catalog";
 import { discordTool } from "../tools/discord";
-import { credentialFor, githubApi, githubTool, type GitHubApi } from "../tools/github";
+import { githubApi, githubTool, type GitHubApi } from "../tools/github";
 import { googleApi, googleTool } from "../tools/google";
 import {
 	deleteAccount,
@@ -331,15 +331,12 @@ export class GatewayUser extends DurableObject<Env> {
 	private async githubFor(assigned: Account[]): Promise<GitHubApi | undefined> {
 		const account = assigned.find((entry) => entry.provider === "github");
 		if (!account) return undefined;
-		const appId = this.env.GITHUB_APP_ID?.trim();
-		const privateKey = this.env.GITHUB_APP_PRIVATE_KEY?.trim();
-		const credential = credentialFor(
-			{ kind: account.credential.installationId ? "app" : "pat", token: account.credential.token, installationId: account.credential.installationId },
-			appId && privateKey ? { appId, privateKey, installationId: account.credential.installationId ?? "" } : undefined,
-		);
-		if (!credential) return undefined;
-		const signature = credential.kind === "pat" ? `pat:${credential.token}` : `app:${credential.installationId}`;
-		if (this.github?.signature !== signature) this.github = { signature, api: githubApi(credential) };
+		// GitHub accounts are connected with an OAuth App sign-in or a personal
+		// token; both are a user access token, which the tools present as a bearer.
+		const token = account.credential.token;
+		if (!token) return undefined;
+		const signature = `pat:${token}`;
+		if (this.github?.signature !== signature) this.github = { signature, api: githubApi({ kind: "pat", token }) };
 		return this.github.api;
 	}
 }

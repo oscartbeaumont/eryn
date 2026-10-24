@@ -13,11 +13,8 @@ DISCORD_CLIENT_SECRET=
 ENCRYPTION_KEY=
 SESSION_SECRET=
 
-# Optional. The App gives the GitHub tools an "act as the app" credential; the
-# OAuth app is the other way to connect a GitHub account.
-GITHUB_APP_ID=
-GITHUB_APP_PRIVATE_KEY=
-GITHUB_APP_SLUG=
+# Optional. The OAuth App used to connect GitHub accounts. A personal access
+# token works without it.
 GITHUB_OAUTH_CLIENT_ID=
 GITHUB_OAUTH_CLIENT_SECRET=
 

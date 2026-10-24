@@ -68,12 +68,9 @@ export default defineConfig({
 			// Signs sessions, OAuth state, and MCP tokens.
 			SESSION_SECRET: bindings.secret(),
 
-			// GitHub: the App powers the app-credential tools; the OAuth app is the
-			// other way to connect a GitHub account. The OAuth app is optional, so it
-			// is a var that defaults to empty rather than a required secret.
-			GITHUB_APP_ID: bindings.secret(),
-			GITHUB_APP_PRIVATE_KEY: bindings.secret(),
-			GITHUB_APP_SLUG: bindings.text(""),
+			// GitHub accounts are connected with an OAuth App sign-in or a personal
+			// access token; both are a user access token. The OAuth app is optional,
+			// so it is a var that defaults to empty rather than a required secret.
 			GITHUB_OAUTH_CLIENT_ID: bindings.text(""),
 			GITHUB_OAUTH_CLIENT_SECRET: bindings.text(""),
 
