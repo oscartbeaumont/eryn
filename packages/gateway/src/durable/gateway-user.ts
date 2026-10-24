@@ -210,11 +210,13 @@ export class GatewayUser extends DurableObject<Env> {
 		// A guild token is only as good as the grant behind it, so a revoked link
 		// stops working on the next call rather than at token expiry.
 		const guild = request.headers.get("x-eryn-guild");
+		let grantToolNames: readonly string[] | undefined;
 		if (guild) {
 			const grant = await getGrant(this.ctx.storage, this.secret, slug, guild);
 			if (!grant) {
 				return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "This guild's link was revoked." } }, { status: 403 });
 			}
+			grantToolNames = grant.toolNames;
 		}
 
 		const events = await this.eventsRequest(request, slug);
@@ -225,9 +227,16 @@ export class GatewayUser extends DurableObject<Env> {
 		}
 
 		const accounts = await listAccounts(this.ctx.storage, this.secret);
-		const allowed = visibleToolNames(server.tools, catalog());
+		// A guild link can only ever narrow what the server exposes, so its tool
+		// list is intersected with the server's own.
+		const allowed = visibleToolNames(server.tools, catalog()).filter(
+			(name) => grantToolNames === undefined || grantToolNames.includes(name),
+		);
 		const signature = `${[...allowed].sort().join(",")}|${[...server.accountIds].sort().join(",")}`;
-		let entry = this.endpoints.get(slug);
+		// One endpoint per (server, guild): two guilds can link the same server with
+		// different restrictions, and each must see only its own tool set.
+		const cacheKey = `${slug}|${guild ?? ""}`;
+		let entry = this.endpoints.get(cacheKey);
 		if (!entry || entry.signature !== signature) {
 			const tools = catalog().filter((tool) => allowed.includes(tool.name));
 			const endpoint = await createEndpoint({
@@ -237,7 +246,7 @@ export class GatewayUser extends DurableObject<Env> {
 				invoke: (name, args) => this.invoke(server, accounts, name, args),
 			});
 			entry = { endpoint, signature };
-			this.endpoints.set(slug, entry);
+			this.endpoints.set(cacheKey, entry);
 		}
 		return await entry.endpoint.handler(request);
 	}
