@@ -70,8 +70,10 @@ export default {
 		if (fromBot) return fromBot;
 
 		if (new URL(request.url).pathname === "/health") {
-			ctx.waitUntil(bot.wake(env).catch(() => undefined));
-			return Response.json({ ok: true, service: "eryn" });
+			// Wake the bot and report whether its gateway socket is up, so a deploy
+			// that leaves it offline is visible from one request.
+			const botState = await bot.wake(env).catch(() => undefined);
+			return Response.json({ ok: true, service: "eryn", bot: botState ?? null });
 		}
 
 		return new Response("Not found", { status: 404 });
