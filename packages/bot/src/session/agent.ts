@@ -410,15 +410,13 @@ class GuildAgentImpl implements GuildAgentShape {
 			this.abort?.abort();
 			this.abort = new AbortController();
 
-			// The workspace and Discord plugins use the promise host API. The
-			// MCP-events plugin is written against the effect host API (its tool
-			// schemas and session writes are Effect Schema), but this host's public
-			// `create()` only advertises promise plugins, so the effect plugin is
-			// widened at this one seam.
+			// All three are promise-API plugins, which is what this host accepts. The
+			// MCP-events plugin parses upstream envelopes with Effect Schema, but its
+			// lifecycle is the promise plugin API.
 			const plugins: PromisePlugin.Plugin[] = [
 				workspacePlugin(this.files),
 				discordPlugin(),
-				mcpeventsPlugin as unknown as PromisePlugin.Plugin,
+				mcpeventsPlugin,
 			];
 
 			const promise = OpenCodeWorkerd.create({
