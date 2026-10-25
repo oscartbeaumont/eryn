@@ -514,26 +514,42 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private async listModels(config: HostConfig): Promise<ModelOption[]> {
 		const host = await this.hostFor(config);
-		if (!this.modelCache) {
-			const connected = await this.connectedProviders(host).catch(() => new Set<string>());
-			const listed = await host.model.list({ location: { directory: LOCATION } });
-			this.modelCache = listed.data
-				.filter((entry) => entry.status !== "deprecated")
-				.map((entry) => ({
-					id: `${entry.providerID}/${entry.id}`,
-					name: entry.name,
-					provider: entry.providerID,
-					status: entry.status,
-					enabled: entry.enabled,
-					connected: connected.has(entry.providerID),
-				}))
-				.sort(
-					(a, b) =>
-						Number(b.connected) - Number(a.connected) ||
-						Number(b.enabled) - Number(a.enabled) ||
-						a.name.localeCompare(b.name),
-				);
+		// An empty catalogue is not an answer worth caching: a host built just
+		// after a credential is connected can snapshot the provider registry before
+		// it sees that credential, and caching that would make `/eryn setup model`
+		// say "connect a provider" forever.
+		if (this.modelCache?.length) return this.modelCache;
+
+		const connected = await this.connectedProviders(host).catch(() => new Set<string>());
+		let listed = await host.model.list({ location: { directory: LOCATION } });
+		if (!listed.data.length) {
+			// Reloading the location re-reads credentials and providers; retry once.
+			await host.location.reload().catch(() => undefined);
+			listed = await host.model.list({ location: { directory: LOCATION } }).catch(() => listed);
 		}
+		if (!listed.data.length) {
+			// As a last resort ask for the host's default; a single model is still a
+			// catalogue the picker can offer.
+			const fallback = await host.model.default({ location: { directory: LOCATION } }).catch(() => undefined);
+			if (fallback?.data) listed = { ...listed, data: [fallback.data] };
+		}
+
+		this.modelCache = listed.data
+			.filter((entry) => entry.status !== "deprecated")
+			.map((entry) => ({
+				id: `${entry.providerID}/${entry.id}`,
+				name: entry.name,
+				provider: entry.providerID,
+				status: entry.status,
+				enabled: entry.enabled,
+				connected: connected.has(entry.providerID),
+			}))
+			.sort(
+				(a, b) =>
+					Number(b.connected) - Number(a.connected) ||
+					Number(b.enabled) - Number(a.enabled) ||
+					a.name.localeCompare(b.name),
+			);
 		return this.modelCache;
 	}
 

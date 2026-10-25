@@ -378,7 +378,11 @@ async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, 
 	await answer.defer();
 	const models = await session.models();
 	if (!models.length) {
-		await answer.reply("I could not read a model catalogue yet. Connect a provider first with `/eryn setup provider`.");
+		const status = await session.config().catch(() => undefined);
+		const connected = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";
+		await answer.reply(
+			`I could not read a model catalogue yet. Connected providers: **${connected}**. If that looks right, try again in a moment; otherwise reconnect the provider with \`/eryn setup provider\`.`,
+		);
 		return;
 	}
 	const options: DiscordSelectOption[] = models.slice(0, MAX_SELECT_OPTIONS - 1).map((model) => ({
