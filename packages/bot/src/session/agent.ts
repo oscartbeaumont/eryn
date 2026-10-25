@@ -323,6 +323,7 @@ function readOptions(value: unknown): ProviderField["options"] {
 export interface GuildAgentShape {
 	integrations(config: HostConfig): Promise<IntegrationOption[]>;
 	models(config: HostConfig): Promise<ModelOption[]>;
+	resolveModel(config: HostConfig): Promise<string>;
 	connectKey(config: HostConfig, integrationID: string, key: string): Promise<void>;
 	oauthConnect(
 		config: HostConfig,
@@ -492,6 +493,25 @@ class GuildAgentImpl implements GuildAgentShape {
 		return await this.listModels(config);
 	}
 
+	/**
+	 * The model a turn should use.
+	 *
+	 * A guild can connect a provider while the stored model still names another
+	 * one — the default names `opencode-go`, but a guild may have connected
+	 * `opencode`. That model cannot run, and the turn would produce nothing, so
+	 * fall back to a model from a provider that is actually connected.
+	 */
+	async resolveModel(config: HostConfig): Promise<string> {
+		const provider = config.model.split("/")[0] ?? "";
+		if (config.connections.some((connection) => connection.integrationID === provider)) return config.model;
+		const models = await this.listModels(config).catch(() => [] as ModelOption[]);
+		const fallback =
+			models.find((entry) => entry.connected && entry.enabled) ?? models.find((entry) => entry.connected);
+		if (!fallback) return config.model;
+		log("session", `model ${config.model} is not available; using ${fallback.id}`);
+		return fallback.id;
+	}
+
 	private async listModels(config: HostConfig): Promise<ModelOption[]> {
 		const host = await this.hostFor(config);
 		if (!this.modelCache) {
@@ -630,7 +650,11 @@ class GuildAgentImpl implements GuildAgentShape {
 				log("session", `thread ${request.threadId} was deleted, so the reply was dropped`);
 			} else {
 				const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
-				const body = turn.error ? failureNote(turn.error) : (final ?? renderTurn(turn));
+				const text = final ?? renderTurn(turn);
+				const body = turn.error
+					? failureNote(turn.error)
+					: text.trim() ||
+						`The model \`${config.model}\` returned no text. If it is not connected, pick one with \`/eryn setup model\`.`;
 				const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
 				await stream.finish(body, suffix);
 			}

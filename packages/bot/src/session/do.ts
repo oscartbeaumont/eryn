@@ -112,6 +112,28 @@ export class BotSession extends DurableObject<Env> {
 				return { connections, model: settings.model, links };
 			};
 
+			/**
+			 * Point the guild at a model it can actually run.
+			 *
+			 * Connecting a provider does not change the stored model, and the default
+			 * names `opencode-go` even when a guild connects `opencode`. Without this
+			 * the first turn runs a model whose provider has no credential and
+			 * produces nothing.
+			 */
+			const reconcileModel = async (config: HostConfig): Promise<HostConfig> => {
+				try {
+					const model = await agent.resolveModel(config);
+					if (model === config.model) return config;
+					const settings = await store.settings();
+					await store.putSettings({ ...settings, model, updatedAt: Date.now() });
+					log("session", `using ${model} instead of the unavailable ${config.model}`);
+					return { ...config, model };
+				} catch (error) {
+					log("session", `could not reconcile the model: ${describeError(error)}`);
+					return config;
+				}
+			};
+
 			if (request.method === "POST" && url.pathname === "/config") {
 				const body = yield* readBody(GuildRefSchema, request);
 				if (body instanceof Response) return body;
@@ -162,6 +184,7 @@ export class BotSession extends DurableObject<Env> {
 					if (body.key !== undefined && body.action === undefined) {
 						await agent.connectKey(config, body.integrationID, body.key);
 						await store.putProvider({ integrationID: body.integrationID, method: body.methodID ?? "key", key: body.key });
+						await reconcileModel(await loadConfig());
 						return json({ ok: true });
 					}
 					const action = body.action ?? "start";
@@ -197,6 +220,7 @@ export class BotSession extends DurableObject<Env> {
 						if (status.status === "complete") {
 							await store.putProvider({ integrationID: body.integrationID, method: "oauth", key: "" });
 							await store.clearPendingOAuth();
+							await reconcileModel(await loadConfig());
 						}
 						return json({ status });
 					}
@@ -204,6 +228,7 @@ export class BotSession extends DurableObject<Env> {
 						await agent.oauthComplete(config, body.integrationID, attemptID, body.code);
 						await store.putProvider({ integrationID: body.integrationID, method: "oauth", key: "" });
 						await store.clearPendingOAuth();
+						await reconcileModel(await loadConfig());
 						return json({ ok: true });
 					}
 					await agent.oauthCancel(config, body.integrationID, attemptID);
@@ -289,7 +314,7 @@ export class BotSession extends DurableObject<Env> {
 					if (config.connections.length === 0) {
 						return json({ ok: false, error: "no provider is connected" }, 400);
 					}
-					await agent.prompt(body, config);
+					await agent.prompt(body, await reconcileModel(config));
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, error: error.message }, 500))));
 			}
