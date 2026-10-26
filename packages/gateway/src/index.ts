@@ -15,8 +15,8 @@ import { DEFAULT_ORIGIN, MCP_PATH } from "./config";
 import { protectionMetadata, gatewayRoutes } from "./api";
 import { AS_METADATA_PATH, bearerToken, challenge, verifyAccessToken } from "./mcp/oauth";
 
-export { GatewayUserV2 } from "./durable/gateway-user";
-export { GatewayDiscordV2 } from "./durable/gateway-discord";
+export { GatewayUserV3 } from "./durable/gateway-user";
+export { GatewayDiscordV3 } from "./durable/gateway-discord";
 
 const router = gatewayRoutes();
 

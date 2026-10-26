@@ -51,11 +51,11 @@ export default defineConfig({
 		env: {
 			// The gateway: one object per Eryn user, plus the singleton events hub
 			// that owns the lazily-opened Discord socket for MCP events.
-			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUserV2" }),
-			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscordV2" }),
+			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUserV3" }),
+			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscordV3" }),
 			// The bot: the singleton Discord socket, and one session per guild.
-			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV2" }),
-			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV2" }),
+			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV3" }),
+			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV3" }),
 
 			// Discord: the bot token powers the socket and the Discord tools, and the
 			// client id/secret drive the console's sign-in.
@@ -102,17 +102,17 @@ export default defineConfig({
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
-			GatewayUserV2: exports.durableObject({ storage: "sqlite" }),
-			GatewayDiscordV2: exports.durableObject({ storage: "sqlite" }),
-			BotGatewayV2: exports.durableObject({ storage: "sqlite" }),
-			BotSessionV2: exports.durableObject({ storage: "sqlite" }),
+			GatewayUserV3: exports.durableObject({ storage: "sqlite" }),
+			GatewayDiscordV3: exports.durableObject({ storage: "sqlite" }),
+			BotGatewayV3: exports.durableObject({ storage: "sqlite" }),
+			BotSessionV3: exports.durableObject({ storage: "sqlite" }),
 			// A deploy does not restart a live Durable Object, so the classes were
-			// renamed once: the `renamed` tombstones move every object's storage to
-			// the new classes, which start on this deploy's code.
-			GatewayUser: exports.durableObject({ state: "renamed", renamedTo: "GatewayUserV2" }),
-			GatewayDiscord: exports.durableObject({ state: "renamed", renamedTo: "GatewayDiscordV2" }),
-			BotGateway: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV2" }),
-			BotSession: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV2" }),
+			// renamed: the `renamed` tombstones move every object's storage to the
+			// new classes, which start on this deploy's code.
+			GatewayUserV2: exports.durableObject({ state: "renamed", renamedTo: "GatewayUserV3" }),
+			GatewayDiscordV2: exports.durableObject({ state: "renamed", renamedTo: "GatewayDiscordV3" }),
+			BotGatewayV2: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV3" }),
+			BotSessionV2: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV3" }),
 			// The redesign was a clean break: these four namespaces held the old
 			// single-Worker layout, and their storage is intentionally abandoned.
 			ErynGateway: exports.durableObject({ state: "deleted" }),

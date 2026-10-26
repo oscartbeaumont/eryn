@@ -58,7 +58,7 @@ interface CacheEntry {
 	signature: string;
 }
 
-export class GatewayUserV2 extends DurableObject<Env> {
+export class GatewayUserV3 extends DurableObject<Env> {
 	private readonly userId: string;
 	private readonly rest: DiscordRest;
 	private readonly endpoints = new Map<string, CacheEntry>();

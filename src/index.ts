@@ -12,8 +12,8 @@ import { env } from "cloudflare:workers";
 import * as bot from "@oscartbeaumont/eryn-bot";
 import * as gateway from "@oscartbeaumont/eryn-gateway";
 
-export { GatewayDiscordV2, GatewayUserV2 } from "@oscartbeaumont/eryn-gateway";
-export { BotGatewayV2, BotSessionV2 } from "@oscartbeaumont/eryn-bot";
+export { GatewayDiscordV3, GatewayUserV3 } from "@oscartbeaumont/eryn-gateway";
+export { BotGatewayV3, BotSessionV3 } from "@oscartbeaumont/eryn-bot";
 
 const POSTHOG_DEFAULT_INGEST = "https://us.i.posthog.com";
 const POSTHOG_DEFAULT_ASSETS = "https://us-assets.i.posthog.com";
