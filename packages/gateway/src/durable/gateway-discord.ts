@@ -55,17 +55,36 @@ export class GatewayDiscordV3 extends DurableObject<Env> {
 		});
 	}
 
-	override async fetch(request: Request): Promise<Response> {
-		// A live object keeps the code it started with; restart it once a deploy
-		// has moved on.
+	/**
+	 * Restart this object when a deploy has moved on.
+	 *
+	 * A deploy does not restart a live Durable Object: it keeps running the code
+	 * it started with. Rather than abort the request that notices the change,
+	 * schedule an alarm a moment out; the alarm restarts the object on the new
+	 * code once the request has finished.
+	 */
+	private async ensureCurrentVersion(): Promise<void> {
 		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
-		if (version) {
-			const stored = await this.ctx.storage.get<string>("deploy:version");
-			if (stored !== version) {
-				await this.ctx.storage.put("deploy:version", version);
-				if (stored !== undefined) this.ctx.abort();
-			}
+		if (!version) return;
+		const stored = await this.ctx.storage.get<string>("deploy:version");
+		if (stored === version) return;
+		await this.ctx.storage.put("deploy:version", version);
+		// A first run has no stored version; only a change needs a restart.
+		if (stored !== undefined) {
+			await this.ctx.storage.put("deploy:restart", true);
+			await this.ctx.storage.setAlarm(Date.now() + 1_000);
 		}
+	}
+
+	/** Abort into the new code if a deploy happened while this object was live. */
+	async alarm(): Promise<void> {
+		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return;
+		await this.ctx.storage.delete("deploy:restart");
+		this.ctx.abort();
+	}
+
+	override async fetch(request: Request): Promise<Response> {
+		await this.ensureCurrentVersion();
 		const path = new URL(request.url).pathname;
 		if (request.method === "POST" && path === "/events/list") {
 			return Response.json({ events: descriptors(true) });

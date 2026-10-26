@@ -18,9 +18,11 @@ export async function handle(_request: Request): Promise<Response | undefined> {
 }
 
 /** Poke the singleton gateway object so it connects and arms its alarm. */
-export async function wake(env: Env): Promise<{ connected?: boolean } | undefined> {
+export async function wake(env: Env): Promise<{ connected?: boolean; deploy?: string | null } | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
 	const response = await stub.fetch("https://bot.internal/wake");
 	if (!response.ok) return undefined;
-	return (await response.json().catch(() => undefined)) as { connected?: boolean } | undefined;
+	return (await response.json().catch(() => undefined)) as
+		| { connected?: boolean; deploy?: string | null }
+		| undefined;
 }

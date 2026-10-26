@@ -69,6 +69,8 @@ function readBody<S extends Schema.ConstraintDecoder<unknown>>(
 export class BotSessionV3 extends DurableObject<Env> {
 	private readonly guildId: string;
 	private readonly runtime: ManagedRuntime.ManagedRuntime<GuildStore | GuildAgent | Workspace | DiscordApi, never>;
+	/** Requests currently running, so a deploy restart does not cut a turn in half. */
+	private inFlight = 0;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -89,22 +91,45 @@ export class BotSessionV3 extends DurableObject<Env> {
 	}
 
 	async fetch(request: Request): Promise<Response> {
-		// A live object keeps the code it started with; restart it once a deploy
-		// has moved on so the fix in the new code is what handles the next request.
-		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
-		if (version) {
-			const stored = await this.ctx.storage.get<string>("deploy:version");
-			if (stored !== version) {
-				await this.ctx.storage.put("deploy:version", version);
-				if (stored !== undefined) this.ctx.abort();
-			}
-		}
+		await this.ensureCurrentVersion();
+		this.inFlight += 1;
 		try {
 			return await this.runtime.runPromise(this.route(request));
 		} catch (error) {
 			log("session", `internal route failed: ${describeError(error)}`);
 			return json({ error: describeError(error) }, 500);
+		} finally {
+			this.inFlight -= 1;
 		}
+	}
+
+	/**
+	 * Restart this object when a deploy has moved on, once the current request is
+	 * done. A live object keeps the code it started with, so a fix is invisible
+	 * until it restarts.
+	 */
+	private async ensureCurrentVersion(): Promise<void> {
+		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+		if (!version) return;
+		const stored = await this.ctx.storage.get<string>("deploy:version");
+		if (stored === version) return;
+		await this.ctx.storage.put("deploy:version", version);
+		if (stored !== undefined) {
+			await this.ctx.storage.put("deploy:restart", true);
+			await this.ctx.storage.setAlarm(Date.now() + 1_000);
+		}
+	}
+
+	async alarm(): Promise<void> {
+		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return;
+		if (this.inFlight > 0) {
+			// A turn is still running. Restarting now would drop the reply, so wait
+			// for it to finish and check again.
+			await this.ctx.storage.setAlarm(Date.now() + 5_000);
+			return;
+		}
+		await this.ctx.storage.delete("deploy:restart");
+		this.ctx.abort();
 	}
 
 	private route(request: Request): Effect.Effect<Response, never, GuildStore | GuildAgent> {

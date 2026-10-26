@@ -94,7 +94,7 @@ export class BotGatewayV3 extends DurableObject<Env> {
 
 	/** Keeps the gateway alive and arms the next wake-up. */
 	async alarm(): Promise<void> {
-		await this.ensureCurrentVersion();
+		if (await this.restartIfDeployed()) return;
 		await this.keepAlive();
 	}
 
@@ -102,9 +102,9 @@ export class BotGatewayV3 extends DurableObject<Env> {
 	 * Restart this object when a deploy has moved on.
 	 *
 	 * A deploy does not restart a live Durable Object: it keeps running the code
-	 * it started with, which is why a fix can appear not to have shipped. The
-	 * first run stores the version; a later change aborts once, and the next
-	 * request starts the object on the current code.
+	 * it started with. Rather than abort the request that notices the change,
+	 * schedule an alarm a moment out; the alarm restarts the object on the new
+	 * code once the request has finished.
 	 */
 	private async ensureCurrentVersion(): Promise<void> {
 		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
@@ -112,7 +112,23 @@ export class BotGatewayV3 extends DurableObject<Env> {
 		const stored = await this.ctx.storage.get<string>("deploy:version");
 		if (stored === version) return;
 		await this.ctx.storage.put("deploy:version", version);
-		if (stored !== undefined) this.ctx.abort();
+		// A first run has no stored version; only a change needs a restart.
+		if (stored !== undefined) {
+			await this.ctx.storage.put("deploy:restart", true);
+			await this.ctx.storage.setAlarm(Date.now() + 1_000);
+		}
+	}
+
+	/** Abort into the new code if a deploy happened while this object was live. */
+	private async restartIfDeployed(): Promise<boolean> {
+		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return false;
+		await this.ctx.storage.delete("deploy:restart");
+		// Re-arm before aborting: the abort drops this instance, and the alarm
+		// brings the replacement straight back up so it reconnects the socket
+		// instead of waiting for the next scheduled wake.
+		await this.ctx.storage.setAlarm(Date.now() + 1_000);
+		this.ctx.abort();
+		return true;
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -122,7 +138,10 @@ export class BotGatewayV3 extends DurableObject<Env> {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle
 			// that reconnects the socket before Cloudflare's 15 minute cap.
 			await this.keepAlive();
-			return json({ ok: true, connected: this.socket.open });
+			// The deploy this object has recorded: if it lags the Worker's own
+			// version the object is still running older code.
+			const deploy = await this.ctx.storage.get<string>("deploy:version");
+			return json({ ok: true, connected: this.socket.open, deploy: deploy ?? null });
 		}
 		return json({ error: "not found" }, 404);
 	}

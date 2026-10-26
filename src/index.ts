@@ -71,9 +71,11 @@ export default {
 
 		if (new URL(request.url).pathname === "/health") {
 			// Wake the bot and report whether its gateway socket is up, so a deploy
-			// that leaves it offline is visible from one request.
+			// that leaves it offline is visible from one request. The deploy id says
+			// which code is actually serving: a Durable Object keeps the code it
+			// started with until it restarts.
 			const botState = await bot.wake(env).catch(() => undefined);
-			return Response.json({ ok: true, service: "eryn", bot: botState ?? null });
+			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
 		}
 
 		return new Response("Not found", { status: 404 });
