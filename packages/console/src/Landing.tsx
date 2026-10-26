@@ -1,6 +1,6 @@
 import { For } from "solid-js";
 import { installUrl } from "./discord";
-import { A, buttonClass, Footer, Header, Kicker, SessionButton } from "./ui";
+import { buttonClass, Footer, Header, Kicker, SessionButton } from "./ui";
 
 const features = [
 	{
@@ -44,9 +44,6 @@ export default function Landing() {
 								Add to Discord
 							</a>
 							<SessionButton />
-							<A href="/console" class={buttonClass.ghost}>
-								Open the console
-							</A>
 						</div>
 					</div>
 				</section>
