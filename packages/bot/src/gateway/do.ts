@@ -112,11 +112,15 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
-		if (stored === version) return;
-		await this.ctx.storage.put("deploy:version", version);
-		// A first run has no stored version; only a change needs a restart.
-		if (stored !== undefined) {
-			await this.ctx.storage.put("deploy:restart", true);
+		if (stored !== version) {
+			await this.ctx.storage.put("deploy:version", version);
+			// A first run has no stored version; only a change needs a restart.
+			if (stored !== undefined) await this.ctx.storage.put("deploy:restart", true);
+		}
+		// A pending restart must own an alarm. One can outlive the alarm that was
+		// meant to spend it (a keepalive used to replace it), and without this the
+		// flag would be reported forever and the old code would never reset.
+		if (await this.ctx.storage.get<boolean>("deploy:restart")) {
 			await this.ctx.storage.setAlarm(Date.now() + 1_000);
 		}
 	}

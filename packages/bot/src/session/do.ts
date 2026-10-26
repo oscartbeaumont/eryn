@@ -120,10 +120,12 @@ export class BotSessionV4 extends DurableObject<Env> {
 		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
-		if (stored === version) return;
-		await this.ctx.storage.put("deploy:version", version);
-		if (stored !== undefined) {
-			await this.ctx.storage.put("deploy:restart", true);
+		if (stored !== version) {
+			await this.ctx.storage.put("deploy:version", version);
+			if (stored !== undefined) await this.ctx.storage.put("deploy:restart", true);
+		}
+		// A pending restart must own an alarm, even if one was lost.
+		if (await this.ctx.storage.get<boolean>("deploy:restart")) {
 			await this.ctx.storage.setAlarm(Date.now() + 1_000);
 		}
 	}
