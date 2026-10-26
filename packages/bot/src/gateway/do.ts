@@ -150,17 +150,20 @@ export class BotGatewayV4 extends DurableObject<Env> {
 	}
 
 	async fetch(request: Request): Promise<Response> {
-		await this.ensureCurrentVersion(request);
 		const { pathname } = new URL(request.url);
 		if (pathname === WAKE_PATH) {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle
 			// that reconnects the socket before Cloudflare's 15 minute cap.
 			await this.keepAlive();
-			// The deploy this object is *running*, not the one it last recorded:
-			// a live object keeps its old code until it restarts, so a comparison
-			// against the Worker's version is what proves the restart happened.
-			return json({ ok: true, connected: this.socket.open, deploy: currentDeploy(this.env) ?? null });
+			// Arm the restart *after* keepAlive: the keepalive alarm is the long
+			// one, and setting it last would replace the one-second restart alarm.
+			await this.ensureCurrentVersion(request);
+			// The deploy this object has recorded: the object keeps running its
+			// old code until it restarts, so a wake is what records the change.
+			const deploy = await this.ctx.storage.get<string>("deploy:version");
+			return json({ ok: true, connected: this.socket.open, deploy: deploy ?? null });
 		}
+		await this.ensureCurrentVersion(request);
 		return json({ error: "not found" }, 404);
 	}
 
@@ -191,7 +194,11 @@ export class BotGatewayV4 extends DurableObject<Env> {
 
 	private async keepAlive(): Promise<void> {
 		if (!this.token || this.socket.fatallyClosed) return;
-		await this.ctx.storage.setAlarm(Date.now() + this.keepAliveMs);
+		// A pending restart owns the alarm; replacing it with the keepalive would
+		// postpone the restart for a whole cycle.
+		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) {
+			await this.ctx.storage.setAlarm(Date.now() + this.keepAliveMs);
+		}
 		await this.ensure();
 		if (!this.socket.open) this.socket.ensure();
 		else if (this.socket.stale) {
