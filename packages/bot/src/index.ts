@@ -41,8 +41,15 @@ export async function wake(env: Env): Promise<{ connected?: boolean; deploy?: st
 
 	let state = await call().catch(() => undefined);
 	if (state?.restart) {
-		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		// The object resets into the new deploy a second from now. Poke it again
+		// once that has happened; the replacement has no socket yet, so give the
+		// Discord handshake a moment too.
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
 		state = (await call().catch(() => undefined)) ?? state;
+		if (!state.connected) {
+			await new Promise((resolve) => setTimeout(resolve, 1_500));
+			state = (await call().catch(() => undefined)) ?? state;
+		}
 	}
 	if (!state) return undefined;
 	return { connected: state.connected, deploy: state.deploy ?? null };

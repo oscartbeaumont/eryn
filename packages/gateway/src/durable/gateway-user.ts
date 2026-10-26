@@ -65,6 +65,8 @@ export class GatewayUserV4 extends DurableObject<Env> {
 	private github: { signature: string; api: GitHubApi } | undefined;
 	/** Requests currently running, so a deploy restart does not cut a tool call short. */
 	private inFlight = 0;
+	/** Whether this instance has seen a newer deploy; see `alarm`. */
+	private restartPending = false;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -93,27 +95,24 @@ export class GatewayUserV4 extends DurableObject<Env> {
 		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
-		if (stored !== version) {
-			await this.ctx.storage.put("deploy:version", version);
-			// A first run has no stored version; only a change needs a restart.
-			if (stored !== undefined) await this.ctx.storage.put("deploy:restart", true);
-		}
-		// A pending restart must own an alarm, even if one was lost.
-		if (await this.ctx.storage.get<boolean>("deploy:restart")) {
-			await this.ctx.storage.setAlarm(Date.now() + 1_000);
-		}
+		if (stored === version) return;
+		await this.ctx.storage.put("deploy:version", version);
+		// A first run has no stored version; only a change needs a restart.
+		if (stored === undefined) return;
+		this.restartPending = true;
+		await this.ctx.storage.setAlarm(Date.now() + 1_000);
 	}
 
 	/** Abort into the new code if a deploy happened while this object was live. */
 	async alarm(): Promise<void> {
-		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return;
+		// The signal is in memory: an abort discards storage writes, so a
+		// persisted marker would survive the restart and loop.
+		if (!this.restartPending) return;
 		if (this.inFlight > 0) {
 			// A request is still running. Restart once it has finished.
 			await this.ctx.storage.setAlarm(Date.now() + 5_000);
 			return;
 		}
-		await this.ctx.storage.delete("deploy:restart");
-		// An interrupted alarm retries by default; this restart is deliberate.
 		this.ctx.abort("deploy changed", { retryAlarm: false });
 	}
 

@@ -123,11 +123,12 @@ deploy. So the Worker sends its deploy id to every object it calls, and an
 object that sees a new one schedules a restart (an alarm a second out) instead
 of failing the request. A turn or tool call in flight finishes first.
 
-The restart clears the marker, arms the wake-up, then aborts the object into the
-new code. Alarms interrupted by `abort()` retry by default, so the abort passes
-`{ retryAlarm: false }`; without it a restart turns into an exponential retry
-chain with the bot offline. The wake-up must also be armed after the keepalive,
-or the long keepalive alarm replaces it and the restart never runs.
+The restart is signalled in memory and armed as an alarm; the alarm aborts with
+`{ retryAlarm: false }`, since an interrupted alarm otherwise retries in a
+backoff chain with the bot offline. The signal must not be persisted: an abort
+discards the event's storage writes, so a stored marker survives the restart
+and makes every replacement instance restart again. The keepalive alarm is
+armed after the restart alarm, never over it.
 
 That makes a deploy take effect within a second or two, with no renames:
 

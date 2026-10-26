@@ -67,6 +67,12 @@ export class BotGatewayV4 extends DurableObject<Env> {
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
+	/**
+	 * Whether this instance has seen a newer deploy. Deliberately not persisted:
+	 * an abort discards storage writes, so a marker would outlive the restart and
+	 * restart every replacement instance.
+	 */
+	private restartPending = false;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -95,7 +101,14 @@ export class BotGatewayV4 extends DurableObject<Env> {
 
 	/** Keeps the gateway alive and arms the next wake-up. */
 	async alarm(): Promise<void> {
-		if (await this.restartIfDeployed()) return;
+		// A deploy moved on while this instance was alive: reset into the new
+		// code. The signal is in memory on purpose — the abort discards the
+		// event's storage writes, so a persisted marker would survive the restart
+		// and make every new instance restart again.
+		if (this.restartPending) {
+			this.ctx.abort("deploy changed", { retryAlarm: false });
+			return;
+		}
 		await this.keepAlive();
 	}
 
@@ -112,38 +125,12 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
-		if (stored !== version) {
-			await this.ctx.storage.put("deploy:version", version);
-			// A first run has no stored version; only a change needs a restart.
-			if (stored !== undefined) await this.ctx.storage.put("deploy:restart", true);
-		}
-		// A pending restart must own an alarm. One can outlive the alarm that was
-		// meant to spend it (a keepalive used to replace it), and without this the
-		// flag would be reported forever and the old code would never reset.
-		if (await this.ctx.storage.get<boolean>("deploy:restart")) {
-			await this.ctx.storage.setAlarm(Date.now() + 1_000);
-		}
-	}
-
-	/**
-	 * Restart this object when a deploy has moved on.
-	 *
-	 * A live object keeps the code it started with, so the caller says which
-	 * deploy is current on every request. The alarm clears the marker, arms the
-	 * wake-up that reconnects the socket, then aborts into the new code. The abort
-	 * must not retry the alarm: a retry would run the (now cleared) restart path
-	 * again and, before `retryAlarm` existed, kept the bot offline through an
-	 * exponential backoff chain.
-	 */
-	private async restartIfDeployed(): Promise<boolean> {
-		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return false;
-		await this.ctx.storage.delete("deploy:restart");
-		// Re-arm before aborting: the abort drops this instance, and the alarm
-		// brings the replacement straight back up so it reconnects the socket
-		// instead of waiting for the next scheduled wake.
+		if (stored === version) return;
+		await this.ctx.storage.put("deploy:version", version);
+		// A first run has no stored version; only a change needs a restart.
+		if (stored === undefined) return;
+		this.restartPending = true;
 		await this.ctx.storage.setAlarm(Date.now() + 1_000);
-		this.ctx.abort("deploy changed", { retryAlarm: false });
-		return true;
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -155,15 +142,12 @@ export class BotGatewayV4 extends DurableObject<Env> {
 			// Arm the restart *after* keepAlive: the keepalive alarm is the long
 			// one, and setting it last would replace the one-second restart alarm.
 			await this.ensureCurrentVersion(request);
-			// The deploy this object has recorded: the object keeps running its
-			// old code until it restarts, so a wake is what records the change.
 			const deploy = await this.ctx.storage.get<string>("deploy:version");
-			const restart = await this.ctx.storage.get<boolean>("deploy:restart");
 			return json({
 				ok: true,
 				connected: this.socket.open,
 				deploy: deploy ?? null,
-				restart: restart === true,
+				restart: this.restartPending,
 			});
 		}
 		await this.ensureCurrentVersion(request);
@@ -199,7 +183,7 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		if (!this.token || this.socket.fatallyClosed) return;
 		// A pending restart owns the alarm; replacing it with the keepalive would
 		// postpone the restart for a whole cycle.
-		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) {
+		if (!this.restartPending) {
 			await this.ctx.storage.setAlarm(Date.now() + this.keepAliveMs);
 		}
 		await this.ensure();
