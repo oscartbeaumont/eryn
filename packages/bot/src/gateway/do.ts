@@ -125,11 +125,11 @@ export class BotGatewayV4 extends DurableObject<Env> {
 	 * Restart this object when a deploy has moved on.
 	 *
 	 * A live object keeps the code it started with, so the caller says which
-	 * deploy is current on every request. The restart itself must happen *after*
-	 * this event finishes: aborting inside the event discards its storage writes,
-	 * which would leave `deploy:restart` set and the alarm retrying (and the bot
-	 * offline) with exponential backoff. A short timer aborts the isolate once the
-	 * handler has returned, so the delete and the next alarm are durable.
+	 * deploy is current on every request. The alarm clears the marker, arms the
+	 * wake-up that reconnects the socket, then aborts into the new code. The abort
+	 * must not retry the alarm: a retry would run the (now cleared) restart path
+	 * again and, before `retryAlarm` existed, kept the bot offline through an
+	 * exponential backoff chain.
 	 */
 	private async restartIfDeployed(): Promise<boolean> {
 		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return false;
@@ -138,15 +138,8 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		// brings the replacement straight back up so it reconnects the socket
 		// instead of waiting for the next scheduled wake.
 		await this.ctx.storage.setAlarm(Date.now() + 1_000);
-		this.abortAfterEvent();
+		this.ctx.abort("deploy changed", { retryAlarm: false });
 		return true;
-	}
-
-	/** Abort once the current event has completed and its writes have committed. */
-	private abortAfterEvent(): void {
-		// An abort that interrupts an alarm retries it by default, which is what
-		// turned a restart into an exponential retry loop with the bot offline.
-		setTimeout(() => this.ctx.abort("deploy changed", { retryAlarm: false }), 50);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -161,7 +154,13 @@ export class BotGatewayV4 extends DurableObject<Env> {
 			// The deploy this object has recorded: the object keeps running its
 			// old code until it restarts, so a wake is what records the change.
 			const deploy = await this.ctx.storage.get<string>("deploy:version");
-			return json({ ok: true, connected: this.socket.open, deploy: deploy ?? null });
+			const restart = await this.ctx.storage.get<boolean>("deploy:restart");
+			return json({
+				ok: true,
+				connected: this.socket.open,
+				deploy: deploy ?? null,
+				restart: restart === true,
+			});
 		}
 		await this.ensureCurrentVersion(request);
 		return json({ error: "not found" }, 404);

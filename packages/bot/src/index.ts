@@ -21,14 +21,31 @@ import { withDeploy } from "./deploy";
 
 export { BotGatewayV4, BotSessionV4 };
 
-/** Poke the singleton gateway object so it connects and arms its alarm. */
+/**
+ * Poke the singleton gateway object so it connects and arms its alarm.
+ *
+ * A deploy can make the object reset into its new code, and a reset object has
+ * no socket. When the wake says a restart is pending, poke it again once the
+ * restart has had a moment: that brings the socket back immediately instead of
+ * leaving the bot offline until the next cron tick.
+ */
 export async function wake(env: Env): Promise<{ connected?: boolean; deploy?: string | null } | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
-	const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
-	if (!response.ok) return undefined;
-	return (await response.json().catch(() => undefined)) as
-		| { connected?: boolean; deploy?: string | null }
-		| undefined;
+	const call = async (): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> => {
+		const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
+		if (!response.ok) return undefined;
+		return (await response.json().catch(() => undefined)) as
+			| { connected?: boolean; deploy?: string | null; restart?: boolean }
+			| undefined;
+	};
+
+	let state = await call().catch(() => undefined);
+	if (state?.restart) {
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		state = (await call().catch(() => undefined)) ?? state;
+	}
+	if (!state) return undefined;
+	return { connected: state.connected, deploy: state.deploy ?? null };
 }
 
 /**
