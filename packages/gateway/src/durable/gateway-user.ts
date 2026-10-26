@@ -58,7 +58,7 @@ interface CacheEntry {
 	signature: string;
 }
 
-export class GatewayUser extends DurableObject<Env> {
+export class GatewayUserV2 extends DurableObject<Env> {
 	private readonly userId: string;
 	private readonly rest: DiscordRest;
 	private readonly endpoints = new Map<string, CacheEntry>();
@@ -79,6 +79,16 @@ export class GatewayUser extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
+		// A live object keeps the code it started with; restart it once a deploy
+		// has moved on.
+		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+		if (version) {
+			const stored = await this.ctx.storage.get<string>("deploy:version");
+			if (stored !== version) {
+				await this.ctx.storage.put("deploy:version", version);
+				if (stored !== undefined) this.ctx.abort();
+			}
+		}
 		try {
 			return await this.route(request);
 		} catch (error) {

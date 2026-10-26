@@ -7,10 +7,10 @@
  * and cron use to poke the singleton gateway object.
  */
 
-import { BotGateway } from "./gateway/do";
-import { BotSession } from "./session/do";
+import { BotGatewayV2 } from "./gateway/do";
+import { BotSessionV2 } from "./session/do";
 
-export { BotGateway, BotSession };
+export { BotGatewayV2, BotSessionV2 };
 
 /** The bot owns no public route; it is all Durable Objects and Discord events. */
 export async function handle(_request: Request): Promise<Response | undefined> {

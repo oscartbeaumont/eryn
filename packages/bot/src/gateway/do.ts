@@ -47,7 +47,7 @@ function json(body: unknown, status = 200): Response {
 	return Response.json(body, { status });
 }
 
-export class BotGateway extends DurableObject<Env> {
+export class BotGatewayV2 extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	private readonly socket: DiscordSocket;
@@ -94,10 +94,29 @@ export class BotGateway extends DurableObject<Env> {
 
 	/** Keeps the gateway alive and arms the next wake-up. */
 	async alarm(): Promise<void> {
+		await this.ensureCurrentVersion();
 		await this.keepAlive();
 	}
 
+	/**
+	 * Restart this object when a deploy has moved on.
+	 *
+	 * A deploy does not restart a live Durable Object: it keeps running the code
+	 * it started with, which is why a fix can appear not to have shipped. The
+	 * first run stores the version; a later change aborts once, and the next
+	 * request starts the object on the current code.
+	 */
+	private async ensureCurrentVersion(): Promise<void> {
+		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+		if (!version) return;
+		const stored = await this.ctx.storage.get<string>("deploy:version");
+		if (stored === version) return;
+		await this.ctx.storage.put("deploy:version", version);
+		if (stored !== undefined) this.ctx.abort();
+	}
+
 	async fetch(request: Request): Promise<Response> {
+		await this.ensureCurrentVersion();
 		const { pathname } = new URL(request.url);
 		if (pathname === WAKE_PATH) {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle

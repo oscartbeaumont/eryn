@@ -32,7 +32,7 @@ interface StreamListener {
 	send: (occurrence: Occurrence) => void;
 }
 
-export class GatewayDiscord extends DurableObject<Env> {
+export class GatewayDiscordV2 extends DurableObject<Env> {
 	private readonly gateway: DiscordGateway;
 	private readonly subscriptions = new Map<string, Subscription>();
 	private readonly listeners = new Set<StreamListener>();
@@ -56,6 +56,16 @@ export class GatewayDiscord extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
+		// A live object keeps the code it started with; restart it once a deploy
+		// has moved on.
+		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+		if (version) {
+			const stored = await this.ctx.storage.get<string>("deploy:version");
+			if (stored !== version) {
+				await this.ctx.storage.put("deploy:version", version);
+				if (stored !== undefined) this.ctx.abort();
+			}
+		}
 		const path = new URL(request.url).pathname;
 		if (request.method === "POST" && path === "/events/list") {
 			return Response.json({ events: descriptors(true) });
