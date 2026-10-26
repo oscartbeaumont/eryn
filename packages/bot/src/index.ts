@@ -42,16 +42,13 @@ export async function wake(
 	};
 
 	let state = await call().catch(() => undefined);
-	if (state?.restart) {
-		// The object resets into the new deploy a second from now. Poke it again
-		// once that has happened; the replacement has no socket yet, so give the
-		// Discord handshake a moment too.
-		await new Promise((resolve) => setTimeout(resolve, 1_500));
+	// A pending restart means the object resets into the new deploy a second from
+	// now, and the replacement starts with no socket. Keep poking for a few
+	// seconds: the call that lands after the reset is what makes it connect. The
+	// reset can be delayed, so one extra poke is not enough to rely on.
+	for (let attempt = 0; attempt < 8 && state && (state.restart || !state.connected); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		state = (await call().catch(() => undefined)) ?? state;
-		if (!state.connected) {
-			await new Promise((resolve) => setTimeout(resolve, 1_500));
-			state = (await call().catch(() => undefined)) ?? state;
-		}
 	}
 	if (!state) return undefined;
 	return { connected: state.connected, deploy: state.deploy ?? null, restart: state.restart === true };

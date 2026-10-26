@@ -109,6 +109,10 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		// event's storage writes, so a persisted marker would survive the restart
 		// and make every new instance restart again.
 		if (this.restartPending) {
+			// Arm an alarm for the replacement before resetting: the reset leaves an
+			// object with no socket and no pending work, and this alarm is what brings
+			// it back up on its own rather than waiting for the next cron tick.
+			await this.ctx.storage.setAlarm(Date.now() + 1_000);
 			this.ctx.abort("deploy changed", { retryAlarm: false });
 			return;
 		}
