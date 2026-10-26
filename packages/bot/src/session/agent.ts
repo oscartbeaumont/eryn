@@ -444,15 +444,37 @@ class GuildAgentImpl implements GuildAgentShape {
 				// chose and the key it gave us. The credential is supplied as an
 				// integration credential, not as `providers.<id>.settings.apiKey`,
 				// because only the integration store reaches provider activation.
+				//
+				// Connecting is idempotent: the provider records the host persists are
+				// bound to a credential id, so minting a fresh credential on every host
+				// build would leave every known model unreachable (`provider.no-route`)
+				// after each restart. Reuse the credential for this key, and clear out
+				// the duplicates earlier builds left behind.
+				const credentials = await host.credential.list().catch(() => []);
 				for (const connection of config.connections) {
 					if (!connection.key) continue;
-					await host.integration
-						.connect.key({
-							integrationID: connection.integrationID,
-							key: connection.key,
-							location: { directory: LOCATION },
-						})
-						.catch((error) => log("session", `could not connect ${connection.integrationID}: ${describeError(error)}`));
+					const owned = credentials.filter((entry) => entry.integrationID === connection.integrationID);
+					const existing = owned.find(
+						(entry) => entry.value.type === "key" && entry.value.key === connection.key,
+					);
+					try {
+						if (!existing) {
+							await host.integration.connect.key({
+								integrationID: connection.integrationID,
+								key: connection.key,
+								location: { directory: LOCATION },
+							});
+							continue;
+						}
+						if (!existing.active) await host.credential.activate({ credentialID: existing.id });
+						for (const stale of owned) {
+							if (stale.id === existing.id) continue;
+							if (stale.value.type !== "key" || stale.value.key !== connection.key) continue;
+							await host.credential.remove({ credentialID: stale.id }).catch(() => undefined);
+						}
+					} catch (error) {
+						log("session", `could not connect ${connection.integrationID}: ${describeError(error)}`);
+					}
 				}
 				return host;
 			});
