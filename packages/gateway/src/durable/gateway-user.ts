@@ -112,8 +112,8 @@ export class GatewayUserV4 extends DurableObject<Env> {
 		}
 		await this.ctx.storage.delete("deploy:restart");
 		// Abort after this event returns: aborting inside it would discard the
-		// delete, and the alarm would retry (offline) with exponential backoff.
-		setTimeout(() => this.ctx.abort(), 50);
+		// delete, and an interrupted alarm retries (offline) by default.
+		setTimeout(() => this.ctx.abort("deploy changed", { retryAlarm: false }), 50);
 	}
 
 	override async fetch(request: Request): Promise<Response> {

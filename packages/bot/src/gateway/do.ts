@@ -144,7 +144,9 @@ export class BotGatewayV4 extends DurableObject<Env> {
 
 	/** Abort once the current event has completed and its writes have committed. */
 	private abortAfterEvent(): void {
-		setTimeout(() => this.ctx.abort(), 50);
+		// An abort that interrupts an alarm retries it by default, which is what
+		// turned a restart into an exponential retry loop with the bot offline.
+		setTimeout(() => this.ctx.abort("deploy changed", { retryAlarm: false }), 50);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -154,10 +156,10 @@ export class BotGatewayV4 extends DurableObject<Env> {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle
 			// that reconnects the socket before Cloudflare's 15 minute cap.
 			await this.keepAlive();
-			// The deploy this object has recorded: if it lags the Worker's own
-			// version the object is still running older code.
-			const deploy = await this.ctx.storage.get<string>("deploy:version");
-			return json({ ok: true, connected: this.socket.open, deploy: deploy ?? null });
+			// The deploy this object is *running*, not the one it last recorded:
+			// a live object keeps its old code until it restarts, so a comparison
+			// against the Worker's version is what proves the restart happened.
+			return json({ ok: true, connected: this.socket.open, deploy: currentDeploy(this.env) ?? null });
 		}
 		return json({ error: "not found" }, 404);
 	}
