@@ -30,11 +30,30 @@ export const ToolAccessSchema = Schema.Struct({
 export type ToolAccess = typeof ToolAccessSchema.Type;
 
 /**
+ * What is needed to keep an OAuth link's bearer alive.
+ *
+ * The access token itself lives on the link as `token`, so the agent never
+ * needs to know how it was obtained. This record is what a refresh needs, and
+ * it is only ever present on a link that was added through a sign-in.
+ */
+export const McpOAuthSchema = Schema.Struct({
+	refreshToken: Schema.optional(Schema.String),
+	clientId: Schema.String,
+	clientSecret: Schema.optional(Schema.String),
+	tokenEndpoint: Schema.String,
+	expiresAt: Schema.Number,
+	scope: Schema.optional(Schema.String),
+	/** The RFC 8707 resource indicator, when the server asked for one. */
+	resource: Schema.optional(Schema.String),
+});
+export type McpOAuth = typeof McpOAuthSchema.Type;
+
+/**
  * One MCP server a guild has linked: Eryn-hosted or external.
  *
- * `token` is the bearer the agent presents. It is sealed at rest and never
- * leaves the guild object; the contract's public `McpLink` is the same record
- * without it.
+ * `token` is the bearer the agent presents and `oauth` is what keeps it alive.
+ * Both are sealed at rest and never leave the guild object; the contract's
+ * public `McpLink` is the same record without them.
  */
 export const McpLinkSchema = Schema.Struct({
 	id: Schema.String,
@@ -43,13 +62,88 @@ export const McpLinkSchema = Schema.Struct({
 	url: Schema.String,
 	mcpServerId: Schema.optional(Schema.String),
 	token: Schema.optional(Schema.String),
+	oauth: Schema.optional(McpOAuthSchema),
 	tools: ToolAccessSchema,
 	createdAt: Schema.Number,
 });
 export type McpLink = typeof McpLinkSchema.Type;
 
 /** A link as the gateway may see it: no secret. */
-export type PublicLink = Omit<McpLink, "token">;
+export type PublicLink = Omit<McpLink, "token" | "oauth">;
+
+/** One tool an MCP server advertises, as a connection test reports it. */
+export const McpToolSummarySchema = Schema.Struct({
+	name: Schema.String,
+	title: Schema.optional(Schema.String),
+	description: Schema.optional(Schema.String),
+});
+export type McpToolSummary = typeof McpToolSummarySchema.Type;
+
+/** The outcome of talking to an MCP server: what it offers, or why it refused. */
+export const McpProbeResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	tools: Schema.Array(McpToolSummarySchema),
+	serverName: Schema.optional(Schema.String),
+	/** Set when the server answered with a Bearer challenge and might sign us in. */
+	needsAuth: Schema.optional(Schema.Boolean),
+	resourceMetadataUrl: Schema.optional(Schema.String),
+	scope: Schema.optional(Schema.String),
+	error: Schema.optional(Schema.String),
+});
+export type McpProbeResponse = typeof McpProbeResponseSchema.Type;
+
+/**
+ * A sign-in with an external MCP server that has started but not finished.
+ *
+ * The redirect comes back to the Worker rather than to the interaction that
+ * started it, so the attempt (client registration, PKCE verifier, endpoint)
+ * has to outlive the request and be found again by its signed `state`.
+ */
+export const PendingMcpAuthSchema = Schema.Struct({
+	attemptId: Schema.String,
+	name: Schema.String,
+	url: Schema.String,
+	/** Where to confirm completion, so the browser callback can say so. */
+	channelId: Schema.optional(Schema.String),
+	state: Schema.String,
+	clientId: Schema.String,
+	clientSecret: Schema.optional(Schema.String),
+	tokenEndpoint: Schema.String,
+	resource: Schema.optional(Schema.String),
+	scope: Schema.optional(Schema.String),
+	codeVerifier: Schema.String,
+	redirectUri: Schema.String,
+	status: Schema.Literals(["pending", "complete", "failed"]),
+	message: Schema.optional(Schema.String),
+	linkId: Schema.optional(Schema.String),
+	createdAt: Schema.Number,
+});
+export type PendingMcpAuth = typeof PendingMcpAuthSchema.Type;
+
+/** A sign-in's state, as the Discord interaction asks about it. */
+export const McpAuthStatusSchema = Schema.Struct({
+	status: Schema.Literals(["pending", "complete", "failed", "missing"]),
+	message: Schema.optional(Schema.String),
+	link: Schema.optional(McpLinkSchema),
+});
+export type McpAuthStatus = typeof McpAuthStatusSchema.Type;
+
+export const McpAuthStartResponseSchema = Schema.Struct({
+	ok: Schema.optional(Schema.Boolean),
+	attemptId: Schema.optional(Schema.String),
+	url: Schema.optional(Schema.String),
+	error: Schema.optional(Schema.String),
+});
+export type McpAuthStartResponse = typeof McpAuthStartResponseSchema.Type;
+
+export const McpAuthCompleteResponseSchema = Schema.Struct({
+	ok: Schema.optional(Schema.Boolean),
+	status: Schema.optional(Schema.Literals(["complete", "failed"])),
+	message: Schema.optional(Schema.String),
+	link: Schema.optional(McpLinkSchema),
+	tools: Schema.optional(Schema.Array(McpToolSummarySchema)),
+});
+export type McpAuthCompleteResponse = typeof McpAuthCompleteResponseSchema.Type;
 
 /** One provider credential a guild has connected. */
 export const ProviderConnectionSchema = Schema.Struct({
@@ -201,6 +295,32 @@ export const ModelRequestSchema = Schema.Struct({ guildId: Schema.String, model:
 
 export const LinkAddRequestSchema = Schema.Struct({ guildId: Schema.String, link: McpLinkSchema });
 export const LinkRemoveRequestSchema = Schema.Struct({ guildId: Schema.String, linkId: Schema.String });
+export const McpProbeRequestSchema = Schema.Struct({
+	guildId: Schema.String,
+	url: Schema.String,
+	token: Schema.optional(Schema.String),
+});
+export const McpTestRequestSchema = Schema.Struct({ guildId: Schema.String, linkId: Schema.String });
+export const McpAuthStartRequestSchema = Schema.Struct({
+	guildId: Schema.String,
+	name: Schema.String,
+	url: Schema.String,
+	channelId: Schema.optional(Schema.String),
+	/** The `resource_metadata` URL from the server's challenge, when it gave one. */
+	resourceMetadataUrl: Schema.optional(Schema.String),
+	scope: Schema.optional(Schema.String),
+});
+export const McpAuthAttemptRequestSchema = Schema.Struct({
+	guildId: Schema.String,
+	attemptId: Schema.String,
+});
+export const McpAuthCompleteRequestSchema = Schema.Struct({
+	guildId: Schema.String,
+	attemptId: Schema.String,
+	code: Schema.optional(Schema.String),
+	/** Set when the authorization server sent the browser back with an error. */
+	error: Schema.optional(Schema.String),
+});
 
 /** A guild's configuration, as the gateway hands it to a turn. */
 export const GuildConfigSchema = Schema.Struct({

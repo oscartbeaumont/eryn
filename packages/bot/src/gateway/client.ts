@@ -12,12 +12,20 @@ import { withDeploy } from "../deploy";
 import { botError, describeError } from "../errors";
 import {
 	IntegrationOptionSchema,
+	McpAuthCompleteResponseSchema,
+	McpAuthStartResponseSchema,
+	McpAuthStatusSchema,
 	McpLinkSchema,
+	McpProbeResponseSchema,
 	ModelOptionSchema,
 	ToolAccessSchema,
 	type GuildStatus,
 	type IntegrationOption,
+	type McpAuthCompleteResponse,
+	type McpAuthStartResponse,
+	type McpAuthStatus,
 	type McpLink,
+	type McpProbeResponse,
 	type ModelOption,
 	type ProviderConnectRequest,
 	type ProviderConnectResponse,
@@ -147,7 +155,7 @@ export class SessionClient {
 	async links(): Promise<PublicLink[]> {
 		const parsed = decode(LinkListSchema, await this.post("/links", { guildId: this.guildId }), "the guild session");
 		return parsed.links.map((link) => {
-			const { token: _token, ...rest } = link;
+			const { token: _token, oauth: _oauth, ...rest } = link;
 			return rest;
 		});
 	}
@@ -158,6 +166,61 @@ export class SessionClient {
 
 	async removeLink(linkId: string): Promise<void> {
 		await this.post("/link/remove", { guildId: this.guildId, linkId });
+	}
+
+	/** Ask a URL what it offers before it is linked, and how it wants to be authed. */
+	async probe(url: string, token?: string): Promise<McpProbeResponse> {
+		return decode(
+			McpProbeResponseSchema,
+			await this.post("/link/probe", { guildId: this.guildId, url, ...(token ? { token } : {}) }),
+			"the guild session",
+		);
+	}
+
+	/** Test a link that is already stored, refreshing its token if needed. */
+	async testLink(linkId: string): Promise<McpProbeResponse> {
+		return decode(
+			McpProbeResponseSchema,
+			await this.post("/link/test", { guildId: this.guildId, linkId }),
+			"the guild session",
+		);
+	}
+
+	/** Start an OAuth sign-in with an external MCP server. */
+	async mcpAuthStart(input: {
+		name: string;
+		url: string;
+		channelId?: string;
+		resourceMetadataUrl?: string;
+		scope?: string;
+	}): Promise<McpAuthStartResponse> {
+		return decode(
+			McpAuthStartResponseSchema,
+			await this.post("/link/oauth/start", { guildId: this.guildId, ...input }),
+			"the guild session",
+		);
+	}
+
+	async mcpAuthStatus(attemptId: string): Promise<McpAuthStatus> {
+		return decode(
+			McpAuthStatusSchema,
+			await this.post("/link/oauth/status", { guildId: this.guildId, attemptId }),
+			"the guild session",
+		);
+	}
+
+	/** Finish a sign-in from the browser callback or the "I've finished" button. */
+	async mcpAuthComplete(attemptId: string, code?: string, error?: string): Promise<McpAuthCompleteResponse> {
+		return decode(
+			McpAuthCompleteResponseSchema,
+			await this.post("/link/oauth/complete", {
+				guildId: this.guildId,
+				attemptId,
+				...(code ? { code } : {}),
+				...(error ? { error } : {}),
+			}),
+			"the guild session",
+		);
 	}
 
 	async prompt(body: unknown): Promise<void> {

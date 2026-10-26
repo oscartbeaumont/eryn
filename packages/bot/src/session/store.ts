@@ -17,10 +17,12 @@ import { botError } from "../errors";
 import {
 	GuildSettingsSchema,
 	McpLinkSchema,
+	PendingMcpAuthSchema,
 	PendingOAuthSchema,
 	ProviderConnectionSchema,
 	type GuildSettings,
 	type McpLink,
+	type PendingMcpAuth,
 	type PendingOAuth,
 	type ProviderConnection,
 } from "./models";
@@ -36,6 +38,10 @@ export interface GuildStoreShape {
 	getLink(id: string): Promise<McpLink | undefined>;
 	putLink(link: McpLink): Promise<void>;
 	removeLink(id: string): Promise<void>;
+	authAttempts(): Promise<PendingMcpAuth[]>;
+	getAuthAttempt(id: string): Promise<PendingMcpAuth | undefined>;
+	putAuthAttempt(attempt: PendingMcpAuth): Promise<void>;
+	removeAuthAttempt(id: string): Promise<void>;
 	sessionFor(threadId: string): Promise<string | undefined>;
 	putSession(threadId: string, sessionID: string): Promise<void>;
 	clearSession(threadId: string): Promise<void>;
@@ -126,6 +132,29 @@ class GuildStoreImpl implements GuildStoreShape {
 
 	async removeLink(id: string): Promise<void> {
 		await this.storage.delete(KEYS.link + id);
+	}
+
+	async authAttempts(): Promise<PendingMcpAuth[]> {
+		const entries = await this.storage.list<Sealed>({ prefix: KEYS.mcpAuth });
+		const attempts: PendingMcpAuth[] = [];
+		for (const [, sealed] of entries) {
+			const attempt = await this.open(sealed, PendingMcpAuthSchema);
+			if (attempt) attempts.push(attempt);
+		}
+		return attempts.sort((a, b) => a.createdAt - b.createdAt);
+	}
+
+	async getAuthAttempt(id: string): Promise<PendingMcpAuth | undefined> {
+		const sealed = await this.storage.get<Sealed>(KEYS.mcpAuth + id);
+		return await this.open(sealed, PendingMcpAuthSchema);
+	}
+
+	async putAuthAttempt(attempt: PendingMcpAuth): Promise<void> {
+		await this.storage.put(KEYS.mcpAuth + attempt.attemptId, await this.seal(attempt));
+	}
+
+	async removeAuthAttempt(id: string): Promise<void> {
+		await this.storage.delete(KEYS.mcpAuth + id);
 	}
 
 	async sessionFor(threadId: string): Promise<string | undefined> {

@@ -57,9 +57,9 @@ it (found in the audit log) to start setup. Everything is a slash command:
 | `/eryn setup provider` | Connect an inference provider for this server (key or OAuth) |
 | `/eryn setup model` | Pick the model, from this server's own catalogue |
 | `/eryn setup status` | Whether the server is ready |
-| `/eryn mcp add` | Connect an external MCP server by URL |
+| `/eryn mcp add` | Link one of your Eryn-hosted servers (no sign-in) or add and test an external one |
 | `/eryn mcp link` | Link one of *your* hosted MCP servers to this server, with tool limits |
-| `/eryn mcp list` / `remove` | Manage them |
+| `/eryn mcp list` / `test` / `remove` | Manage and check them |
 | `/eryn stop` | Interrupt the running turn |
 | `/eryn help` | What to do next |
 
@@ -71,6 +71,19 @@ has explicitly linked, with the tokens those links carry. There is no
 auto-minted token and no impersonation: linking a hosted server is a deliberate,
 revocable act by someone with Manage Server, and it can only ever narrow what the
 hosted server already exposes.
+
+**Adding an external server is a conversation, not a form.** `/eryn mcp add`
+offers your own hosted servers — those link with an internally minted,
+guild-scoped token, no browser involved — or any other MCP server by URL. An
+external server is tested before it is stored: Eryn calls `initialize` and
+`tools/list`, reports the tools it found, and adds a **Test** button that repeats
+the check. If the server answers `401` with the RFC 9728 challenge, Eryn runs the
+OAuth 2.1 client flow itself — protected-resource and authorization-server
+metadata discovery, dynamic client registration (RFC 7591), PKCE, and a signed
+`state` that returns to `/api/bot/mcp/callback` — and stores the access and
+refresh tokens with the link. A server that wants a static bearer instead gets
+told to add it with a token in the same modal. Access tokens are refreshed as
+they expire, so a link keeps working until it is removed.
 
 The MCP-events OpenCode plugin is bundled with the bot and is **server-agnostic**:
 `mcpevents_subscribe`, `mcpevents_unsubscribe`, and `mcpsubscribe_listen` take a
@@ -148,6 +161,10 @@ characters are ever in the clear, and only so the console can identify it.
 ## Known limits
 
 - Local (stdio) MCP servers cannot be reached: a Worker has no process plane.
+- External MCP servers must be reachable over https. Loopback over http is
+  accepted so a server can be tried in development.
+- An external MCP server that only supports an authorization code flow without
+  dynamic client registration has to be added with a bearer token.
 - The virtual filesystem lives in the guild's Durable Object storage, one key per
   file, and is shared by that server's threads.
 - Discord channels only; DMs have no threads and are ignored.

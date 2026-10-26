@@ -15,8 +15,8 @@ export class <Durable> extends DurableObject<Env> {}
 ```
 
 - `@oscartbeaumont/eryn-gateway` exports `handle`, `GatewayUser`, `GatewayDiscord`.
-- `@oscartbeaumont/eryn-bot` exports `handle` (returns `undefined`; the bot has no
-  public HTTP), `wake(env)`, `BotGateway`, `BotSession`.
+- `@oscartbeaumont/eryn-bot` exports `handle` (the external MCP sign-in
+  callback), `wake(env)`, `BotGateway`, `BotSession`.
 - `@oscartbeaumont/eryn-console` is a client-only Solid SPA. It is not imported
   by the Worker; `index.html` loads it and `cf` serves its build.
 
@@ -67,9 +67,17 @@ POST https://bot.internal/model         { guildId, model }                -> { o
 POST https://bot.internal/links         { guildId }                       -> { links: McpLink[] }
 POST https://bot.internal/link/add      { guildId, link }                 -> { ok }
 POST https://bot.internal/link/remove   { guildId, linkId }               -> { ok }
+POST https://bot.internal/link/probe    { guildId, url, token? }          -> McpProbe
+POST https://bot.internal/link/test     { guildId, linkId }               -> McpProbe
+POST https://bot.internal/link/oauth/start     { guildId, name, url, channelId?, resourceMetadataUrl?, scope? }
+                                                                          -> { ok, attemptId, url } | { ok: false, error }
+POST https://bot.internal/link/oauth/status    { guildId, attemptId }     -> { status, message?, link? }
+POST https://bot.internal/link/oauth/complete  { guildId, attemptId, code?, error? } -> { ok, status, message?, link?, tools? }
 POST https://bot.internal/prompt        { ...PromptRequest, config }      -> { ok }
 POST https://bot.internal/interrupt     { threadId, gone? }               -> { stopped }
 ```
+
+`McpProbe` is `{ ok, tools: { name, title?, description? }[], serverName?, needsAuth?, resourceMetadataUrl?, scope?, error? }`.
 
 ## 4. Route ownership
 
@@ -79,7 +87,7 @@ POST https://bot.internal/interrupt     { threadId, gone? }               -> { s
 | `/oauth/*`, `/.well-known/*` | gateway |
 | `/auth/*`, `/github/*`, `/google/*` | gateway |
 | `/api/**` except `/api/bot/**` | gateway |
-| `/api/bot/**` | bot (reserved; unused today) |
+| `/api/bot/**` | bot (the external MCP sign-in callback at `/api/bot/mcp/callback`) |
 | `/health` | root |
 | everything else | console SPA (static assets) |
 
@@ -121,7 +129,11 @@ ToolGroup       { id, name, tools: { name, title, description, group, access: "r
 ServerSummary   { id, name, title?, enabled, accounts: { id, provider, label }[],
                   tools: ToolAccess, endpoint, grants: { guildId }[] }
 Grant           { guildId, mcpServerId, toolNames: string[], createdAt }
-McpLink         { id, kind: "eryn"|"external", name, url, mcpServerId?, tools: ToolAccess, createdAt }
+McpLink         { id, kind: "eryn"|"external", name, url, mcpServerId?, oauth?: McpOAuth, tools: ToolAccess, createdAt }
+McpOAuth        { refreshToken?, clientId, clientSecret?, tokenEndpoint, expiresAt, scope?, resource? }
+McpToolSummary  { name, title?, description? }
+PendingMcpAuth  { attemptId, name, url, channelId?, state, clientId, clientSecret?, tokenEndpoint,
+                  resource?, scope?, codeVerifier, redirectUri, status, message?, linkId?, createdAt }
 ```
 
 Accounts, provider keys, and MCP tokens are sealed (AES-GCM, `ENCRYPTION_KEY`).
@@ -136,5 +148,5 @@ Accounts, provider keys, and MCP tokens are sealed (AES-GCM, `ENCRYPTION_KEY`).
   delegates. Business logic lives in services that can be tested without a Worker.
 - Log prefix: `[eryn:gateway:…]` / `[eryn:bot:…]`.
 - Storage records are versioned by key prefix, e.g. `account:`, `server:`,
-  `grant:`, `session:`, `guild:`.
+  `grant:`, `session:`, `guild:`, `link:`, `mcp:auth:`.
 - No `any` in public signatures; no throwing strings.

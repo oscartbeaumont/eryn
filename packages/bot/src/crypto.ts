@@ -57,3 +57,36 @@ export async function decryptSecret(secret: string, sealed: Sealed): Promise<str
 	);
 	return decoder.decode(plaintext);
 }
+
+async function hmacKey(secret: string): Promise<CryptoKey> {
+	return crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+		"sign",
+		"verify",
+	]);
+}
+
+/** Sign a JSON payload into a compact, URL-safe token. */
+export async function sign(payload: unknown, secret: string): Promise<string> {
+	const body = base64url(encoder.encode(JSON.stringify(payload)));
+	const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(body));
+	return `${body}.${base64url(new Uint8Array(signature))}`;
+}
+
+/** Verify and decode a token from `sign`, or `undefined` when invalid. */
+export async function verify<T>(token: string | undefined, secret: string): Promise<T | undefined> {
+	if (!token) return undefined;
+	const [body, signature] = token.split(".");
+	if (!body || !signature) return undefined;
+	const valid = await crypto.subtle.verify(
+		"HMAC",
+		await hmacKey(secret),
+		fromBase64url(signature),
+		encoder.encode(body),
+	);
+	if (!valid) return undefined;
+	try {
+		return JSON.parse(decoder.decode(fromBase64url(body))) as T;
+	} catch {
+		return undefined;
+	}
+}

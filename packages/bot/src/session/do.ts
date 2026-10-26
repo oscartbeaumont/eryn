@@ -16,7 +16,9 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { DEFAULT_MODEL, isValidModel, log } from "../config";
 import { DEPLOY_HEADER, currentDeploy } from "../deploy";
 import { BotError, ParseError, describeError } from "../errors";
-import { DiscordApi } from "../discord/api";
+import { DiscordApi, type DiscordRest } from "../discord/api";
+import { beginAuthorization, describeTools, finishAuthorization, refreshLink, refreshLinks, testLink, AUTH_TTL_MS } from "../mcp/links";
+import { probeServer } from "../mcp/client";
 import { Workspace } from "../opencode/store";
 import { GuildAgent, type GuildAgentShape, type HostConfig } from "./agent";
 import {
@@ -24,6 +26,11 @@ import {
 	InterruptRequestSchema,
 	LinkAddRequestSchema,
 	LinkRemoveRequestSchema,
+	McpAuthAttemptRequestSchema,
+	McpAuthCompleteRequestSchema,
+	McpAuthStartRequestSchema,
+	McpProbeRequestSchema,
+	McpTestRequestSchema,
 	ModelRequestSchema,
 	PromptRequestSchema,
 	ProviderConnectRequestSchema,
@@ -36,9 +43,9 @@ function json(body: unknown, status = 200): Response {
 	return Response.json(body, { status });
 }
 
-/** The token is the one secret a link carries; the gateway never sees it. */
+/** The secrets a link carries are the bearer and, for OAuth, the refresh pair. */
 function publicLink(link: McpLink): PublicLink {
-	const { token: _token, ...rest } = link;
+	const { token: _token, oauth: _oauth, ...rest } = link;
 	return rest;
 }
 
@@ -133,18 +140,20 @@ export class BotSessionV4 extends DurableObject<Env> {
 		this.ctx.abort();
 	}
 
-	private route(request: Request): Effect.Effect<Response, never, GuildStore | GuildAgent> {
+	private route(request: Request): Effect.Effect<Response, never, GuildStore | GuildAgent | DiscordApi> {
 		const guildId = this.guildId;
+		const env = this.env;
 		return Effect.gen(function* () {
 			const store = yield* GuildStore;
 			const agent = yield* GuildAgent;
+			const rest: DiscordRest = yield* DiscordApi;
 			const url = new URL(request.url);
 
 			/** Everything the host needs, read once from this guild's own storage. */
 			const loadConfig = async (): Promise<HostConfig> => {
 				const settings = await store.settings();
 				const connections = await store.providers();
-				const links = await store.links();
+				const links = await refreshLinks(store, await store.links());
 				return { connections, model: settings.model, links };
 			};
 
@@ -177,6 +186,8 @@ export class BotSessionV4 extends DurableObject<Env> {
 				return yield* attempt(async () => {
 					const settings = await store.settings();
 					const connections = await store.providers();
+					// A status read does not need a live token; the turn does, and
+					// refreshing here would put network calls in front of a reply.
 					const links = await store.links();
 					return json({
 						ready: connections.length > 0,
@@ -332,6 +343,10 @@ export class BotSessionV4 extends DurableObject<Env> {
 				// malformed one never reaches storage.
 				const link = body.link;
 				return yield* attempt(async () => {
+					const existing = await store.links();
+					if (existing.some((candidate) => candidate.name === link.name && candidate.id !== link.id)) {
+						return json({ error: `A server named "${link.name}" is already linked.` }, 400);
+					}
 					await store.putLink(link);
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 500))));
@@ -345,6 +360,122 @@ export class BotSessionV4 extends DurableObject<Env> {
 					await store.removeLink(body.linkId);
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 500))));
+			}
+
+			/** Test a URL before it is linked: what it offers, or what it wants. */
+			if (request.method === "POST" && url.pathname === "/link/probe") {
+				const body = yield* readBody(McpProbeRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () =>
+					json(await probeServer({ url: body.url, ...(body.token ? { token: body.token } : {}) })),
+				).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, tools: [], error: error.message }, 502))));
+			}
+
+			/** Test a link that is already stored, refreshing its token first. */
+			if (request.method === "POST" && url.pathname === "/link/test") {
+				const body = yield* readBody(McpTestRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () => {
+					const link = await store.getLink(body.linkId);
+					if (!link) return json({ ok: false, tools: [], error: "That MCP server is no longer linked." }, 404);
+					return json(await testLink(await refreshLink(store, link)));
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, tools: [], error: error.message }, 502))));
+			}
+
+			/** Start a sign-in: discover, register, and return the URL to open. */
+			if (request.method === "POST" && url.pathname === "/link/oauth/start") {
+				const body = yield* readBody(McpAuthStartRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () => {
+					const name = body.name.trim();
+					if (!name) return json({ ok: false, error: "A name is required." }, 400);
+					const links = await store.links();
+					if (links.some((link) => link.name === name)) {
+						return json({ ok: false, error: `A server named "${name}" is already linked.` }, 400);
+					}
+					const probe = await probeServer({ url: body.url });
+					if (probe.ok) {
+						return json({ ok: false, error: "This server did not ask for a sign-in." }, 400);
+					}
+					try {
+						const started = await beginAuthorization({
+							store,
+							env,
+							guildId,
+							name,
+							url: body.url,
+							...(body.channelId ? { channelId: body.channelId } : {}),
+							...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
+							...(probe.scope ? { scope: probe.scope } : {}),
+						});
+						return json({ ok: true, ...started });
+					} catch (error) {
+						return json({ ok: false, error: describeError(error) }, 400);
+					}
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, error: error.message }, 502))));
+			}
+
+			/** Whether a started sign-in has finished, as the Discord buttons ask. */
+			if (request.method === "POST" && url.pathname === "/link/oauth/status") {
+				const body = yield* readBody(McpAuthAttemptRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () => {
+					const attemptRecord = await store.getAuthAttempt(body.attemptId);
+					if (!attemptRecord) return json({ status: "missing" });
+					if (attemptRecord.status === "pending" && Date.now() - attemptRecord.createdAt > AUTH_TTL_MS) {
+						const message = "That sign-in expired. Start it again from `/eryn mcp add`.";
+						await store.putAuthAttempt({ ...attemptRecord, status: "failed", message });
+						return json({ status: "failed", message });
+					}
+					const link = attemptRecord.linkId ? await store.getLink(attemptRecord.linkId) : undefined;
+					return json({
+						status: attemptRecord.status,
+						...(attemptRecord.message ? { message: attemptRecord.message } : {}),
+						...(link ? { link: publicLink(link) } : {}),
+					});
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ status: "failed", message: error.message }))));
+			}
+
+			/**
+			 * Finish a sign-in with the code the browser brought back.
+			 *
+			 * The browser callback and the "I've finished" button both land here,
+			 * so the second of the two sees a completed attempt and changes nothing.
+			 */
+			if (request.method === "POST" && url.pathname === "/link/oauth/complete") {
+				const body = yield* readBody(McpAuthCompleteRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () => {
+					const attemptRecord = await store.getAuthAttempt(body.attemptId);
+					if (!attemptRecord) return json({ ok: false, error: "That sign-in is no longer available." }, 404);
+					const firstFinish = attemptRecord.status === "pending";
+					const result = await finishAuthorization(store, attemptRecord, {
+						...(body.code ? { code: body.code } : {}),
+						...(body.error ? { error: body.error } : {}),
+					});
+					if (firstFinish && result.link && attemptRecord.channelId) {
+						// The browser is on its own page, so say the outcome where the
+						// conversation started rather than only in the tab.
+						await rest
+							.sendMessage(
+								attemptRecord.channelId,
+								`**${result.link.name} is connected.** ${describeTools(result.tools ?? [])} Eryn will use it on the next turn.`,
+							)
+							.catch((error) => log("session", `could not announce the MCP link: ${describeError(error)}`));
+					}
+					return json({
+						ok: result.status === "complete",
+						status: result.status,
+						...(result.message ? { message: result.message } : {}),
+						...(result.link ? { link: publicLink(result.link) } : {}),
+						...(result.tools ? { tools: result.tools } : {}),
+					});
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, status: "failed", message: error.message }, 502))));
 			}
 
 			if (request.method === "POST" && url.pathname === "/prompt") {

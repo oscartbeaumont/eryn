@@ -23,8 +23,10 @@ export const KEYS = {
 	guild: "config:guild",
 	/** One connected provider credential, sealed. */
 	provider: "provider:",
-	/** One linked MCP server, sealed (it carries a bearer token). */
+	/** One linked MCP server, sealed (it carries a bearer or a refresh token). */
 	link: "link:",
+	/** A sign-in with an external MCP server, sealed (it carries a PKCE verifier). */
+	mcpAuth: "mcp:auth:",
 	/** A thread's OpenCode session id. */
 	session: "session:",
 	/** A sign-in that has started but not finished, so a code can complete it. */
