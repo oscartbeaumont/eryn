@@ -376,7 +376,9 @@ async function setupProvider(
 async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, session: SessionClient): Promise<void> {
 	const answer = responder(ctx, interaction);
 	await answer.defer();
-	const models = await session.models();
+	// Only models from a connected provider can run; offering the rest is how a
+	// guild ends up selecting `opencode-go/...` with only `opencode` connected.
+	const models = (await session.models()).filter((model) => model.connected);
 	if (!models.length) {
 		const status = await session.config().catch(() => undefined);
 		const connected = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";

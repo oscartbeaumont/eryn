@@ -319,6 +319,16 @@ function readOptions(value: unknown): ProviderField["options"] {
 	return options.length ? options : undefined;
 }
 
+/** Models preferred when a guild has not chosen one (or chose a free one). */
+const PREFERRED_MODELS = [
+	"deepseek-v4.1-flash",
+	"claude-sonnet-4-5",
+	"claude-sonnet-4-6",
+	"gpt-5",
+	"gpt-5.1",
+	"gemini-2.5-pro",
+];
+
 /** The service surface the session object drives. */
 export interface GuildAgentShape {
 	integrations(config: HostConfig): Promise<IntegrationOption[]>;
@@ -503,12 +513,24 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async resolveModel(config: HostConfig): Promise<string> {
 		const provider = config.model.split("/")[0] ?? "";
-		if (config.connections.some((connection) => connection.integrationID === provider)) return config.model;
+		const connected = config.connections.some((connection) => connection.integrationID === provider);
+		// A `-free` model is the host's fallback rather than a choice worth
+		// keeping: it is the one that tends to return nothing, and the provider
+		// the guild connected has real models.
+		if (connected && !/-free$/i.test(config.model)) return config.model;
+
 		const models = await this.listModels(config).catch(() => [] as ModelOption[]);
+		const candidates = models.filter((entry) => entry.connected && entry.enabled);
+		const preferred = PREFERRED_MODELS.map((name) => candidates.find((entry) => entry.id.endsWith(`/${name}`))).find(
+			(entry) => entry !== undefined,
+		);
 		const fallback =
-			models.find((entry) => entry.connected && entry.enabled) ?? models.find((entry) => entry.connected);
-		if (!fallback) return config.model;
-		log("session", `model ${config.model} is not available; using ${fallback.id}`);
+			preferred ??
+			candidates.find((entry) => !/-free$/i.test(entry.id)) ??
+			candidates[0] ??
+			models.find((entry) => entry.connected);
+		if (!fallback || fallback.id === config.model) return config.model;
+		log("session", `using ${fallback.id} instead of ${config.model}`);
 		return fallback.id;
 	}
 

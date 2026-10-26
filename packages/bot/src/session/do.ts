@@ -258,6 +258,17 @@ export class BotSession extends DurableObject<Env> {
 				const model = body.model.trim();
 				if (!isValidModel(model)) return json({ error: "model must be a provider/model reference" }, 400);
 				return yield* attempt(async () => {
+					const config = await loadConfig();
+					const provider = model.split("/")[0] ?? "";
+					if (!config.connections.some((connection) => connection.integrationID === provider)) {
+						const connected = config.connections.map((connection) => connection.integrationID).join(", ") || "none";
+						return json(
+							{
+								error: `\`${provider}\` is not connected here, so \`${model}\` cannot run. Connected providers: ${connected}. Pick a model from one of those.`,
+							},
+							400,
+						);
+					}
 					const existing = await store.settings();
 					await store.putSettings({
 						model,
