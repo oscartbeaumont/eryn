@@ -33,7 +33,7 @@ interface StreamListener {
 	send: (occurrence: Occurrence) => void;
 }
 
-export class GatewayDiscordV3 extends DurableObject<Env> {
+export class GatewayDiscordV4 extends DurableObject<Env> {
 	private readonly gateway: DiscordGateway;
 	private readonly subscriptions = new Map<string, Subscription>();
 	private readonly listeners = new Set<StreamListener>();
