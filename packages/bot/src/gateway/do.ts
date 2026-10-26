@@ -96,6 +96,10 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				);
 			},
 		});
+		// A fresh instance — after a deploy reset or an eviction — has no socket.
+		// Connect before the first request so the bot comes back on its own, rather
+		// than staying offline until something happens to call /wake.
+		state.blockConcurrencyWhile(() => this.ensure());
 	}
 
 	/** Keeps the gateway alive and arms the next wake-up. */

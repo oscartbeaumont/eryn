@@ -29,7 +29,9 @@ export { BotGatewayV5, BotSessionV5 };
  * restart has had a moment: that brings the socket back immediately instead of
  * leaving the bot offline until the next cron tick.
  */
-export async function wake(env: Env): Promise<{ connected?: boolean; deploy?: string | null } | undefined> {
+export async function wake(
+	env: Env,
+): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
 	const call = async (): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> => {
 		const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
@@ -52,7 +54,7 @@ export async function wake(env: Env): Promise<{ connected?: boolean; deploy?: st
 		}
 	}
 	if (!state) return undefined;
-	return { connected: state.connected, deploy: state.deploy ?? null };
+	return { connected: state.connected, deploy: state.deploy ?? null, restart: state.restart === true };
 }
 
 /**
