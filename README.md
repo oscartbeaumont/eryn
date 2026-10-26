@@ -102,6 +102,28 @@ pnpm deploy       # cf deploy
 The Discord OAuth flow needs a registered redirect URI, so sign-in works against
 the deployed origin rather than a local one.
 
+### Deploying
+
+A deploy does not restart a live Durable Object: it keeps running the code it
+started with, and its own `versionMetadata()` binding keeps reporting that
+deploy. So the Worker sends its deploy id to every object it calls, and an
+object that sees a new one schedules a restart (an alarm a second out) instead
+of failing the request. A turn or tool call in flight finishes first.
+
+That makes a deploy take effect within a second or two, with no renames:
+
+```sh
+pnpm deploy
+curl -s https://eryn.otbeaumont.me/health
+# {"ok":true,"deploy":"<worker deploy>","bot":{"connected":true,"deploy":"<bot object deploy>"}}
+```
+
+`deploy` and `bot.deploy` matching means the objects are running the code you
+just shipped; if they differ, the object has not restarted yet. A first deploy
+that introduces this mechanism (or a change to an object's storage layout)
+still needs a class rename with a `renamed` tombstone, which migrates storage to
+objects that start on the new code.
+
 ## Configuration
 
 ```
