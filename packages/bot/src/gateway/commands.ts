@@ -9,7 +9,7 @@
 
 import { CLIENT_ID, publicOrigin } from "../config";
 import { describeError } from "../errors";
-import type { DiscordCommand } from "../discord/api";
+import type { DiscordCommand, DiscordCommandOption } from "../discord/api";
 import {
 	actionButton,
 	buttonRow,
@@ -25,9 +25,6 @@ import { modalValues } from "../discord/socket";
 import { describeTools } from "../mcp/links";
 import type { McpLink, ToolAccess } from "../session/models";
 import { GatewayClient, SessionClient, type HostedServer } from "./client";
-
-/** Bump when the registered command set changes so it is re-registered. */
-export const COMMANDS_VERSION = "3";
 
 const MAX_SELECT_OPTIONS = 25;
 /** Discord's own id limit; our encoded ids must stay under it. */
@@ -187,6 +184,37 @@ export function erynCommand(): DiscordCommand {
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
 			{ name: "help", description: "How Eryn is set up, and where the console is", type: 1 },
 		],
+	};
+}
+
+/**
+ * Whether Discord's copy of the command already matches the one we want.
+ *
+ * Registering is a PUT of the whole set, and Discord bumps the command's version
+ * even when nothing changed. Every version bump makes clients that still hold
+ * the previous copy answer "This command is outdated", so compare first and only
+ * write when the tree really differs.
+ */
+export function sameCommands(
+	registered: readonly DiscordCommand[],
+	desired: readonly DiscordCommand[],
+): boolean {
+	const shape = (command: DiscordCommand) => ({
+		name: command.name,
+		description: command.description,
+		type: command.type,
+		options: (command.options ?? []).map(optionShape),
+	});
+	return JSON.stringify(registered.map(shape)) === JSON.stringify(desired.map(shape));
+}
+
+function optionShape(option: DiscordCommandOption): unknown {
+	return {
+		name: option.name,
+		description: option.description,
+		type: option.type,
+		required: option.required ?? false,
+		options: (option.options ?? []).map(optionShape),
 	};
 }
 

@@ -28,13 +28,12 @@ import {
 } from "../discord/api";
 import type { DiscordContext } from "../discord/context";
 import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
-import { COMMANDS_VERSION, erynCommand, handleInteraction, type CommandContext } from "./commands";
+import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { GatewayClient, SessionClient } from "./client";
 import { maybeAnnounceInstall } from "./install";
 
 const WAKE_PATH = "/wake";
 const THREAD_PREFIX = "thread:";
-const COMMANDS_KEY = "discord:commands";
 const MAX_THREAD_NAME = 100;
 const DEFAULT_KEEPALIVE_SECONDS = 840;
 /** Text that interrupts the running turn when sent in an owned thread. */
@@ -168,15 +167,24 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		const me = await this.rest.me();
 		this.botUserId = me.id;
 		log(`signed in as ${me.username ?? me.id}`);
-		await this.registerCommands(me.id);
+		await this.syncCommands(me.id);
 		this.socket.ensure();
 	}
 
-	private async registerCommands(applicationId: string): Promise<void> {
-		if ((await this.ctx.storage.get<string>(COMMANDS_KEY)) === COMMANDS_VERSION) return;
-		await this.rest.overwriteCommands(applicationId, [erynCommand()]);
-		await this.ctx.storage.put(COMMANDS_KEY, COMMANDS_VERSION);
-		log("registered global commands");
+	/**
+	 * Make Discord's copy of the commands match this build.
+	 *
+	 * Compared against what Discord actually holds rather than a version marker,
+	 * so a restart with unchanged commands writes nothing: every write bumps the
+	 * command version, and a client holding the previous copy then refuses the
+	 * command with "This command is outdated".
+	 */
+	private async syncCommands(applicationId: string): Promise<void> {
+		const desired = [erynCommand()];
+		const registered = await this.rest.listCommands(applicationId).catch(() => undefined);
+		if (registered && sameCommands(registered, desired)) return;
+		await this.rest.overwriteCommands(applicationId, desired);
+		log(registered ? "updated the global commands" : "registered the global commands");
 	}
 
 	private async keepAlive(): Promise<void> {

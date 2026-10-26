@@ -161,6 +161,12 @@ export interface DiscordCommand {
 	options?: readonly DiscordCommandOption[];
 }
 
+/** A command as Discord stores it, which is what the bot compares against. */
+export interface DiscordRegisteredCommand extends DiscordCommand {
+	id: string;
+	version?: string;
+}
+
 /** How to acknowledge an interaction that produced a message. */
 export interface InteractionMessageOptions {
 	ephemeral?: boolean;
@@ -438,6 +444,11 @@ export function discordRest(token: string) {
 		/** Open a modal in response to a component or command interaction. */
 		async interactionModal(interactionId: string, interactionToken: string, modal: DiscordModal): Promise<void> {
 			await interactionCallback(interactionId, interactionToken, { type: 9, data: modal });
+		},
+
+		/** The application's current global commands. */
+		async listCommands(applicationId: string): Promise<readonly DiscordRegisteredCommand[] | undefined> {
+			return await request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
 		},
 
 		/** Replace the application's global commands. */
