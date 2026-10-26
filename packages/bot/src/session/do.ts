@@ -74,7 +74,7 @@ function readBody<S extends Schema.ConstraintDecoder<unknown>>(
 	return decodeBody(schema, request).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 400))));
 }
 
-export class BotSessionV4 extends DurableObject<Env> {
+export class BotSessionV5 extends DurableObject<Env> {
 	private readonly guildId: string;
 	private readonly runtime: ManagedRuntime.ManagedRuntime<GuildStore | GuildAgent | Workspace | DiscordApi, never>;
 	/** Requests currently running, so a deploy restart does not cut a turn in half. */

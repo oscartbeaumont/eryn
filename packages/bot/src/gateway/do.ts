@@ -47,7 +47,7 @@ function json(body: unknown, status = 200): Response {
 	return Response.json(body, { status });
 }
 
-export class BotGatewayV4 extends DurableObject<Env> {
+export class BotGatewayV5 extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	private readonly socket: DiscordSocket;

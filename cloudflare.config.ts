@@ -51,11 +51,11 @@ export default defineConfig({
 		env: {
 			// The gateway: one object per Eryn user, plus the singleton events hub
 			// that owns the lazily-opened Discord socket for MCP events.
-			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUserV4" }),
-			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscordV4" }),
+			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUserV5" }),
+			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscordV5" }),
 			// The bot: the singleton Discord socket, and one session per guild.
-			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV4" }),
-			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV4" }),
+			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV5" }),
+			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV5" }),
 
 			// Discord: the bot token powers the socket and the Discord tools, and the
 			// client id/secret drive the console's sign-in.
@@ -103,19 +103,23 @@ export default defineConfig({
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
-			GatewayUserV4: exports.durableObject({ storage: "sqlite" }),
-			GatewayDiscordV4: exports.durableObject({ storage: "sqlite" }),
-			BotGatewayV4: exports.durableObject({ storage: "sqlite" }),
-			BotSessionV4: exports.durableObject({ storage: "sqlite" }),
+			GatewayUserV5: exports.durableObject({ storage: "sqlite" }),
+			GatewayDiscordV5: exports.durableObject({ storage: "sqlite" }),
+			BotGatewayV5: exports.durableObject({ storage: "sqlite" }),
+			BotSessionV5: exports.durableObject({ storage: "sqlite" }),
 			// A deploy does not restart a live Durable Object, so the classes were
 			// renamed: the `renamed` tombstones move every object's storage to the
 			// new classes, which start on this deploy's code. V3 is the last rename
 			// needed: from here the Worker tells each object which deploy is current
 			// and the object restarts itself, so code changes take effect on their own.
-			GatewayUserV3: exports.durableObject({ state: "renamed", renamedTo: "GatewayUserV4" }),
-			GatewayDiscordV3: exports.durableObject({ state: "renamed", renamedTo: "GatewayDiscordV4" }),
-			BotGatewayV3: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV4" }),
-			BotSessionV3: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV4" }),
+			GatewayUserV4: exports.durableObject({ state: "renamed", renamedTo: "GatewayUserV5" }),
+			GatewayDiscordV4: exports.durableObject({ state: "renamed", renamedTo: "GatewayDiscordV5" }),
+			BotGatewayV4: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV5" }),
+			BotSessionV4: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV5" }),
+			GatewayUserV3: exports.durableObject({ state: "deleted" }),
+			GatewayDiscordV3: exports.durableObject({ state: "deleted" }),
+			BotGatewayV3: exports.durableObject({ state: "deleted" }),
+			BotSessionV3: exports.durableObject({ state: "deleted" }),
 			GatewayUserV2: exports.durableObject({ state: "deleted" }),
 			GatewayDiscordV2: exports.durableObject({ state: "deleted" }),
 			BotGatewayV2: exports.durableObject({ state: "deleted" }),

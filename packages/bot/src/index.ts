@@ -14,12 +14,12 @@ import { env } from "cloudflare:workers";
 import { log } from "./config";
 import { verify } from "./crypto";
 import { SessionClient } from "./gateway/client";
-import { BotGatewayV4 } from "./gateway/do";
+import { BotGatewayV5 } from "./gateway/do";
 import { MCP_CALLBACK_PATH } from "./mcp/links";
-import { BotSessionV4 } from "./session/do";
+import { BotSessionV5 } from "./session/do";
 import { withDeploy } from "./deploy";
 
-export { BotGatewayV4, BotSessionV4 };
+export { BotGatewayV5, BotSessionV5 };
 
 /**
  * Poke the singleton gateway object so it connects and arms its alarm.
