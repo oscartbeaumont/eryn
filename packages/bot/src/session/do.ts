@@ -137,7 +137,9 @@ export class BotSessionV4 extends DurableObject<Env> {
 			return;
 		}
 		await this.ctx.storage.delete("deploy:restart");
-		this.ctx.abort();
+		// Abort after this event returns: aborting inside it would discard the
+		// delete, and the alarm would retry (offline) with exponential backoff.
+		setTimeout(() => this.ctx.abort(), 50);
 	}
 
 	private route(request: Request): Effect.Effect<Response, never, GuildStore | GuildAgent | DiscordApi> {

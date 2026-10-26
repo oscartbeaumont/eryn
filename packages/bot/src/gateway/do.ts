@@ -121,7 +121,16 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		}
 	}
 
-	/** Abort into the new code if a deploy happened while this object was live. */
+	/**
+	 * Restart this object when a deploy has moved on.
+	 *
+	 * A live object keeps the code it started with, so the caller says which
+	 * deploy is current on every request. The restart itself must happen *after*
+	 * this event finishes: aborting inside the event discards its storage writes,
+	 * which would leave `deploy:restart` set and the alarm retrying (and the bot
+	 * offline) with exponential backoff. A short timer aborts the isolate once the
+	 * handler has returned, so the delete and the next alarm are durable.
+	 */
 	private async restartIfDeployed(): Promise<boolean> {
 		if (!(await this.ctx.storage.get<boolean>("deploy:restart"))) return false;
 		await this.ctx.storage.delete("deploy:restart");
@@ -129,8 +138,13 @@ export class BotGatewayV4 extends DurableObject<Env> {
 		// brings the replacement straight back up so it reconnects the socket
 		// instead of waiting for the next scheduled wake.
 		await this.ctx.storage.setAlarm(Date.now() + 1_000);
-		this.ctx.abort();
+		this.abortAfterEvent();
 		return true;
+	}
+
+	/** Abort once the current event has completed and its writes have committed. */
+	private abortAfterEvent(): void {
+		setTimeout(() => this.ctx.abort(), 50);
 	}
 
 	async fetch(request: Request): Promise<Response> {

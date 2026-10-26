@@ -123,6 +123,12 @@ deploy. So the Worker sends its deploy id to every object it calls, and an
 object that sees a new one schedules a restart (an alarm a second out) instead
 of failing the request. A turn or tool call in flight finishes first.
 
+The restart has to abort the object *after* the event that noticed the deploy
+has finished: `ctx.abort()` discards the event's storage writes, so aborting
+inside an alarm rolls back the "restart done" marker and the alarm retries with
+exponential backoff — with the bot offline for the whole retry cycle. The
+objects therefore clear the marker, commit, and abort on a short timer.
+
 That makes a deploy take effect within a second or two, with no renames:
 
 ```sh

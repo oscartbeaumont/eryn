@@ -291,6 +291,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(ctx, interaction, "reply", () => setupModel(ctx, interaction, session));
 		case "setup:status":
 			return await guarded(ctx, interaction, "reply", async () => {
+				await answer.defer();
 				const status = await session.config();
 				const providers = status.providers.length
 					? status.providers.map((provider) => `• ${provider.integrationID}`).join("\n")
@@ -332,6 +333,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(ctx, interaction, "reply", () => mcpLinkStart(ctx, interaction, userId));
 		case "mcp:list":
 			return await guarded(ctx, interaction, "reply", async () => {
+				await answer.defer();
 				const links = await session.links();
 				await answer.reply(
 					formatLinks(links),
@@ -342,6 +344,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(ctx, interaction, "reply", () => testAllLinks(ctx, interaction, session));
 		case "mcp:remove":
 			return await guarded(ctx, interaction, "reply", async () => {
+				await answer.defer();
 				const links = await session.links();
 				if (!links.length) {
 					await answer.reply("No MCP servers are linked to this server.");
@@ -835,6 +838,7 @@ async function mcpLinkStart(ctx: CommandContext, interaction: DiscordInteraction
 		await answer.reply("I could not tell who you are, so I cannot list your hosted MCP servers.");
 		return;
 	}
+	await answer.defer();
 	const servers = (await ctx.gateway.servers(userId)).filter((server) => server.enabled);
 	if (!servers.length) {
 		await answer.reply(
@@ -870,6 +874,7 @@ async function pickLinkPreset(
 	serverId: string,
 ): Promise<void> {
 	const answer = responder(ctx, interaction);
+	await answer.defer();
 	const servers = await ctx.gateway.servers(userId);
 	const server = servers.find((candidate) => candidate.id === serverId);
 	if (!server) {
@@ -897,6 +902,7 @@ async function completeLink(
 	preset: string,
 ): Promise<void> {
 	const answer = responder(ctx, interaction);
+	await answer.defer();
 	const servers = await ctx.gateway.servers(userId);
 	const server = servers.find((candidate) => candidate.id === serverId);
 	if (!server) {
