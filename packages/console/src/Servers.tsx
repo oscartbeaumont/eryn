@@ -224,7 +224,6 @@ function ServerCard(props: {
 	const visibleGroups = () => {
 		const providers = new Set(props.server.accounts.map((account) => account.provider));
 		return props.groups.filter((group) => {
-			if (group.id === "builtin") return true;
 			if (group.id === "discord") return providers.has("discord");
 			if (group.id === "github") return providers.has("github");
 			if (group.id === "google_calendar") return providers.has("google");

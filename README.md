@@ -25,7 +25,7 @@ own tokens.
   you like at `/console/accounts`. Each shows its avatar, username, and name, and
   links to its public profile where the provider has one. GitHub can be a personal
   token or Eryn's OAuth app; Google Calendar is OAuth with full read and write.
-- **Tools.** Four groups — `builtin`, `discord`, `github`, `google_calendar` —
+- **Tools.** Three groups — `discord`, `github`, `google_calendar` —
   configured per hosted server as a coarse `none`/`read`/`write`/`all` per group
   plus optional per-tool overrides. Read and write are derived from each tool's
   own nature, so a new tool is classified without a hand-maintained list.

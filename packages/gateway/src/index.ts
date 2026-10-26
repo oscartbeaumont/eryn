@@ -2,7 +2,7 @@
  * `@oscartbeaumont/eryn-gateway` — the MCP server.
  *
  * It owns accounts, the MCP servers a user hosts, the MCP authorization server,
- * the tool groups (built-in, Discord, GitHub, Google Calendar), and the MCP
+ * the tool groups (Discord, GitHub, Google Calendar), and the MCP
  * Events extension. It never imports the bot, and nothing in it needs to.
  *
  * `handle` is the whole public surface: a request the gateway does not own comes

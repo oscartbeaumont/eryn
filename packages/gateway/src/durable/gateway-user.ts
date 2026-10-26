@@ -21,7 +21,6 @@ import { descriptors, DISCORD_MESSAGE_EVENT, type Occurrence } from "../events";
 import { mintGrantToken } from "../mcp/access";
 import { createEndpoint, type Endpoint } from "../mcp/endpoint";
 import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer } from "../model";
-import { builtinTool } from "../tools/builtin";
 import { catalog, groupOf, visibleToolNames } from "../tools/catalog";
 import { discordTool } from "../tools/discord";
 import { githubApi, githubTool, type GitHubApi } from "../tools/github";
@@ -254,7 +253,7 @@ export class GatewayUserV4 extends DurableObject<Env> {
 		);
 		return visibleToolNames(server.tools, catalog()).filter((name) => {
 			const group = groupOf(name);
-			if (!group || group === "builtin") return true;
+			if (!group) return true;
 			if (group === "discord") return assigned.has("discord");
 			if (group === "github") return assigned.has("github");
 			if (group === "google_calendar") return assigned.has("google");
@@ -353,9 +352,6 @@ export class GatewayUserV4 extends DurableObject<Env> {
 		const assigned = server.accountIds
 			.map((id) => accounts.find((account) => account.id === id))
 			.filter((account): account is Account => account !== undefined);
-
-		const builtin = builtinTool(name);
-		if (builtin) return builtin.run(args);
 
 		const discord = discordTool(name);
 		if (discord) return await discord.run(this.rest, args);

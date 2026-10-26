@@ -16,7 +16,7 @@ const features = [
 	{
 		num: "[03]",
 		title: "Your own MCP server",
-		body: "Host MCP servers with GitHub, Google Calendar, Discord and built-in tools, hand each one a set of accounts, and point any harness at its endpoint over OAuth.",
+		body: "Host MCP servers with GitHub, Google Calendar and Discord tools, hand each one a set of accounts, and point any harness at its endpoint over OAuth.",
 	},
 ];
 

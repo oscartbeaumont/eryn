@@ -282,7 +282,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 				...(form.title?.trim() ? { title: form.title.trim() } : {}),
 				enabled: true,
 				accountIds: [],
-				tools: { groups: { builtin: "all" } },
+				tools: EMPTY_ACCESS,
 				createdAt: Date.now(),
 			};
 			await callUser(session.uid, "/store/server", { method: "PUT", body: JSON.stringify(server) });

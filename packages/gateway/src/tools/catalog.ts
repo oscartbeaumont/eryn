@@ -1,7 +1,7 @@
 /**
  * The tool catalogue the gateway can expose.
  *
- * One flat list, assembled from the four groups, each entry carrying the group
+ * One flat list, assembled from the three groups, each entry carrying the group
  * it belongs to and whether calling it mutates anything. The access level is
  * derived here rather than inside the individual tool modules so the console can
  * present a group's read/write split without asking any of them.
@@ -9,7 +9,6 @@
 
 import type { ServerSummary } from "../model";
 import type { CatalogTool } from "../model";
-import { BUILTIN_TOOLS } from "./builtin";
 import { DISCORD_TOOLS } from "./discord";
 import { GITHUB_TOOLS } from "./github";
 import { GOOGLE_TOOLS } from "./google";
@@ -67,7 +66,6 @@ function entry(
 /** Every tool the deployment knows about, in group order. */
 export function catalog(): CatalogEntry[] {
 	return [
-		...BUILTIN_TOOLS.map((tool) => entry(tool, "builtin")),
 		...DISCORD_TOOLS.map((tool) => entry(tool, "discord")),
 		...GITHUB_TOOLS.map((tool) => entry(tool, "github")),
 		...GOOGLE_TOOLS.map((tool) => entry(tool, "google_calendar")),

@@ -31,11 +31,10 @@ export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const STATE_TTL_MS = 10 * 60 * 1_000;
 
 /** The groups a tool can belong to, in the order the console shows them. */
-export const TOOL_GROUPS = ["builtin", "discord", "github", "google_calendar"] as const;
+export const TOOL_GROUPS = ["discord", "github", "google_calendar"] as const;
 export type ToolGroup = (typeof TOOL_GROUPS)[number];
 
 export const TOOL_GROUP_NAMES: Record<ToolGroup, string> = {
-	builtin: "Built in",
 	discord: "Discord",
 	github: "GitHub",
 	google_calendar: "Google Calendar",
