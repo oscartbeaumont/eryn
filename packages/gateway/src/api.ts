@@ -20,6 +20,7 @@ import {
 	TOOL_GROUP_NAMES,
 } from "./config";
 import { CLIENT_ID } from "./discord-ids";
+import { withDeploy } from "./deploy";
 import {
 	exchangeGitHubCode,
 	exchangeGoogleCode,
@@ -91,7 +92,7 @@ function userStub(uid: string): DurableObjectStub {
 
 /** Call a storage route on a user's object. */
 async function callUser<T>(uid: string, path: string, init?: RequestInit): Promise<T> {
-	const response = await userStub(uid).fetch(`https://gateway.internal${path}`, init);
+	const response = await userStub(uid).fetch(`https://gateway.internal${path}`, withDeploy(env, init));
 	if (!response.ok) {
 		const body = (await response.json().catch(() => ({}))) as { error?: string };
 		throw new Error(body.error ?? `the gateway refused the request (HTTP ${response.status})`);

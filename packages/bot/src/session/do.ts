@@ -14,6 +14,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 
 import { DEFAULT_MODEL, isValidModel, log } from "../config";
+import { DEPLOY_HEADER, currentDeploy } from "../deploy";
 import { BotError, ParseError, describeError } from "../errors";
 import { DiscordApi } from "../discord/api";
 import { Workspace } from "../opencode/store";
@@ -91,7 +92,7 @@ export class BotSessionV3 extends DurableObject<Env> {
 	}
 
 	async fetch(request: Request): Promise<Response> {
-		await this.ensureCurrentVersion();
+		await this.ensureCurrentVersion(request);
 		this.inFlight += 1;
 		try {
 			return await this.runtime.runPromise(this.route(request));
@@ -106,10 +107,10 @@ export class BotSessionV3 extends DurableObject<Env> {
 	/**
 	 * Restart this object when a deploy has moved on, once the current request is
 	 * done. A live object keeps the code it started with, so a fix is invisible
-	 * until it restarts.
+	 * until it restarts; the caller tells it which deploy is current.
 	 */
-	private async ensureCurrentVersion(): Promise<void> {
-		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+	private async ensureCurrentVersion(request: Request): Promise<void> {
+		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
 		if (stored === version) return;

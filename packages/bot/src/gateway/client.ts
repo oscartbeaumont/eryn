@@ -8,6 +8,7 @@
  */
 
 import { Option, Schema } from "effect";
+import { withDeploy } from "../deploy";
 import { botError, describeError } from "../errors";
 import {
 	IntegrationOptionSchema,
@@ -91,11 +92,14 @@ export class SessionClient {
 	}
 
 	private async post(path: string, body: unknown): Promise<unknown> {
-		const response = await this.stub().fetch(`https://bot.internal${path}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-		});
+		const response = await this.stub().fetch(
+			`https://bot.internal${path}`,
+			withDeploy(this.env, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			}),
+		);
 		const payload = (await response.json().catch(() => undefined)) as unknown;
 		if (!response.ok) {
 			const message =
@@ -176,11 +180,14 @@ export class GatewayClient {
 
 	private async post(path: string, body: unknown): Promise<unknown> {
 		const userId = (body as { userId: string }).userId;
-		const response = await this.stub(userId).fetch(`https://gateway.internal${path}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-		});
+		const response = await this.stub(userId).fetch(
+			`https://gateway.internal${path}`,
+			withDeploy(this.env, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			}),
+		);
 		const payload = (await response.json().catch(() => undefined)) as unknown;
 		if (!response.ok) throw botError(`the gateway returned HTTP ${response.status} for ${path}`);
 		return payload;

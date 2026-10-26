@@ -14,6 +14,7 @@ import { env } from "cloudflare:workers";
 import { DEFAULT_ORIGIN, MCP_PATH } from "./config";
 import { protectionMetadata, gatewayRoutes } from "./api";
 import { AS_METADATA_PATH, bearerToken, challenge, verifyAccessToken } from "./mcp/oauth";
+import { DEPLOY_HEADER, currentDeploy } from "./deploy";
 
 export { GatewayUserV3 } from "./durable/gateway-user";
 export { GatewayDiscordV3 } from "./durable/gateway-discord";
@@ -84,6 +85,10 @@ async function handleMcp(request: Request, slug: string): Promise<Response> {
 	const binding = env.GATEWAY_USER;
 	const headers = new Headers(request.headers);
 	if (grant.guild) headers.set("x-eryn-guild", grant.guild);
+	// Tell the object which deploy is current, so a live object that is still
+	// running older code restarts before serving this request's tool calls.
+	const deploy = currentDeploy(env);
+	if (deploy) headers.set(DEPLOY_HEADER, deploy);
 	const init: RequestInit = { method: request.method, headers };
 	if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
 	const forwarded = new Request(request.url, init);

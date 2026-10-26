@@ -15,6 +15,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_ORIGIN, MCP_PATH } from "../config";
 import { randomToken } from "../crypto";
+import { DEPLOY_HEADER, currentDeploy, withDeploy } from "../deploy";
 import { describeError, discordRest, type DiscordRest } from "../discord/api";
 import { descriptors, DISCORD_MESSAGE_EVENT, type Occurrence } from "../events";
 import { mintGrantToken } from "../mcp/access";
@@ -84,12 +85,13 @@ export class GatewayUserV3 extends DurableObject<Env> {
 	 * Restart this object when a deploy has moved on.
 	 *
 	 * A deploy does not restart a live Durable Object: it keeps running the code
-	 * it started with. Rather than abort the request that notices the change,
-	 * schedule an alarm a moment out; the alarm restarts the object on the new
-	 * code once the request has finished.
+	 * it started with, and its own `versionMetadata()` keeps reporting that
+	 * deploy. So the caller says which deploy is current on every request; when
+	 * that changes, schedule an alarm a moment out so the restart happens after
+	 * this request has finished.
 	 */
-	private async ensureCurrentVersion(): Promise<void> {
-		const version = (this.env as unknown as { CF_VERSION?: { id?: string } }).CF_VERSION?.id;
+	private async ensureCurrentVersion(request: Request): Promise<void> {
+		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
 		if (!version) return;
 		const stored = await this.ctx.storage.get<string>("deploy:version");
 		if (stored === version) return;
@@ -114,7 +116,7 @@ export class GatewayUserV3 extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
-		await this.ensureCurrentVersion();
+		await this.ensureCurrentVersion(request);
 		this.inFlight += 1;
 		try {
 			return await this.route(request);
@@ -327,11 +329,14 @@ export class GatewayUserV3 extends DurableObject<Env> {
 			return Response.json({ jsonrpc: "2.0", id, result: { events: descriptors(hasDiscord) } });
 		}
 		const kind = method.slice("events/".length);
-		const forwarded = await hub.fetch(`https://hub.internal/events/${kind}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(params),
-		});
+		const forwarded = await hub.fetch(
+			`https://hub.internal/events/${kind}`,
+			withDeploy(this.env, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(params),
+			}),
+		);
 		if (!forwarded.ok || kind === "stream") return forwarded;
 		const result = await forwarded.json();
 		return Response.json({ jsonrpc: "2.0", id, result });
