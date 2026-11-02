@@ -153,8 +153,32 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		if (path === "/store/accounts") return Response.json({ accounts: await listAccounts(this.ctx.storage, this.secret) });
 		if (path === "/store/account") {
 			if (request.method === "PUT") {
-				const account = await request.json<Account>();
-				await putAccount(this.ctx.storage, this.secret, account);
+				const incoming = await request.json<Account>();
+				const accounts = await listAccounts(this.ctx.storage, this.secret);
+				const same = accounts.filter(
+					(account) => account.provider === incoming.provider && account.profile.id === incoming.profile.id,
+				);
+				if (!same.length) {
+					await putAccount(this.ctx.storage, this.secret, incoming);
+					return Response.json({ ok: true });
+				}
+				// A reconnect is the same identity with a fresh grant. Keep the id a
+				// server already names (so assignments survive), replace its credential,
+				// and fold any duplicates of that identity into it.
+				const servers = await this.servers();
+				const keep = same.find((account) => servers.some((server) => server.accountIds.includes(account.id))) ?? same[0]!;
+				await putAccount(this.ctx.storage, this.secret, { ...incoming, id: keep.id, createdAt: keep.createdAt });
+				for (const duplicate of same) {
+					if (duplicate.id === keep.id) continue;
+					await deleteAccount(this.ctx.storage, duplicate.id);
+					for (const server of servers) {
+						if (!server.accountIds.includes(duplicate.id)) continue;
+						await putServer(this.ctx.storage, this.secret, {
+							...server,
+							accountIds: [...new Set(server.accountIds.map((id) => (id === duplicate.id ? keep.id : id)))],
+						});
+					}
+				}
 				return Response.json({ ok: true });
 			}
 			if (request.method === "DELETE") {
@@ -474,8 +498,23 @@ export class GatewayUserV5 extends DurableObject<Env> {
 
 		const google = googleTool(name);
 		if (google) {
-			const account = assigned.find((entry) => entry.provider === "google");
+			const assignedGoogle = assigned.find((entry) => entry.provider === "google");
+			// Reconnecting a provider adds an account rather than rewriting the old
+			// one, so an assignment can still name the credential that expired. Use
+			// the newest sign-in for the *same* Google identity and move the server
+			// over to it, leaving a different account's assignment alone.
+			const sameIdentity = assignedGoogle
+				? accounts.filter((entry) => entry.provider === "google" && entry.profile.id === assignedGoogle.profile.id)
+				: [];
+			const account = sameIdentity.sort((a, b) => b.createdAt - a.createdAt)[0] ?? assignedGoogle;
 			if (!account) throw new Error("No Google account is assigned to this MCP server.");
+			if (assignedGoogle && account.id !== assignedGoogle.id) {
+				const updated: McpServer = {
+					...server,
+					accountIds: [...new Set(server.accountIds.map((id) => (id === assignedGoogle.id ? account.id : id)))],
+				};
+				void putServer(this.ctx.storage, this.secret, updated).catch(() => undefined);
+			}
 			const clientId = this.env.GOOGLE_CLIENT_ID?.trim();
 			const clientSecret = this.env.GOOGLE_CLIENT_SECRET?.trim();
 			if (!clientId || !clientSecret) throw new Error("Google is not configured on this deployment.");
