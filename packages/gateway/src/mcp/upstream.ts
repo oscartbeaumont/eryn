@@ -15,6 +15,7 @@
 import { Option, Schema } from "effect";
 
 import { base64url, randomToken } from "../crypto";
+import { CredentialRejectedError } from "../reauth";
 import type { UpstreamAuth, UpstreamTool } from "../model";
 
 /** The protocol revision this client asks for. A server may negotiate another. */
@@ -300,7 +301,7 @@ export async function callUpstreamTool(options: {
 			timeoutMs,
 		);
 		if (initialize.response.status === 401 || initialize.response.status === 403) {
-			throw new Error("The upstream server rejected this server's credentials. Reconnect it in the Eryn console.");
+			throw new CredentialRejectedError(`The upstream server rejected the stored sign-in (HTTP ${initialize.response.status}).`);
 		}
 		if (!initialize.response.ok) throw new Error(`The upstream server answered HTTP ${initialize.response.status}.`);
 		sessionId = initialize.response.headers.get("mcp-session-id") ?? undefined;
@@ -318,7 +319,7 @@ export async function callUpstreamTool(options: {
 			protocolVersion,
 		);
 		if (call.response.status === 401 || call.response.status === 403) {
-			throw new Error("The upstream server rejected this server's credentials. Reconnect it in the Eryn console.");
+			throw new CredentialRejectedError(`The upstream server rejected the stored sign-in (HTTP ${call.response.status}).`);
 		}
 		if (!call.response.ok) throw new Error(`The upstream server answered HTTP ${call.response.status}.`);
 		const result = decode(CallToolResultSchema, call.message?.result);

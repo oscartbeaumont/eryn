@@ -59,6 +59,8 @@ export const CREDENTIAL = Schema.Struct({
 	refreshToken: Schema.optional(Schema.String),
 	/** When `token` stops working, in ms since the epoch. */
 	expiresAt: Schema.optional(Schema.Number),
+	/** Set when a provider rejected the credential; cleared by a reconnect. */
+	reauth: Schema.optional(Schema.Boolean),
 	/** A GitHub App installation id, the other way to act as GitHub. */
 	installationId: Schema.optional(Schema.String),
 });
@@ -81,6 +83,8 @@ export const AccountSummary = Schema.Struct({
 	label: Schema.String,
 	profile: PROFILE,
 	createdAt: Schema.Number,
+	/** The provider rejected the credential, so the console should offer a reconnect. */
+	reauth: Schema.Boolean,
 });
 export type AccountSummary = Schema.Schema.Type<typeof AccountSummary>;
 
@@ -125,6 +129,8 @@ export const UpstreamAuth = Schema.Struct({
 			accessToken: Schema.optional(Schema.String),
 			refreshToken: Schema.optional(Schema.String),
 			expiresAt: Schema.optional(Schema.Number),
+			/** Set when the server rejected the sign-in; cleared by a reconnect. */
+			reauth: Schema.optional(Schema.Boolean),
 			/** The PKCE verifier for a sign-in the browser has not finished. */
 			verifier: Schema.optional(Schema.String),
 			startedAt: Schema.optional(Schema.Number),
@@ -176,6 +182,8 @@ export const ConnectionSummary = Schema.Struct({
 	headerNames: Schema.Array(Schema.String),
 	/** Whether an OAuth connection has a token it can use. */
 	authenticated: Schema.Boolean,
+	/** Whether the server rejected the stored sign-in, so a reconnect is needed. */
+	needsReauth: Schema.Boolean,
 	/** Whether a sign-in is waiting for the browser to come back. */
 	pending: Schema.Boolean,
 	/** Whether the sign-in finishes on a loopback URL the user pastes back. */

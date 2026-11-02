@@ -13,7 +13,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { refreshGitHubToken } from "../account-oauth";
+import { providerName, refreshGitHubToken } from "../account-oauth";
 import { DEFAULT_ORIGIN, MCP_PATH } from "../config";
 import { randomToken } from "../crypto";
 import { DEPLOY_HEADER, currentDeploy, withDeploy } from "../deploy";
@@ -22,11 +22,12 @@ import { descriptors, DISCORD_MESSAGE_EVENT, type Occurrence } from "../events";
 import { mintGrantToken } from "../mcp/access";
 import { createEndpoint, type Endpoint } from "../mcp/endpoint";
 import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer, type UpstreamConnection } from "../model";
+import { CredentialRejectedError, isGrantRejection } from "../reauth";
 import { catalog, entriesFor, exposedToolName, inferAccess, visibleToolNames } from "../tools/catalog";
 import { discordTool } from "../tools/discord";
 import { githubApi, githubTool, type GitHubApi } from "../tools/github";
 import { googleApi, googleTool } from "../tools/google";
-import { callUpstreamTool, refreshUpstreamToken, staticHeaders } from "../mcp/upstream";
+import { UpstreamOAuthError, callUpstreamTool, refreshUpstreamToken, staticHeaders } from "../mcp/upstream";
 import {
 	deleteAccount,
 	deleteGrant,
@@ -521,8 +522,15 @@ export class GatewayUserV5 extends DurableObject<Env> {
 	): Promise<string> {
 		const upstream = this.upstreamFor(server, name);
 		if (upstream) {
-			const headers = await this.headersFor(server, upstream.connection);
-			return await callUpstreamTool({ url: upstream.connection.url, headers, name: upstream.tool, args });
+			try {
+				const headers = await this.headersFor(server, upstream.connection);
+				return await callUpstreamTool({ url: upstream.connection.url, headers, name: upstream.tool, args });
+			} catch (error) {
+				if (error instanceof CredentialRejectedError) {
+					await this.rejectConnection(server, upstream.connection, error);
+				}
+				throw error;
+			}
 		}
 
 		const assigned = server.accountIds
@@ -534,9 +542,16 @@ export class GatewayUserV5 extends DurableObject<Env> {
 
 		const github = githubTool(name);
 		if (github) {
-			const api = await this.githubFor(assigned);
-			if (!api) throw new Error("No GitHub account is assigned to this MCP server.");
-			return await github.run(api, args);
+			const account = assigned.find((entry) => entry.provider === "github");
+			if (!account) throw new Error("No GitHub account is assigned to this MCP server.");
+			try {
+				const api = await this.githubFor(assigned);
+				if (!api) throw new Error("No GitHub account is assigned to this MCP server.");
+				return await github.run(api, args);
+			} catch (error) {
+				if (error instanceof CredentialRejectedError) await this.rejectAccount(account, error);
+				throw error;
+			}
 		}
 
 		const google = googleTool(name);
@@ -571,27 +586,63 @@ export class GatewayUserV5 extends DurableObject<Env> {
 				(next) => {
 					void putAccount(this.ctx.storage, this.secret, {
 						...account,
-						credential: { ...account.credential, token: next.accessToken, expiresAt: next.expiresAt },
+						credential: {
+							...account.credential,
+							token: next.accessToken,
+							expiresAt: next.expiresAt,
+							reauth: false,
+						},
 					}).catch(() => undefined);
 				},
 			);
 			try {
 				return await google.run(client, args);
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				// Google keeps the reason in the response body. An expired or revoked
-				// grant cannot be refreshed, so say what the user can actually do
-				// instead of leaving a bare HTTP 400 in the transcript.
-				if (message.includes("invalid_grant") || message.includes("invalid_client")) {
-					throw new Error(
-						`The Google Calendar sign-in has expired or was revoked. Reconnect Google at ${this.origin()}/console/accounts, then try again. Nothing was changed. (${message})`,
-					);
-				}
+				if (error instanceof CredentialRejectedError) await this.rejectAccount(account, error);
 				throw error;
 			}
 		}
 
 		throw new Error(`Unknown tool ${name}.`);
+	}
+
+	/**
+	 * Mark an account as needing a sign-in and say where to do it.
+	 *
+	 * The provider is the part the user can fix; the console link is the only
+	 * place the replacement credential can be entered. Throws, because every
+	 * caller is a tool that must stop once its credential is gone.
+	 */
+	private async rejectAccount(account: Account, error: CredentialRejectedError): Promise<never> {
+		await putAccount(this.ctx.storage, this.secret, {
+			...account,
+			credential: { ...account.credential, reauth: true },
+		}).catch(() => undefined);
+		throw new Error(
+			`${providerName(account.provider)} needs to be reconnected. Open ${this.origin()}/console/accounts, connect it again, then try again. Nothing was changed. (${error.detail})`,
+		);
+	}
+
+	/** The same for an upstream connection: point at the server where it lives. */
+	private async rejectConnection(
+		server: McpServer,
+		connection: UpstreamConnection,
+		error: CredentialRejectedError,
+	): Promise<never> {
+		const oauth = connection.auth.oauth;
+		if (oauth) {
+			await this.saveConnection(server, {
+				...connection,
+				auth: { ...connection.auth, oauth: { ...oauth, reauth: true } },
+			}).catch(() => undefined);
+		}
+		const what =
+			connection.auth.kind === "headers"
+				? "rejected its headers. Update them"
+				: "needs to be signed in again. Reconnect it";
+		throw new Error(
+			`The ${connection.title ?? connection.name} connection on the ${server.name} MCP server ${what} at ${this.origin()}/console, then try again. (${error.detail})`,
+		);
 	}
 
 	/**
@@ -621,14 +672,15 @@ export class GatewayUserV5 extends DurableObject<Env> {
 	 * The headers to call one connection with.
 	 *
 	 * An OAuth access token lives an hour, so it is refreshed just before it
-	 * lapses and the rotated pair is written back; a refresh that fails is left
-	 * to the call itself, whose 401 is the error the user can act on.
+	 * lapses and the rotated pair is written back. A refused grant is a
+	 * reconnect; a transient token-server failure keeps the old token and lets
+	 * the call report the server's own answer.
 	 */
 	private async headersFor(server: McpServer, connection: UpstreamConnection): Promise<Record<string, string>> {
 		const oauth = connection.auth.oauth;
 		if (connection.auth.kind !== "oauth" || !oauth) return staticHeaders(connection.auth);
 		if (!oauth.accessToken) {
-			throw new Error(`**${connection.title ?? connection.name}** needs a sign-in. Open it in the Eryn console.`);
+			throw new CredentialRejectedError("The connection has no saved sign-in.");
 		}
 		const expires = oauth.expiresAt;
 		if (
@@ -648,6 +700,7 @@ export class GatewayUserV5 extends DurableObject<Env> {
 				});
 				const credential = {
 					...oauth,
+					reauth: false,
 					accessToken: next.accessToken,
 					...(next.refreshToken ? { refreshToken: next.refreshToken } : {}),
 					expiresAt: Date.now() + (next.expiresIn ?? 3_600) * 1_000,
@@ -655,9 +708,12 @@ export class GatewayUserV5 extends DurableObject<Env> {
 				};
 				await this.saveConnection(server, { ...connection, auth: { ...connection.auth, oauth: credential } });
 				return { authorization: `Bearer ${next.accessToken}` };
-			} catch {
-				// Fall through with the old token so the call reports the server's
-				// own rejection rather than a refresh failure nobody can action.
+			} catch (error) {
+				// A transient token-server failure keeps the old token so the call can
+				// report it; a refused grant is the connection being gone.
+				if (error instanceof UpstreamOAuthError && isGrantRejection(error.message)) {
+					throw new CredentialRejectedError(error.message);
+				}
 			}
 		}
 		return { authorization: `Bearer ${oauth.accessToken}` };
@@ -692,12 +748,14 @@ export class GatewayUserV5 extends DurableObject<Env> {
 					token = next.accessToken;
 					const credential = {
 						...account.credential,
+						reauth: false,
 						token: next.accessToken,
 						...(next.refreshToken ? { refreshToken: next.refreshToken } : {}),
 						...(next.expiresAt ? { expiresAt: next.expiresAt } : {}),
 					};
 					void putAccount(this.ctx.storage, this.secret, { ...account, credential }).catch(() => undefined);
-				} catch {
+				} catch (error) {
+					if (error instanceof CredentialRejectedError) throw error;
 					// Fall through with the old token so the tool reports GitHub's own
 					// rejection rather than a refresh failure the user cannot act on.
 				}

@@ -162,7 +162,14 @@ function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
 // --- Accounts ------------------------------------------------------------------
 
 function summariseAccount(account: Account): AccountSummary {
-	return { id: account.id, provider: account.provider, label: account.label, profile: account.profile, createdAt: account.createdAt };
+	return {
+		id: account.id,
+		provider: account.provider,
+		label: account.label,
+		profile: account.profile,
+		createdAt: account.createdAt,
+		reauth: account.credential.reauth === true,
+	};
 }
 
 function providers() {
@@ -289,6 +296,7 @@ function summariseConnections(server: McpServer): ConnectionSummary[] {
 		auth: connection.auth.kind,
 		headerNames: Object.keys(connection.auth.headers ?? {}),
 		authenticated: connected(connection.auth),
+		needsReauth: connection.auth.oauth?.reauth === true,
 		// A sign-in that never came back is not still waiting: the browser tab
 		// has been abandoned, so offer a fresh one instead of a dead state.
 		pending:
@@ -640,6 +648,7 @@ async function finishUpstreamSignin(
 				kind: "oauth",
 				oauth: {
 					...(cleared.auth.oauth ?? oauth),
+					reauth: false,
 					accessToken: tokens.accessToken,
 					...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
 					expiresAt: Date.now() + (tokens.expiresIn ?? 3_600) * 1_000,

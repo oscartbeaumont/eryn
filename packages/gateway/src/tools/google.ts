@@ -7,6 +7,8 @@
  * read-only in the console when the tools that write are switched off.
  */
 
+import { CredentialRejectedError, isGrantRejection, providerDetail } from "../reauth";
+
 const API = "https://www.googleapis.com/calendar/v3";
 const OAUTH_TOKEN = "https://oauth2.googleapis.com/token";
 
@@ -100,11 +102,14 @@ export function googleApi(
 			}),
 		});
 		if (!response.ok) {
-			// Google's body says *why* (`invalid_grant` means the account has to be
-			// reconnected; `invalid_client` is a deployment problem). It carries no
-			// token, so it is safe to put in the error the user sees.
-			const detail = await response.text().catch(() => "");
-			throw new Error(`Google refused a token refresh (HTTP ${response.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+			// Google's body says why. `invalid_grant` means the grant is gone and
+			// only a reconnect fixes it; anything else is retried or shown as-is.
+			// It carries no token, so it is safe to put in the error the user sees.
+			const detail = providerDetail(await response.text().catch(() => ""), 200);
+			if (isGrantRejection(detail)) {
+				throw new CredentialRejectedError(`Google refused the token refresh: ${detail}`);
+			}
+			throw new Error(`Google refused a token refresh (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
 		}
 		const body = (await response.json()) as { access_token: string; expires_in?: number };
 		const expiresAt = Date.now() + (body.expires_in ?? 3600) * 1_000;
@@ -125,8 +130,11 @@ export function googleApi(
 			});
 			if (response.status === 204) return undefined as T;
 			if (!response.ok) {
-				const detail = await response.text().catch(() => "");
-				throw new Error(`Google returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+				const detail = providerDetail(await response.text().catch(() => ""), 200);
+				if (response.status === 401) {
+					throw new CredentialRejectedError(`Google rejected the access token (HTTP 401)${detail ? `: ${detail}` : ""}`);
+				}
+				throw new Error(`Google returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
 			}
 			return (await response.json()) as T;
 		},

@@ -8,6 +8,7 @@
  */
 
 import type { Provider, Profile } from "./model";
+import { CredentialRejectedError, providerDetail } from "./reauth";
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_OAUTH = "https://github.com/login/oauth";
@@ -95,7 +96,13 @@ export async function refreshGitHubToken(options: {
 			refresh_token: options.refreshToken,
 		}),
 	});
-	if (!response.ok) throw new Error(`GitHub refused a token refresh (HTTP ${response.status})`);
+	if (!response.ok) {
+		const detail = providerDetail(await response.text().catch(() => ""));
+		if (response.status === 400 || response.status === 401) {
+			throw new CredentialRejectedError(`GitHub refused the token refresh (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
+		}
+		throw new Error(`GitHub refused a token refresh (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
+	}
 	const body = (await response.json()) as {
 		access_token?: string;
 		refresh_token?: string;

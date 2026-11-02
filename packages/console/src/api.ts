@@ -29,6 +29,8 @@ export interface AccountSummary {
 	label: string;
 	profile: Profile;
 	createdAt: number;
+	/** The provider rejected the saved credential; offer a reconnect. */
+	reauth: boolean;
 }
 
 export interface ProviderSummary {
@@ -115,6 +117,8 @@ export interface UpstreamConnection {
 	/** Header names, without their values. */
 	headerNames: string[];
 	authenticated: boolean;
+	/** The server rejected the saved sign-in; reconnect it. */
+	needsReauth: boolean;
 	pending: boolean;
 	/** The sign-in finishes on a loopback URL the user pastes back. */
 	loopback: boolean;

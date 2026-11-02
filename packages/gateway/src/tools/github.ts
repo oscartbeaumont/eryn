@@ -15,6 +15,7 @@
  */
 
 import { appJwt, type GitHubConfig } from "../github";
+import { CredentialRejectedError, providerDetail } from "../reauth";
 
 const API = "https://api.github.com";
 const JSON_HEADERS = {
@@ -81,8 +82,8 @@ export function githubApi(credential: GitHubCredential): GitHubApi {
 			if (!response.ok) {
 				const detail = await response.text().catch(() => "");
 				if (response.status === 401) {
-					throw new Error(
-						`GitHub rejected the stored token (HTTP 401). Reconnect the GitHub account in the Eryn console, then try again. ${clip(detail, 300)}`.trim(),
+					throw new CredentialRejectedError(
+						`GitHub rejected the token (HTTP 401) ${providerDetail(detail, 300)}`.trim(),
 					);
 				}
 				throw new Error(`GitHub ${method} ${path} failed (HTTP ${response.status}) ${clip(detail, 300)}`.trim());

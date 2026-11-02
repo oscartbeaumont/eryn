@@ -784,6 +784,9 @@ function ServerCard(props: {
 											<span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
 												{connection.auth}
 											</span>
+											<Show when={connection.needsReauth}>
+												<Chip tone="danger">Reconnect</Chip>
+											</Show>
 										</div>
 										<div class="mt-1 truncate font-mono text-xs text-muted">{connection.url}</div>
 										<Show when={connection.headerNames.length > 0}>
@@ -791,22 +794,33 @@ function ServerCard(props: {
 												headers: {connection.headerNames.join(", ")}
 											</div>
 										</Show>
-										<Show when={connection.auth === "oauth" && !connection.authenticated}>
+										<Show when={connection.auth === "oauth" && (!connection.authenticated || connection.needsReauth)}>
 											<p class="mt-1 max-w-[62ch] text-xs text-muted">
 												{connection.pending
 													? "Waiting for the sign-in to finish."
-													: "The sign-in did not finish. Some providers only accept redirect URIs they have registered — register the one below with them, or switch this connection to custom headers."}
+													: connection.needsReauth
+														? "The server rejected the saved sign-in. Reconnect it to use its tools again."
+														: "The sign-in did not finish. Some providers only accept redirect URIs they have registered — register the one below with them, or switch this connection to custom headers."}
 											</p>
 										</Show>
 										<div class="mt-2 flex flex-wrap gap-2">
-											<Show when={connection.auth === "oauth" && (!connection.authenticated || connection.pending)}>
+											<Show
+											when={
+												connection.auth === "oauth" &&
+												(!connection.authenticated || connection.pending || connection.needsReauth)
+											}
+										>
 												<button
 													type="button"
 													class={buttonClass.primary}
 													disabled={props.busy}
 													onClick={() => signIn(connection)}
 												>
-													{connection.pending ? "Restart sign-in" : "Sign in"}
+													{connection.pending
+													? "Restart sign-in"
+													: connection.needsReauth
+														? "Reconnect"
+														: "Sign in"}
 												</button>
 											</Show>
 											<button

@@ -380,7 +380,10 @@ function AccountRow(props: {
 			<Show
 				when={editing()}
 				fallback={
-					<div class="flex flex-wrap gap-2">
+					<div class="flex flex-wrap items-center gap-2">
+						<Show when={props.account.reauth}>
+							<Chip tone="danger">Reconnect needed</Chip>
+						</Show>
 						<button
 							type="button"
 							class={buttonClass.ghost}
