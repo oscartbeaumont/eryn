@@ -421,7 +421,10 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		const hub = this.env.GATEWAY_DISCORD.get(this.env.GATEWAY_DISCORD.idFromName("hub"));
 
 		if (method === "events/list") {
-			return Response.json({ jsonrpc: "2.0", id, result: { events: descriptors(hasDiscord) } });
+			// Protocol revision 2026-07-28 requires a resultType on every result,
+			// extension methods included; a client negotiating that revision
+			// rejects an extension result without one.
+			return Response.json({ jsonrpc: "2.0", id, result: { resultType: "complete", events: descriptors(hasDiscord) } });
 		}
 		const kind = method.slice("events/".length);
 		const forwarded = await hub.fetch(
@@ -433,8 +436,12 @@ export class GatewayUserV5 extends DurableObject<Env> {
 			}),
 		);
 		if (!forwarded.ok || kind === "stream") return forwarded;
-		const result = await forwarded.json();
-		return Response.json({ jsonrpc: "2.0", id, result });
+		const result = (await forwarded.json()) as unknown;
+		return Response.json({
+			jsonrpc: "2.0",
+			id,
+			result: { resultType: "complete", ...(result && typeof result === "object" ? result : {}) },
+		});
 	}
 
 	// --- Tool dispatch ---------------------------------------------------------

@@ -159,14 +159,42 @@ function makeClient(url: string, headers: Record<string, string> | undefined): {
 	return { client, transport };
 }
 
+/**
+ * An Effect schema dressed as a Standard Schema.
+ *
+ * The MCP client only accepts a result schema that implements Standard Schema,
+ * and an extension method has none of its own, so without this it refuses the
+ * call outright with "not a spec method". The reply is still decoded by the
+ * Effect schema that documents it.
+ */
+function standardResultSchema<T>(schema: Schema.ConstraintDecoder<T>): unknown {
+	return {
+		"~standard": {
+			version: 1,
+			vendor: "eryn",
+			validate: (value: unknown) => {
+				try {
+					return { value: Schema.decodeSync(schema)(value) };
+				} catch (error) {
+					return { issues: [{ message: error instanceof Error ? error.message : String(error) }] };
+				}
+			},
+		},
+	};
+}
+
 async function requestEvents(
 	client: Client,
 	method: "events/list" | "events/poll",
 	params: Record<string, unknown>,
 	signal?: AbortSignal,
 ): Promise<unknown> {
-	const schema = method === "events/list" ? EventListSchema : PollResultSchema;
-	return await client.request({ method, params } as never, schema as never, { signal } as never);
+	const schema: Schema.ConstraintDecoder<unknown> = method === "events/list" ? EventListSchema : PollResultSchema;
+	return await client.request(
+		{ method, params } as never,
+		standardResultSchema(schema) as never,
+		{ signal } as never,
+	);
 }
 
 async function fetchEventDescriptor(client: Client, name: string, signal: AbortSignal): Promise<EventDescriptor> {
