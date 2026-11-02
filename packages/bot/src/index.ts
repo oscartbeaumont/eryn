@@ -11,6 +11,7 @@
 
 import { env } from "cloudflare:workers";
 
+import { CATALOGUE_PATH, catalogueResponse, isCatalogueRequest } from "./catalogue";
 import { log } from "./config";
 import { verify } from "./crypto";
 import { SessionClient } from "./gateway/client";
@@ -67,6 +68,10 @@ export async function wake(
  */
 export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
+	// The filtered models.dev catalogue an embedded host points at, so it does
+	// not decode the bundled one in a Durable Object.
+	if (isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
+
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
 	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
 

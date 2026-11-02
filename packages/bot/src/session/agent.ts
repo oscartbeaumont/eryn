@@ -13,10 +13,11 @@ import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import type { Configuration } from "@opencode/sdk/workerd";
 import type { Plugin as PromisePlugin } from "@opencode/plugin";
 
-import { DEFAULT_MODEL, intFromEnv, log } from "../config";
+import { CATALOGUE_PATH } from "../catalogue";
+import { DEFAULT_MODEL, intFromEnv, log, publicOrigin } from "../config";
 import { botError, describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
-import { DISCORD_METADATA_KEY, type DiscordContext } from "../discord/context";
+import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
 import { DiscordStream } from "../discord/stream";
 import { DiscordApi } from "../discord/api";
 import { Workspace } from "../opencode/store";
@@ -24,6 +25,7 @@ import { workspacePlugin } from "../opencode/workspace";
 import { discordPlugin } from "../opencode/discord";
 import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
+import { createHost } from "./host";
 import {
 	type GuildConfig,
 	type IntegrationMethodOption,
@@ -347,12 +349,18 @@ export interface GuildAgentShape {
 	disconnect(config: HostConfig, integrationID: string): Promise<number>;
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
 	interrupt(threadId: string | undefined, gone: boolean): Promise<boolean>;
+	/** Build the host if it is not up, so its schedule runner is running. */
+	ensureHost(config: HostConfig): Promise<void>;
 }
 
 class GuildAgentImpl implements GuildAgentShape {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
 	private consuming: Promise<void> | undefined;
+	/** The host the live event subscription belongs to. */
+	private consumingHost: OpenCodeWorkerd.Interface | undefined;
+	/** Sessions whose out-of-band turn is being adopted, so two events cannot race. */
+	private readonly adopting = new Set<string>();
 	/** The model catalogue for the current host, fetched at most once per host. */
 	private modelCache: ModelOption[] | undefined;
 
@@ -430,13 +438,28 @@ class GuildAgentImpl implements GuildAgentShape {
 				mcpeventsPlugin,
 			];
 
-			const promise = OpenCodeWorkerd.create({
+			const promise = createHost({
 				storage: this.storage,
+				// `experimental.schedules` gives Sessions a durable schedule table.
+				// The runner that fires it is started on the host runtime.
+				schedules: true,
+				// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
+				// exceeds a Durable Object's memory. Ask this deployment's own
+				// endpoint for the same catalogue with only the connected providers
+				// keeping their models; the provider list itself stays complete.
+				models: {
+					snapshot: false,
+					fetch: true,
+					url: `${publicOrigin(this.env)}${CATALOGUE_PATH}/${[
+						...new Set(config.connections.map((connection) => connection.integrationID)),
+					].join(",")}`,
+				},
 				config: {
 					model: config.model,
 					default_agent: "build",
 					permissions: [{ action: "*", resource: "*", effect: "allow" }],
 					mcp,
+					experimental: { schedules: true },
 				},
 				plugins,
 			}).then(async (host) => {
@@ -491,6 +514,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	// --- Catalogue ------------------------------------------------------------
+
+	async ensureHost(config: HostConfig): Promise<void> {
+		const host = await this.hostFor(config);
+		// A scheduled turn starts without an HTTP prompt, so nothing else would
+		// subscribe to its events and render it into Discord.
+		this.startConsuming(host);
+	}
 
 	async integrations(config: HostConfig): Promise<IntegrationOption[]> {
 		const host = await this.hostFor(config);
@@ -899,6 +929,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private startConsuming(host: OpenCodeWorkerd.Interface): void {
 		if (this.consuming) return;
+		this.consumingHost = host;
 		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
@@ -923,7 +954,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		const sessionID = data.sessionID;
 		if (typeof sessionID !== "string") return;
 		const threadId = this.threadBySession.get(sessionID);
-		if (!threadId) return;
+		if (!threadId) {
+			// A schedule fires the Session directly, with no thread prompt to own
+			// the turn. Adopt it so its reply still lands in the Discord thread
+			// recorded on the Session.
+			if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
+				this.adopt(sessionID);
+			}
+			return;
+		}
 
 		const turn = this.runs.get(threadId)?.turn;
 		if (!turn || turn.done) return;
@@ -976,6 +1015,84 @@ class GuildAgentImpl implements GuildAgentShape {
 			default:
 				return;
 		}
+	}
+
+	/**
+	 * Render a turn this object did not start, such as one a schedule fired.
+	 *
+	 * The thread is not in memory after an eviction, so it comes from the Discord
+	 * context the Session carries in its metadata. Everything after that is the
+	 * same as a prompted turn: one stream, the shared event handler, and the
+	 * reply written when the execution settles.
+	 */
+	private adopt(sessionID: string): void {
+		const host = this.consumingHost;
+		if (!host || this.adopting.has(sessionID)) return;
+		this.adopting.add(sessionID);
+		void (async () => {
+			try {
+				const session = await host.sessions.get({ sessionID });
+				const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				const threadId = context?.thread.id;
+				if (!threadId || this.runs.get(threadId)?.turn) return;
+
+				this.remember(threadId, sessionID);
+				const stream = new DiscordStream(this.rest, threadId);
+				const run = this.runs.get(threadId) ?? {};
+				const turn = createTurn(threadId);
+				run.turn = turn;
+				run.stream = stream;
+				this.runs.set(threadId, run);
+
+				let stopTyping: () => void = () => undefined;
+				try {
+					await stream.start();
+					stopTyping = this.startTyping(threadId);
+					if (!(await this.wait(turn))) {
+						turn.interrupted = true;
+						await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+					}
+					if (turn.gone) {
+						stream.abandon();
+						return;
+					}
+					const text = renderTurn(turn).trim() || (await this.lastAssistantText(host, sessionID)) || "";
+					const body = turn.error ? failureNote(turn.error) : text || "The scheduled turn produced no text.";
+					await stream.finish(body, turn.interrupted ? "Stopped." : undefined);
+				} catch (error) {
+					await stream.finish(`I hit an error before I could finish: ${describeError(error)}`).catch(() => undefined);
+				} finally {
+					stopTyping();
+					turn.done = true;
+					const current = this.runs.get(threadId);
+					if (current && current.turn === turn) {
+						current.turn = undefined;
+						current.stream = undefined;
+						this.runs.delete(threadId);
+					}
+				}
+			} catch (error) {
+				log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
+			} finally {
+				this.adopting.delete(sessionID);
+			}
+		})();
+	}
+
+	/** The text of the newest assistant message, for a turn with no baseline. */
+	private async lastAssistantText(host: OpenCodeWorkerd.Interface, sessionID: string): Promise<string | undefined> {
+		const messages = await host.sessions.context({ sessionID });
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index]!;
+			if (message.type !== "assistant") continue;
+			const text = message.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("")
+				.trim();
+			if (text) return text;
+		}
+		return undefined;
 	}
 
 	private appendText(threadId: string, turn: Turn, data: Record<string, unknown>, delta: string): void {

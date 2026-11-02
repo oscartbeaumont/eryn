@@ -135,19 +135,97 @@ export class BotSessionV5 extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		// The signal is in memory: an abort discards storage writes, so a
 		// persisted marker would survive the restart and loop.
-		if (!this.restartPending) return;
-		if (this.inFlight > 0) {
-			// A turn is still running. Restarting now would drop the reply, so wait
-			// for it to finish and check again.
-			await this.ctx.storage.setAlarm(Date.now() + 5_000);
+		if (this.restartPending) {
+			if (this.inFlight > 0) {
+				// A turn is still running. Restarting now would drop the reply, so wait
+				// for it to finish and check again.
+				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+				return;
+			}
+			// Retry the alarm: the replacement object starts with no timers, and a
+			// schedule that was armed before the deploy must still be woken. The
+			// stored deploy version is already current, so this cannot loop.
+			this.ctx.abort("deploy changed", { retryAlarm: true });
 			return;
 		}
-		this.ctx.abort("deploy changed", { retryAlarm: false });
+		// A schedule may have fallen due while this object was evicted. Building
+		// the host starts its runner, which fires everything overdue; the alarm is
+		// then re-armed for the next one.
+		const due = this.scheduleDueAt();
+		if (due !== null && due <= Date.now() + 1_000) {
+			await this.runScheduleTick().catch((error) => log("session", `schedule tick failed: ${describeError(error)}`));
+		}
+		await this.armScheduleAlarm();
+	}
+
+	/** When the next active schedule is due, from the host's own SQLite. */
+	private scheduleDueAt(): number | null {
+		try {
+			const row = this.ctx.storage.sql
+				.exec("SELECT MIN(next_due_at) AS due FROM schedule WHERE status = 'active' AND next_due_at IS NOT NULL")
+				.one() as { due: number | null };
+			return typeof row.due === "number" ? row.due : null;
+		} catch {
+			// The table only exists once a session has had schedules enabled.
+			return null;
+		}
+	}
+
+	/** Wake the host so its schedule runner fires what is due. */
+	private async runScheduleTick(): Promise<void> {
+		// A fired schedule turns into a normal Session turn, which runs after this
+		// request returns. Keep a follow-up alarm in case the object is evicted
+		// before that turn settles; the next boot resumes a suspended Session.
+		await this.ctx.storage.setAlarm(Date.now() + 30_000);
+		const response = await this.runtime.runPromise(
+			this.route(new Request("https://bot.internal/schedules/tick", { method: "POST" })),
+		);
+		if (!response.ok) throw new Error(`the schedule tick returned HTTP ${response.status}`);
+		// Give the admitted turn time to start before deciding when to wake next.
+		await new Promise((resolve) => setTimeout(resolve, 8_000));
+	}
+
+	/** Whether a Session is mid-turn or suspended, so this object should wake again. */
+	private scheduleBusy(): boolean {
+		try {
+			const row = this.ctx.storage.sql
+				.exec(
+					`SELECT COUNT(*) AS busy FROM session_v2
+					 WHERE time_suspended IS NOT NULL
+					    OR (time_busy IS NOT NULL AND (time_idle IS NULL OR time_busy > time_idle))`,
+				)
+				.one() as { busy: number };
+			return Number(row.busy) > 0;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Wake this object when the next schedule falls due.
+	 *
+	 * The runner only ticks while the object is in memory, and a Durable Object
+	 * can be evicted between turns, so the due time is an alarm rather than a
+	 * timer. A schedule that is already due wakes it shortly.
+	 */
+	private async armScheduleAlarm(): Promise<void> {
+		if (this.restartPending) return;
+		const due = this.scheduleDueAt();
+		if (due !== null) {
+			await this.ctx.storage.setAlarm(Math.max(due, Date.now() + 5_000));
+			return;
+		}
+		if (this.scheduleBusy()) {
+			await this.ctx.storage.setAlarm(Date.now() + 20_000);
+			return;
+		}
+		await this.ctx.storage.deleteAlarm().catch(() => undefined);
 	}
 
 	private route(request: Request): Effect.Effect<Response, never, GuildStore | GuildAgent | DiscordApi> {
 		const guildId = this.guildId;
 		const env = this.env;
+		const session = this;
 		return Effect.gen(function* () {
 			const store = yield* GuildStore;
 			const agent = yield* GuildAgent;
@@ -483,6 +561,23 @@ export class BotSessionV5 extends DurableObject<Env> {
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, status: "failed", message: error.message }, 502))));
 			}
 
+			/**
+			 * Build the host so its schedule runner is running. Called by the alarm
+			 * only; the runner then fires whatever fell due while the object slept.
+			 */
+			if (request.method === "POST" && url.pathname === "/schedules/tick") {
+				return yield* attempt(async () => {
+					const stored = await loadConfig();
+					if (stored.connections.length === 0) return json({ ok: true });
+					await agent.ensureHost(stored);
+					// The runner ticks on its own fiber as soon as the host is up. Give
+					// its first pass a moment to record what fired, so the alarm this
+					// request arms next is for the following due time, not this one.
+					await new Promise((resolve) => setTimeout(resolve, 1_500));
+					return json({ ok: true });
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 500))));
+			}
+
 			if (request.method === "POST" && url.pathname === "/prompt") {
 				const body = yield* readBody(PromptRequestSchema, request);
 				if (body instanceof Response) return body;
@@ -498,6 +593,8 @@ export class BotSessionV5 extends DurableObject<Env> {
 						return json({ ok: false, error: "no provider is connected" }, 400);
 					}
 					await agent.prompt(body, await reconcileModel(config));
+					// The turn may have created or changed a schedule; arm for it.
+					await session.armScheduleAlarm();
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ ok: false, error: error.message }, 500))));
 			}
