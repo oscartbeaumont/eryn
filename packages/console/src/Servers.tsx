@@ -9,6 +9,7 @@ import {
 	type ServerSummary,
 	type ServersAction,
 	type ServersData,
+	type ServersResult,
 	type ToolAccess,
 	type ToolAccessLevel,
 	type ToolEntry,
@@ -85,21 +86,24 @@ export default function Servers() {
 
 	const flash = (kind: NoticeState["kind"], message: string) => setNotice({ kind, message });
 
-	async function mutate(action: ServersAction, success: string) {
+	async function mutate(action: ServersAction, success: string): Promise<ServersResult | undefined> {
 		setBusy(true);
 		try {
 			const result = await serversAction(action);
 			capture(`server_${action.action}`);
-			if (result.url) {
+			if (result.url && !result.loopback) {
 				// An OAuth action hands back where to sign in; leaving the page
-				// lets the provider's own consent screen do the rest.
+				// lets the provider's own consent screen do the rest. A loopback
+				// sign-in stays here so the redirected address can be pasted back.
 				window.location.href = result.url;
-				return;
+				return result;
 			}
 			flash("ok", result.message ?? success);
 			await reload();
+			return result;
 		} catch (error) {
 			flash("error", describe(error));
+			return undefined;
 		} finally {
 			setBusy(false);
 		}
@@ -146,7 +150,7 @@ export default function Servers() {
 													accounts={accounts()}
 													groups={groups()}
 													busy={busy()}
-													onMutate={(action, success) => void mutate(action, success)}
+													onMutate={mutate}
 													onNotice={flash}
 												/>
 											)}
@@ -320,7 +324,7 @@ function ServerCard(props: {
 	accounts: AccountSummary[];
 	groups: ToolGroup[];
 	busy: boolean;
-	onMutate: (action: ServersAction, success: string) => void;
+	onMutate: (action: ServersAction, success: string) => Promise<ServersResult | undefined>;
 	onNotice: (kind: NoticeState["kind"], message: string) => void;
 }) {
 	const [renaming, setRenaming] = createSignal(false);
@@ -337,6 +341,10 @@ function ServerCard(props: {
 	const [clientId, setClientId] = createSignal("");
 	const [clientSecret, setClientSecret] = createSignal("");
 	const [addingUpstream, setAddingUpstream] = createSignal(false);
+	const [loopbackPreferred, setLoopbackPreferred] = createSignal(false);
+	/** The loopback sign-in waiting for its redirect to be pasted back. */
+	const [loopbackSignin, setLoopbackSignin] = createSignal<{ connectionId: string; name: string; url: string }>();
+	const [callbackInput, setCallbackInput] = createSignal("");
 
 	/** The URI a provider has to accept before an OAuth sign-in can come back. */
 	const redirectUri = () => `${window.location.origin}/api/mcp/upstream/callback`;
@@ -453,7 +461,7 @@ function ServerCard(props: {
 		});
 	}
 
-	function addConnection(event: SubmitEvent) {
+	async function addConnection(event: SubmitEvent) {
 		event.preventDefault();
 		const url = connectionUrl().trim();
 		if (!url) return;
@@ -461,7 +469,7 @@ function ServerCard(props: {
 		for (const row of connectionHeaders()) {
 			if (row.name.trim() && row.value.trim()) headers[row.name.trim()] = row.value.trim();
 		}
-		props.onMutate(
+		const result = await props.onMutate(
 			{
 				action: "connection-add",
 				id: props.server.id,
@@ -471,6 +479,7 @@ function ServerCard(props: {
 				...(connectionAuth() === "headers" ? { headers } : {}),
 				...(connectionAuth() === "oauth" && clientId().trim() ? { clientId: clientId().trim() } : {}),
 				...(connectionAuth() === "oauth" && clientSecret().trim() ? { clientSecret: clientSecret().trim() } : {}),
+				...(connectionAuth() === "oauth" && loopbackPreferred() ? { loopback: true } : {}),
 				...stagedAccess(),
 			},
 			"Upstream server added.",
@@ -478,6 +487,10 @@ function ServerCard(props: {
 		setConnectionUrl("");
 		setConnectionTitle("");
 		setAddingUpstream(false);
+		if (result?.ok && result.loopback && result.url && result.connectionId) {
+			setLoopbackSignin({ connectionId: result.connectionId, name: connectionTitle().trim() || url, url: result.url });
+			setCallbackInput("");
+		}
 	}
 
 	function refreshConnection(connection: UpstreamConnection) {
@@ -487,11 +500,37 @@ function ServerCard(props: {
 		);
 	}
 
-	function signIn(connection: UpstreamConnection) {
-		props.onMutate(
+	async function signIn(connection: UpstreamConnection) {
+		const result = await props.onMutate(
 			{ action: "connection-signin", id: props.server.id, connectionId: connection.id, ...stagedAccess() },
+			"Sign-in started.",
+		);
+		if (result?.ok && result.loopback && result.url) {
+			setLoopbackSignin({ connectionId: connection.id, name: connection.name, url: result.url });
+			setCallbackInput("");
+		}
+	}
+
+	/** Finish a loopback sign-in with the address the browser was sent to. */
+	async function completeSignin(event: SubmitEvent) {
+		event.preventDefault();
+		const pending = loopbackSignin();
+		const callback = callbackInput().trim();
+		if (!pending || !callback) return;
+		const result = await props.onMutate(
+			{
+				action: "connection-complete",
+				id: props.server.id,
+				connectionId: pending.connectionId,
+				callback,
+				...stagedAccess(),
+			},
 			"Signed in.",
 		);
+		if (result?.ok) {
+			setLoopbackSignin(undefined);
+			setCallbackInput("");
+		}
 	}
 
 	function toggleConnection(connection: UpstreamConnection) {
@@ -783,6 +822,38 @@ function ServerCard(props: {
 												Remove
 											</button>
 										</div>
+										<Show when={loopbackSignin()?.connectionId === connection.id ? loopbackSignin() : undefined}>
+											{(current) => (
+												<div class="mt-3 border border-line-strong bg-bg p-3">
+													<p class="max-w-[62ch] text-xs text-muted">
+														Open the sign-in page and approve access. Your browser then lands on a
+														localhost address that will not load — copy that whole address and paste it
+														here.
+													</p>
+													<a
+														class="mt-2 inline-block font-mono text-xs text-fg underline decoration-line-strong"
+														href={current().url}
+														target="_blank"
+														rel="noreferrer"
+													>
+														Open the sign-in page for {current().name}
+													</a>
+													<form class="mt-2 flex flex-wrap items-center gap-2" onSubmit={completeSignin}>
+														<input
+															type="text"
+															value={callbackInput()}
+															placeholder="http://localhost:4788/…?code=…"
+															spellcheck={false}
+															class="min-w-0 flex-1 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+															onInput={(event) => setCallbackInput(event.currentTarget.value)}
+														/>
+														<button type="submit" class={buttonClass.primary} disabled={props.busy}>
+															Finish sign-in
+														</button>
+													</form>
+												</div>
+											)}
+										</Show>
 										<Show when={connection.enabled && connection.tools.length > 0}>
 											<GroupAccess
 												group={upstreamGroup(connection)}
@@ -874,6 +945,19 @@ function ServerCard(props: {
 								</code>
 								<CopyButton value={redirectUri()} />
 							</div>
+							<label class="flex cursor-pointer items-start gap-2 text-xs text-muted">
+								<input
+									type="checkbox"
+									class="mt-0.5 size-4 border border-line-strong bg-bg"
+									checked={loopbackPreferred()}
+									onChange={(event) => setLoopbackPreferred(event.currentTarget.checked)}
+								/>
+								<span class="max-w-[62ch]">
+									Sign in on this device. The redirect stays on localhost and you paste the address back —
+									the only way in for a provider that will not accept Eryn's public redirect, such as
+									Fastmail.
+								</span>
+							</label>
 						</Show>
 						<Show when={connectionAuth() === "headers"}>
 							<div class="flex flex-col gap-2">

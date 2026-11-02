@@ -116,6 +116,8 @@ export interface UpstreamConnection {
 	headerNames: string[];
 	authenticated: boolean;
 	pending: boolean;
+	/** The sign-in finishes on a loopback URL the user pastes back. */
+	loopback: boolean;
 	tools: UpstreamTool[];
 }
 
@@ -231,6 +233,10 @@ export interface ServersResult extends ActionResult {
 	servers?: ServerSummary[];
 	/** The tools a server exposes, from the `tools-list` action. */
 	tools?: ToolEntry[];
+	/** Set when a sign-in was started for a connection. */
+	connectionId?: string;
+	/** True when the sign-in has to finish with a pasted loopback redirect. */
+	loopback?: boolean;
 }
 
 /** The staged access a connection action carries so it is not reverted. */
@@ -258,9 +264,12 @@ export type ServersAction =
 			headers?: Record<string, string>;
 			clientId?: string;
 			clientSecret?: string;
+			/** Finish on a loopback redirect the user pastes back. */
+			loopback?: boolean;
 	  } & StagedAccess)
 	| ({ action: "connection-refresh"; id: string; connectionId: string } & StagedAccess)
 	| ({ action: "connection-signin"; id: string; connectionId: string } & StagedAccess)
+	| ({ action: "connection-complete"; id: string; connectionId: string; callback: string } & StagedAccess)
 	| ({ action: "connection-update"; id: string; connectionId: string; title?: string; enabled?: boolean } & StagedAccess)
 	| ({ action: "connection-remove"; id: string; connectionId: string } & StagedAccess);
 

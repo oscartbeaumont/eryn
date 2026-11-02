@@ -139,6 +139,8 @@ const ServersRequest = Schema.Struct({
 	headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 	clientId: Schema.optional(Schema.String),
 	clientSecret: Schema.optional(Schema.String),
+	loopback: Schema.optional(Schema.Boolean),
+	callback: Schema.optional(Schema.String),
 });
 
 function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
@@ -262,6 +264,21 @@ function handleServersGet(request: HttpServerRequest.HttpServerRequest) {
 /** How long a started upstream sign-in is worth waiting for. */
 const SIGNIN_TTL_MS = 15 * 60_000;
 
+/**
+ * The redirect a native-client sign-in uses.
+ *
+ * A provider that will not accept a public redirect URI, Fastmail among them,
+ * still lets a native client sign in on a loopback URI without registering it.
+ * Nothing listens on this port: the browser lands there with the code in its
+ * address bar and the user pastes that back, which is the native-client flow
+ * without shipping a native client.
+ */
+const LOOPBACK_REDIRECT = "http://localhost:4788/api/mcp/upstream/callback";
+
+function isLoopbackRedirect(redirectUri: string | undefined): boolean {
+	return redirectUri !== undefined && /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/)/.test(redirectUri);
+}
+
 function summariseConnections(server: McpServer): ConnectionSummary[] {
 	return (server.connections ?? []).map((connection) => ({
 		id: connection.id,
@@ -277,6 +294,7 @@ function summariseConnections(server: McpServer): ConnectionSummary[] {
 		pending:
 			connection.auth.oauth?.verifier !== undefined &&
 			(connection.auth.oauth.startedAt ?? 0) > Date.now() - SIGNIN_TTL_MS,
+		loopback: isLoopbackRedirect(connection.auth.oauth?.redirectUri),
 		tools: connection.tools.map((tool) => ({
 			name: tool.name,
 			exposedName: exposedToolName(connection.name, tool.name),
@@ -414,6 +432,7 @@ async function startUpstreamSignin(
 	connection: UpstreamConnection,
 	origin: string,
 	client?: { clientId?: string; clientSecret?: string },
+	options?: { loopback?: boolean },
 ): Promise<{ url: string; state: string; connection: UpstreamConnection }> {
 	const secrets = env.SESSION_SECRET?.trim();
 	if (!secrets) throw new Error("The deployment has no session secret.");
@@ -421,21 +440,24 @@ async function startUpstreamSignin(
 	if (probe.ok) throw new Error("This server did not ask for a sign-in.");
 	if (!probe.needsAuth) throw new Error("This server does not accept a Bearer sign-in. Use headers instead.");
 	const discovery = await discoverUpstream(connection.url, probe.resourceMetadataUrl);
-	const redirectUri = `${origin}${UPSTREAM_CALLBACK_PATH}`;
-	const scope = requestedScope(discovery, probe.scope ?? connection.auth.oauth?.scope);
 	const existing = connection.auth.oauth;
+	const loopback = options?.loopback === true || isLoopbackRedirect(existing?.redirectUri);
+	const redirectUri = loopback ? LOOPBACK_REDIRECT : `${origin}${UPSTREAM_CALLBACK_PATH}`;
+	const scope = requestedScope(discovery, probe.scope ?? existing?.scope);
 
 	// The client to present: what the user typed, what this connection already
 	// registered, a metadata document the server can read, or a fresh
 	// registration. Fastmail, for one, publishes no registration for public
-	// redirect URIs but does read a metadata document.
+	// redirect URIs but does accept a loopback redirect without one, so the
+	// metadata document is only useful for the public flow.
 	const typed = client?.clientId ? { clientId: client.clientId, ...(client.clientSecret ? { clientSecret: client.clientSecret } : {}) } : undefined;
 	const stored = existing?.clientId ? { clientId: existing.clientId, ...(existing.clientSecret ? { clientSecret: existing.clientSecret } : {}) } : undefined;
 	const staleMetadata = stored ? isMetadataClientId(stored.clientId, origin) && stored.clientId !== metadataClientId(origin, connection.id) : false;
+	const reusable = stored && !staleMetadata && isLoopbackRedirect(existing?.redirectUri) === loopback ? stored : undefined;
 	const resolved =
 		typed ??
-		(stored && !staleMetadata ? stored : undefined) ??
-		(discovery.metadataDocument
+		reusable ??
+		(!loopback && discovery.metadataDocument
 			? { clientId: metadataClientId(origin, connection.id) }
 			: discovery.registrationEndpoint
 				? await registerUpstreamClient({
@@ -445,7 +467,11 @@ async function startUpstreamSignin(
 					})
 				: undefined);
 	if (!resolved) {
-		throw new Error("This server wants a sign-in but offers no way for Eryn to register. Use headers instead.");
+		throw new Error(
+			loopback
+				? "This server wants a native sign-in but does not support registering a loopback client. Use headers instead."
+				: "This server wants a sign-in but offers no way for Eryn to register. Use headers instead.",
+		);
 	}
 
 	const { verifier, challenge } = await pkce();
@@ -471,6 +497,7 @@ async function startUpstreamSignin(
 					tokenEndpoint: discovery.tokenEndpoint,
 					...(discovery.registrationEndpoint ? { registrationEndpoint: discovery.registrationEndpoint } : {}),
 					resource: discovery.resource,
+					redirectUri,
 					...(scope ? { scope } : {}),
 					verifier,
 					startedAt: Date.now(),
@@ -564,45 +591,68 @@ function handleUpstreamCallback() {
 				return done({ error: failure ?? "The sign-in did not return a code." });
 			}
 
-			try {
-				const tokens = await exchangeUpstreamCode({
-					tokenEndpoint: oauth.tokenEndpoint,
-					clientId: oauth.clientId,
-					...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
-					redirectUri: `${origin}${UPSTREAM_CALLBACK_PATH}`,
-					code,
-					verifier: oauth.verifier,
-					...(oauth.resource ? { resource: oauth.resource } : {}),
-				});
-				const headers = { authorization: `Bearer ${tokens.accessToken}` };
-				const probe = await probeUpstream({ url: connection.url, headers });
-				if (!probe.ok) {
-					await saveServer(verified.uid, replaceConnection(server, clearPending(connection)));
-					return done({ error: probe.error ?? "The server still refused the sign-in." });
-				}
-				const cleared = clearPending(connection);
-				const updated: UpstreamConnection = {
-					...cleared,
-					tools: probe.tools,
-					updatedAt: Date.now(),
-					auth: {
-						kind: "oauth",
-						oauth: {
-							...(cleared.auth.oauth ?? oauth),
-							accessToken: tokens.accessToken,
-							...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
-							expiresAt: Date.now() + (tokens.expiresIn ?? 3_600) * 1_000,
-							...(tokens.scope ? { scope: tokens.scope } : {}),
-						},
-					},
-				};
-				await saveServer(verified.uid, replaceConnection(server, updated));
-				return done({ ok: `${connection.title ?? connection.name} is connected.` });
-			} catch (error) {
-				await saveServer(verified.uid, replaceConnection(server, clearPending(connection)));
-				return done({ error: describe(error) });
-			}
+			const result = await finishUpstreamSignin(verified.uid, server, connection, code, origin);
+			return result.ok
+				? done({ ok: `${connection.title ?? connection.name} is connected.` })
+				: done({ error: result.error });
 		});
+}
+
+/**
+ * Exchange a sign-in code for tokens and store the tools the server now offers.
+ *
+ * The browser callback and a pasted loopback redirect differ only in how the
+ * code reaches us, so both end here.
+ */
+async function finishUpstreamSignin(
+	uid: string,
+	server: McpServer,
+	connection: UpstreamConnection,
+	code: string,
+	origin: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+	const oauth = connection.auth.oauth;
+	if (!oauth?.verifier || !oauth.tokenEndpoint || !oauth.clientId) {
+		return { ok: false, error: "That sign-in had expired. Start it again." };
+	}
+	try {
+		const tokens = await exchangeUpstreamCode({
+			tokenEndpoint: oauth.tokenEndpoint,
+			clientId: oauth.clientId,
+			...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
+			redirectUri: oauth.redirectUri ?? `${origin}${UPSTREAM_CALLBACK_PATH}`,
+			code,
+			verifier: oauth.verifier,
+			...(oauth.resource ? { resource: oauth.resource } : {}),
+		});
+		const headers = { authorization: `Bearer ${tokens.accessToken}` };
+		const probe = await probeUpstream({ url: connection.url, headers });
+		if (!probe.ok) {
+			await saveServer(uid, replaceConnection(server, clearPending(connection)));
+			return { ok: false, error: probe.error ?? "The server still refused the sign-in." };
+		}
+		const cleared = clearPending(connection);
+		const updated: UpstreamConnection = {
+			...cleared,
+			tools: probe.tools,
+			updatedAt: Date.now(),
+			auth: {
+				kind: "oauth",
+				oauth: {
+					...(cleared.auth.oauth ?? oauth),
+					accessToken: tokens.accessToken,
+					...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+					expiresAt: Date.now() + (tokens.expiresIn ?? 3_600) * 1_000,
+					...(tokens.scope ? { scope: tokens.scope } : {}),
+				},
+			},
+		};
+		await saveServer(uid, replaceConnection(server, updated));
+		return { ok: true };
+	} catch (error) {
+		await saveServer(uid, replaceConnection(server, clearPending(connection)));
+		return { ok: false, error: describe(error) };
+	}
 }
 
 /** Drop a half-finished sign-in, keeping whatever the connection already had. */
@@ -716,14 +766,27 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			if (kind === "oauth") {
 				// The connection is stored first so the callback has a record to
 				// come back to; it stays unusable until the sign-in completes.
-				const started = await startUpstreamSignin(session.uid, target, connection, origin, {
-					clientId: form.clientId?.trim() || undefined,
-					clientSecret: form.clientSecret?.trim() || undefined,
-				});
+				const started = await startUpstreamSignin(
+					session.uid,
+					target,
+					connection,
+					origin,
+					{
+						clientId: form.clientId?.trim() || undefined,
+						clientSecret: form.clientSecret?.trim() || undefined,
+					},
+					{ loopback: form.loopback === true },
+				);
 				connection = started.connection;
 				await saveServer(session.uid, { ...withAccess(target), connections: [...(target.connections ?? []), connection] });
 				return withCookie(
-					json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
+					json({
+						ok: true,
+						url: started.url,
+						connectionId: connection.id,
+						loopback: isLoopbackRedirect(started.connection.auth.oauth?.redirectUri),
+						servers: await summaries(session.uid, origin),
+					}),
 					UPSTREAM_COOKIE,
 					started.state,
 					origin,
@@ -746,11 +809,59 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			const started = await startUpstreamSignin(session.uid, target, connection, origin);
 			await saveServer(session.uid, replaceConnection(withAccess(target), started.connection));
 			return withCookie(
-				json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
+				json({
+					ok: true,
+					url: started.url,
+					connectionId: connection.id,
+					loopback: isLoopbackRedirect(started.connection.auth.oauth?.redirectUri),
+					servers: await summaries(session.uid, origin),
+				}),
 				UPSTREAM_COOKIE,
 				started.state,
 				origin,
 			);
+		}
+
+		if (form.action === "connection-complete") {
+			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
+			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			const secrets = env.SESSION_SECRET?.trim();
+			if (!secrets) return json({ error: "The deployment has no session secret." }, 500);
+			const pasted = form.callback?.trim() ?? "";
+			if (!pasted) return json({ error: "Paste the address the browser landed on." }, 400);
+			const params = (() => {
+				try {
+					return new URL(pasted).searchParams;
+				} catch {
+					try {
+						return new URLSearchParams(pasted.replace(/^\?/, ""));
+					} catch {
+						return undefined;
+					}
+				}
+			})();
+			const failure = params?.get("error_description") ?? params?.get("error");
+			if (failure) {
+				await saveServer(session.uid, replaceConnection(target, clearPending(connection)));
+				return json({ error: failure }, 400);
+			}
+			const code = params?.get("code") ?? "";
+			const state = params?.get("state") ?? "";
+			if (!code || !state) {
+				return json({ error: "Paste the whole address, including its code and state." }, 400);
+			}
+			const verified = await readState<{ uid: string; serverId: string; connectionId: string; exp: number }>(state, secrets);
+			if (
+				!verified ||
+				verified.uid !== session.uid ||
+				verified.serverId !== target.id ||
+				verified.connectionId !== connection.id
+			) {
+				return json({ error: "That sign-in could not be verified. Start it again." }, 400);
+			}
+			const result = await finishUpstreamSignin(session.uid, target, connection, code, origin);
+			if (!result.ok) return json({ error: result.error }, 400);
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
 		}
 
 		if (form.action === "connection-refresh") {

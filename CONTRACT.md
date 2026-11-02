@@ -116,8 +116,9 @@ POST /api/mcp/authorize              -> consent decide
 
 `POST /api/servers` actions: `create { name, title? }`, `update { id, name?, title?, enabled? }`,
 `delete { id }`, `accounts { id, accountIds[] }`, `tools { id, tools }`,
-`tools-list { id }`, `revoke-grant { id, guildId }`, `connection-add { id, url, name?, title?, auth: "none"|"headers"|"oauth", headers? }`,
+`tools-list { id }`, `revoke-grant { id, guildId }`, `connection-add { id, url, name?, title?, auth: "none"|"headers"|"oauth", headers?, loopback? }`,
 `connection-refresh { id, connectionId }`, `connection-signin { id, connectionId }`,
+`connection-complete { id, connectionId, callback }` (a pasted loopback redirect),
 `connection-update { id, connectionId, title?, enabled? }`, `connection-remove { id, connectionId }`.
 
 ## 6. Models (all parsed with Effect `Schema`)
@@ -134,7 +135,7 @@ ServerSummary   { id, name, title?, enabled, accounts: { id, provider, label }[]
                   tools: ToolAccess, connections: ConnectionSummary[], endpoint,
                   grants: { guildId }[] }
 ConnectionSummary { id, name, title?, url, enabled, auth: "none"|"headers"|"oauth",
-                  headerNames: string[], authenticated, pending,
+                  headerNames: string[], authenticated, pending, loopback,
                   tools: { name, exposedName, title?, description?, access }[] }
 Grant           { guildId, mcpServerId, toolNames: string[], tools?: ToolAccess, createdAt }
 McpLink         { id, kind: "eryn"|"external", name, url, mcpServerId?, oauth?: McpOAuth, tools: ToolAccess, createdAt }

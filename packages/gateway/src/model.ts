@@ -115,6 +115,12 @@ export const UpstreamAuth = Schema.Struct({
 			registrationEndpoint: Schema.optional(Schema.String),
 			/** The resource indicator to send (RFC 8707). */
 			resource: Schema.optional(Schema.String),
+			/**
+			 * The redirect the provider will send the browser to. It is the public
+			 * callback unless this is a native-client sign-in, where it is a
+			 * loopback URL the user pastes back.
+			 */
+			redirectUri: Schema.optional(Schema.String),
 			scope: Schema.optional(Schema.String),
 			accessToken: Schema.optional(Schema.String),
 			refreshToken: Schema.optional(Schema.String),
@@ -172,6 +178,8 @@ export const ConnectionSummary = Schema.Struct({
 	authenticated: Schema.Boolean,
 	/** Whether a sign-in is waiting for the browser to come back. */
 	pending: Schema.Boolean,
+	/** Whether the sign-in finishes on a loopback URL the user pastes back. */
+	loopback: Schema.Boolean,
 	tools: Schema.Array(
 		Schema.Struct({
 			name: Schema.String,
