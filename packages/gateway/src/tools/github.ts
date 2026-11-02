@@ -80,6 +80,11 @@ export function githubApi(credential: GitHubCredential): GitHubApi {
 			}
 			if (!response.ok) {
 				const detail = await response.text().catch(() => "");
+				if (response.status === 401) {
+					throw new Error(
+						`GitHub rejected the stored token (HTTP 401). Reconnect the GitHub account in the Eryn console, then try again. ${clip(detail, 300)}`.trim(),
+					);
+				}
 				throw new Error(`GitHub ${method} ${path} failed (HTTP ${response.status}) ${clip(detail, 300)}`.trim());
 			}
 			return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
@@ -223,12 +228,12 @@ export const GITHUB_TOOLS: readonly GitHubTool[] = [
 		name: "github_whoami",
 		title: "Show which GitHub account the tools act as",
 		description:
-			"Report the GitHub account these tools act as: your own when a personal token is connected, or Eryn's app acting on your behalf when it is installed. Check this when it matters whose name an action will carry.",
+			"Report the GitHub account these tools act as, so it is clear whose name an action carries.",
 		inputSchema: { type: "object", properties: {}, additionalProperties: false },
 		run: async (api) => {
 			const who = await api.identity();
 			return who.kind === "pat"
-				? `Acting as ${who.login} with a personal access token, so actions carry that name.`
+				? `Acting as ${who.login} with the GitHub account connected in the Eryn console, so actions carry that name.`
 				: `Acting as Eryn's GitHub App installed on ${who.login}, so actions are attributed to the app on their behalf.`;
 		},
 	},

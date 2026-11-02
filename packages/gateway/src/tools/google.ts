@@ -19,6 +19,14 @@ export interface GoogleCredential {
 
 export interface GoogleClient {
 	request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
+	/**
+	 * The id to put in a calendar path.
+	 *
+	 * Models read a listing as "2025" and pass that back, which Google answers
+	 * with a bare 404, so a summary that matches exactly one calendar is resolved
+	 * to its id before the call.
+	 */
+	calendar(value: string): Promise<string>;
 }
 
 export interface GoogleTool {
@@ -78,6 +86,7 @@ export function googleApi(
 	onRefresh?: (next: { accessToken: string; expiresAt: number }) => void,
 ): GoogleClient {
 	let current = credential;
+	let calendars: { id: string; name: string }[] | undefined;
 	async function token(): Promise<string> {
 		if (!current.expiresAt || current.expiresAt - 60_000 > Date.now() || !current.refreshToken) return current.accessToken;
 		const response = await fetch(OAUTH_TOKEN, {
@@ -115,6 +124,35 @@ export function googleApi(
 			}
 			return (await response.json()) as T;
 		},
+
+		async calendar(value: string): Promise<string> {
+			const wanted = value.trim() || DEFAULT_CALENDAR;
+			// "primary" and every real id (an email, or a group calendar id) are
+			// passed through; anything else is a name from the listing.
+			if (wanted === DEFAULT_CALENDAR || wanted.includes("@")) return wanted;
+			if (!calendars) {
+				const body = await client.request<{ items?: { id?: string; summary?: string; summaryOverride?: string }[] }>(
+					"GET",
+					"/users/me/calendarList",
+				);
+				calendars = (body.items ?? []).flatMap((item) =>
+					typeof item.id === "string"
+						? [{ id: item.id, name: (item.summaryOverride ?? item.summary ?? "").trim() }]
+						: [],
+				);
+			}
+			const lower = wanted.toLowerCase();
+			const match =
+				calendars.find((item) => item.id.toLowerCase() === lower) ??
+				calendars.find((item) => item.name.toLowerCase() === lower);
+			if (!match) {
+				const known = calendars.map((item) => `${item.name || item.id} (id: ${item.id})`).join(", ");
+				throw new Error(
+					`No calendar matches "${wanted}". Pass a calendar id instead${known ? `: ${known}` : "."}`,
+				);
+			}
+			return match.id;
+		},
 	};
 	return client;
 }
@@ -129,7 +167,9 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			const body = await client.request<{ items?: Record<string, unknown>[] }>("GET", "/users/me/calendarList");
 			const items = body.items ?? [];
 			if (!items.length) return "No calendars are visible to this account.";
-			return items.map((item) => `${item.summary ?? item.id} (id: ${item.id}${item.primary ? ", primary" : ""})`).join("\n");
+			return items
+				.map((item) => `id: ${item.id} — ${item.summary ?? item.id}${item.primary ? " (primary)" : ""}`)
+				.join("\n");
 		},
 	},
 	{
@@ -140,7 +180,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				calendar_id: { type: "string", description: 'The calendar id. Defaults to "primary".' },
+				calendar_id: { type: "string", description: 'The calendar id from google_calendars, or its name. Defaults to "primary".' },
 				time_min: { type: "string", description: "Start of the window, RFC 3339." },
 				time_max: { type: "string", description: "End of the window, RFC 3339." },
 				max_results: { type: "integer", description: "How many events to return, 1-50." },
@@ -157,7 +197,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			if (stringArg(args.query)) query.set("q", stringArg(args.query)!);
 			const body = await client.request<{ items?: Record<string, unknown>[] }>(
 				"GET",
-				`/calendars/${encodeURIComponent(calendarArg(args))}/events?${query}`,
+				`/calendars/${encodeURIComponent(await client.calendar(calendarArg(args)))}/events?${query}`,
 			);
 			const items = body.items ?? [];
 			if (!items.length) return "No events in that window.";
@@ -170,7 +210,10 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		description: "Read one event in full by its id.",
 		inputSchema: {
 			type: "object",
-			properties: { calendar_id: { type: "string" }, event_id: { type: "string", description: "The event id." } },
+			properties: {
+				calendar_id: { type: "string", description: 'The calendar id from google_calendars, or its name. Defaults to "primary".' },
+				event_id: { type: "string", description: "The event id." },
+			},
 			required: ["event_id"],
 			additionalProperties: false,
 		},
@@ -179,7 +222,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			if (!eventId) throw new Error("event_id is required");
 			const event = await client.request<Record<string, unknown>>(
 				"GET",
-				`/calendars/${encodeURIComponent(calendarArg(args))}/events/${encodeURIComponent(eventId)}`,
+				`/calendars/${encodeURIComponent(await client.calendar(calendarArg(args)))}/events/${encodeURIComponent(eventId)}`,
 			);
 			const description = typeof event.description === "string" ? `\n\n${event.description}` : "";
 			return `${eventSummary(event)}${description}`;
@@ -193,7 +236,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				calendar_id: { type: "string" },
+				calendar_id: { type: "string", description: 'The calendar id from google_calendars, or its name. Defaults to "primary".' },
 				summary: { type: "string", description: "The event title." },
 				start: { type: "string", description: "Start, RFC 3339 or YYYY-MM-DD." },
 				end: { type: "string", description: "End, RFC 3339 or YYYY-MM-DD." },
@@ -212,7 +255,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			const time = (value: string) => (value.length === 10 ? { date: value } : { dateTime: value });
 			const event = await client.request<Record<string, unknown>>(
 				"POST",
-				`/calendars/${encodeURIComponent(calendarArg(args))}/events`,
+				`/calendars/${encodeURIComponent(await client.calendar(calendarArg(args)))}/events`,
 				{
 					summary,
 					start: time(start),
@@ -234,7 +277,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				calendar_id: { type: "string" },
+				calendar_id: { type: "string", description: 'The calendar id from google_calendars, or its name. Defaults to "primary".' },
 				event_id: { type: "string" },
 				summary: { type: "string" },
 				start: { type: "string" },
@@ -258,7 +301,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			if (!Object.keys(patch).length) throw new Error("nothing to change");
 			const event = await client.request<Record<string, unknown>>(
 				"PATCH",
-				`/calendars/${encodeURIComponent(calendarArg(args))}/events/${encodeURIComponent(eventId)}`,
+				`/calendars/${encodeURIComponent(await client.calendar(calendarArg(args)))}/events/${encodeURIComponent(eventId)}`,
 				patch,
 			);
 			return `Updated: ${eventSummary(event)}`;
@@ -270,7 +313,10 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		description: "Delete an event by its id. This cannot be undone.",
 		inputSchema: {
 			type: "object",
-			properties: { calendar_id: { type: "string" }, event_id: { type: "string" } },
+			properties: {
+				calendar_id: { type: "string", description: 'The calendar id from google_calendars, or its name. Defaults to "primary".' },
+				event_id: { type: "string" },
+			},
 			required: ["event_id"],
 			additionalProperties: false,
 		},
@@ -279,7 +325,7 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			if (!eventId) throw new Error("event_id is required");
 			await client.request<void>(
 				"DELETE",
-				`/calendars/${encodeURIComponent(calendarArg(args))}/events/${encodeURIComponent(eventId)}`,
+				`/calendars/${encodeURIComponent(await client.calendar(calendarArg(args)))}/events/${encodeURIComponent(eventId)}`,
 			);
 			return `Deleted event ${eventId}.`;
 		},
@@ -291,7 +337,11 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				calendar_ids: { type: "array", items: { type: "string" }, description: 'Calendar ids, e.g. ["primary"].' },
+				calendar_ids: {
+					type: "array",
+					items: { type: "string" },
+					description: 'Calendar ids from google_calendars, or names it lists, e.g. ["primary"].',
+				},
 				time_min: { type: "string", description: "Start of the window, RFC 3339." },
 				time_max: { type: "string", description: "End of the window, RFC 3339." },
 			},
@@ -303,10 +353,11 @@ export const GOOGLE_TOOLS: readonly GoogleTool[] = [
 			const timeMin = stringArg(args.time_min);
 			const timeMax = stringArg(args.time_max);
 			if (!ids.length || !timeMin || !timeMax) throw new Error("calendar_ids, time_min and time_max are required");
+			const resolved = await Promise.all(ids.map((id) => client.calendar(id)));
 			const body = await client.request<{ calendars?: Record<string, { busy?: { start: string; end: string }[] }> }>(
 				"POST",
 				"/freeBusy",
-				{ timeMin, timeMax, items: ids.map((id) => ({ id })) },
+				{ timeMin, timeMax, items: resolved.map((id) => ({ id })) },
 			);
 			const lines: string[] = [];
 			for (const [id, value] of Object.entries(body.calendars ?? {})) {

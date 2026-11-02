@@ -13,6 +13,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { refreshGitHubToken } from "../account-oauth";
 import { DEFAULT_ORIGIN, MCP_PATH } from "../config";
 import { randomToken } from "../crypto";
 import { DEPLOY_HEADER, currentDeploy, withDeploy } from "../deploy";
@@ -397,8 +398,33 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		if (!account) return undefined;
 		// GitHub accounts are connected with an OAuth App sign-in or a personal
 		// token; both are a user access token, which the tools present as a bearer.
-		const token = account.credential.token;
+		let token = account.credential.token;
 		if (!token) return undefined;
+		const expiresAt = account.credential.expiresAt;
+		const refreshToken = account.credential.refreshToken;
+		// An OAuth App can expire its user tokens after eight hours. Refresh before
+		// the call and keep the new pair, or the connection dies with "Bad
+		// credentials" once the first token lapses.
+		if (expiresAt !== undefined && expiresAt - 60_000 <= Date.now() && refreshToken) {
+			const clientId = this.env.GITHUB_OAUTH_CLIENT_ID?.trim();
+			const clientSecret = this.env.GITHUB_OAUTH_CLIENT_SECRET?.trim();
+			if (clientId && clientSecret) {
+				try {
+					const next = await refreshGitHubToken({ clientId, clientSecret, refreshToken });
+					token = next.accessToken;
+					const credential = {
+						...account.credential,
+						token: next.accessToken,
+						...(next.refreshToken ? { refreshToken: next.refreshToken } : {}),
+						...(next.expiresAt ? { expiresAt: next.expiresAt } : {}),
+					};
+					void putAccount(this.ctx.storage, this.secret, { ...account, credential }).catch(() => undefined);
+				} catch {
+					// Fall through with the old token so the tool reports GitHub's own
+					// rejection rather than a refresh failure the user cannot act on.
+				}
+			}
+		}
 		const signature = `pat:${token}`;
 		if (this.github?.signature !== signature) this.github = { signature, api: githubApi({ kind: "pat", token }) };
 		return this.github.api;

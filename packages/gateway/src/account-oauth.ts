@@ -26,6 +26,8 @@ const GOOGLE_SCOPES = [
 
 export interface GitHubTokens {
 	accessToken: string;
+	refreshToken?: string;
+	expiresAt?: number;
 }
 export interface GoogleTokens {
 	accessToken: string;
@@ -60,9 +62,63 @@ export async function exchangeGitHubCode(options: {
 		}),
 	});
 	if (!response.ok) throw new Error(`GitHub rejected the sign-in (HTTP ${response.status})`);
-	const body = (await response.json()) as { access_token?: string; error_description?: string };
+	const body = (await response.json()) as {
+		access_token?: string;
+		refresh_token?: string;
+		expires_in?: number;
+		error_description?: string;
+	};
 	if (!body.access_token) throw new Error(body.error_description ?? "GitHub did not return a token.");
-	return { accessToken: body.access_token };
+	return githubTokens(body);
+}
+
+/**
+ * Swap a refresh token for a new access token.
+ *
+ * A GitHub OAuth App can be set to expire user tokens after eight hours, and it
+ * only hands out a refresh token when it does. Dropping that refresh token is
+ * how a working connection quietly turns into "Bad credentials" a few hours
+ * later, so both halves are stored and this is the other half.
+ */
+export async function refreshGitHubToken(options: {
+	clientId: string;
+	clientSecret: string;
+	refreshToken: string;
+}): Promise<GitHubTokens> {
+	const response = await fetch(`${GITHUB_OAUTH}/access_token`, {
+		method: "POST",
+		headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+		body: new URLSearchParams({
+			client_id: options.clientId,
+			client_secret: options.clientSecret,
+			grant_type: "refresh_token",
+			refresh_token: options.refreshToken,
+		}),
+	});
+	if (!response.ok) throw new Error(`GitHub refused a token refresh (HTTP ${response.status})`);
+	const body = (await response.json()) as {
+		access_token?: string;
+		refresh_token?: string;
+		expires_in?: number;
+		error_description?: string;
+	};
+	if (!body.access_token) throw new Error(body.error_description ?? "GitHub did not return a token.");
+	return githubTokens(body);
+}
+
+/** Read the token fields GitHub returns, with an expiry only when it sets one. */
+function githubTokens(body: {
+	access_token?: string;
+	refresh_token?: string;
+	expires_in?: number;
+}): GitHubTokens {
+	const accessToken = body.access_token;
+	if (!accessToken) throw new Error("GitHub did not return a token.");
+	return {
+		accessToken,
+		...(body.refresh_token ? { refreshToken: body.refresh_token } : {}),
+		...(typeof body.expires_in === "number" && body.expires_in > 0 ? { expiresAt: Date.now() + body.expires_in * 1_000 } : {}),
+	};
 }
 
 /** The profile a GitHub token belongs to, or a thrown error when it is bad. */

@@ -400,7 +400,12 @@ function handleAccountCallback(provider: "github" | "google") {
 				if (!clientId || !clientSecret) throw new Error("GitHub sign-in is not configured.");
 				const tokens = await exchangeGitHubCode({ clientId, clientSecret, code, redirectUri: `${origin}/github/callback` });
 				const profile = await fetchGitHubProfile(tokens.accessToken);
-				const account = newAccount("github", profile.name ?? profile.username, profile, { kind: "github", token: tokens.accessToken });
+				const account = newAccount("github", profile.name ?? profile.username, profile, {
+					kind: "github",
+					token: tokens.accessToken,
+					...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+					...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
+				});
 				await callUser(state.uid, "/store/account", { method: "PUT", body: JSON.stringify(account) });
 			} else {
 				const clientId = env.GOOGLE_CLIENT_ID?.trim();
