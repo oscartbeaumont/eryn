@@ -412,7 +412,14 @@ export function discordRest(token: string) {
 			});
 		},
 
-		/** Edit the message a deferred (or already acknowledged) interaction shows. */
+		/**
+		 * Edit the message a deferred (or already acknowledged) interaction shows.
+		 *
+		 * `components` is sent whenever the caller names it, including as an empty
+		 * array: Discord keeps the message's existing components when the field is
+		 * missing, so leaving it out would leave a finished flow's buttons on
+		 * screen. Only `undefined` means "leave them alone".
+		 */
 		async interactionEditOriginal(
 			applicationId: string,
 			interactionToken: string,
@@ -421,11 +428,11 @@ export function discordRest(token: string) {
 		): Promise<void> {
 			await request<void>("PATCH", `/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
 				content,
-				...(options.components?.length ? { components: options.components } : {}),
+				...(options.components ? { components: options.components } : {}),
 			});
 		},
 
-		/** Replace the message a component interaction came from. */
+		/** Replace the message a component interaction came from. Same rule applies. */
 		async interactionUpdate(
 			interactionId: string,
 			interactionToken: string,
@@ -436,7 +443,7 @@ export function discordRest(token: string) {
 				type: 7,
 				data: {
 					content,
-					...(options.components?.length ? { components: options.components } : {}),
+					...(options.components ? { components: options.components } : {}),
 				},
 			});
 		},

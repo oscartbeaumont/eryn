@@ -228,9 +228,15 @@ function optionShape(option: DiscordCommandOption): unknown {
 const acknowledged = new WeakSet<DiscordInteraction>();
 
 function responder(ctx: CommandContext, interaction: DiscordInteraction) {
+	/**
+	 * An edit replaces the whole message, so its components default to none.
+	 * Discord keeps the previous ones when the field is left out, which is how a
+	 * finished flow used to keep its buttons alive for another click; callers
+	 * that still want buttons pass them for the next step.
+	 */
 	const edit = (content: string, components?: readonly DiscordComponent[]) =>
 		ctx.rest.interactionEditOriginal(CLIENT_ID, interaction.token, content, {
-			...(components?.length ? { components } : {}),
+			components: components ?? [],
 		});
 	return {
 		/**
@@ -242,7 +248,9 @@ function responder(ctx: CommandContext, interaction: DiscordInteraction) {
 			if (acknowledged.has(interaction)) return;
 			acknowledged.add(interaction);
 			if (interaction.type === 3) {
-				await ctx.rest.interactionUpdate(interaction.id, interaction.token, "Working…");
+				// Drop the buttons while the work runs, so a second click cannot
+				// start the same step twice.
+				await ctx.rest.interactionUpdate(interaction.id, interaction.token, "Working…", { components: [] });
 			} else {
 				await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
 			}
@@ -258,7 +266,7 @@ function responder(ctx: CommandContext, interaction: DiscordInteraction) {
 			if (acknowledged.has(interaction)) return edit(content, components);
 			acknowledged.add(interaction);
 			return ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
-				...(components?.length ? { components } : {}),
+				components: components ?? [],
 			});
 		},
 		modal: (modal: DiscordModal) => ctx.rest.interactionModal(interaction.id, interaction.token, modal),
@@ -938,6 +946,15 @@ async function completeLink(
 		return;
 	}
 	const tools = preset === "r" ? readOnly(server.tools) : server.tools;
+	// Check before minting the grant below: a refused link would otherwise leave
+	// a token on the gateway that nothing points at or revokes.
+	const links = await session.links();
+	if (links.some((link) => link.name === server.name)) {
+		await answer.update(
+			`**${server.title ?? server.name}** is already linked to this server. Remove it with \`/eryn mcp remove\` before linking it again.`,
+		);
+		return;
+	}
 	const granted = await ctx.gateway.grant(userId, guildId, serverId, tools);
 	const link: McpLink = {
 		id: crypto.randomUUID(),
