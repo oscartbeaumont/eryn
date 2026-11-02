@@ -367,6 +367,48 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		});
 	}
 
+	/**
+	 * Re-point a server's account slots at accounts that exist.
+	 *
+	 * Removing an account leaves its id in every server that named it, and
+	 * reconnecting adds a new id, so a server can keep a dead reference while a
+	 * perfectly good account sits unused. Drop the dead ids and, for each built-in
+	 * group the server still exposes, take the newest account of that provider if
+	 * the server has none.
+	 */
+	private async healAccounts(server: McpServer, accounts: Account[]): Promise<McpServer> {
+		const known = new Set(accounts.map((account) => account.id));
+		const kept = server.accountIds.filter((id) => known.has(id));
+		const assigned = new Set(
+			accounts.filter((account) => kept.includes(account.id)).map((account) => account.provider),
+		);
+		const visible = new Set(visibleToolNames(server.tools, entriesFor(server)));
+		const groups = new Map(catalog().map((tool) => [tool.name, tool.group] as const));
+		const providers: [string, Account["provider"]][] = [
+			["discord", "discord"],
+			["github", "github"],
+			["google_calendar", "google"],
+		];
+		const added: string[] = [];
+		for (const [group, provider] of providers) {
+			if (assigned.has(provider)) continue;
+			if (![...visible].some((name) => groups.get(name) === group)) continue;
+			const newest = accounts
+				.filter((account) => account.provider === provider)
+				.sort((a, b) => b.createdAt - a.createdAt)[0];
+			if (!newest) continue;
+			added.push(newest.id);
+			assigned.add(provider);
+		}
+		const accountIds = [...kept, ...added];
+		if (accountIds.length === server.accountIds.length && accountIds.every((id, index) => id === server.accountIds[index])) {
+			return server;
+		}
+		const updated: McpServer = { ...server, accountIds };
+		await putServer(this.ctx.storage, this.secret, updated);
+		return updated;
+	}
+
 	/** A stable account of a server's tools, so a config change rebuilds the endpoint. */
 	private signatureOf(server: McpServer, allowed: readonly string[]): string {		const connections = (server.connections ?? [])
 			.map((connection) =>
@@ -383,7 +425,7 @@ export class GatewayUserV5 extends DurableObject<Env> {
 	// --- MCP -------------------------------------------------------------------
 
 	private async mcp(request: Request, slug: string): Promise<Response> {
-		const server = await getServerByName(this.ctx.storage, this.secret, slug);
+		let server = await getServerByName(this.ctx.storage, this.secret, slug);
 		if (!server) {
 			return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32002, message: `No MCP server named ${slug}.` } }, { status: 404 });
 		}
@@ -407,6 +449,7 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		}
 
 		const accounts = await listAccounts(this.ctx.storage, this.secret);
+		server = await this.healAccounts(server, accounts);
 		const entries = entriesFor(server);
 		// A guild link can only ever narrow what the server exposes, so its tool
 		// list is intersected with the server's own. A link that carries the whole
