@@ -99,7 +99,13 @@ export function googleApi(
 				refresh_token: current.refreshToken,
 			}),
 		});
-		if (!response.ok) throw new Error(`Google refused a token refresh (HTTP ${response.status})`);
+		if (!response.ok) {
+			// Google's body says *why* (`invalid_grant` means the account has to be
+			// reconnected; `invalid_client` is a deployment problem). It carries no
+			// token, so it is safe to put in the error the user sees.
+			const detail = await response.text().catch(() => "");
+			throw new Error(`Google refused a token refresh (HTTP ${response.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+		}
 		const body = (await response.json()) as { access_token: string; expires_in?: number };
 		const expiresAt = Date.now() + (body.expires_in ?? 3600) * 1_000;
 		current = { ...current, accessToken: body.access_token, expiresAt };

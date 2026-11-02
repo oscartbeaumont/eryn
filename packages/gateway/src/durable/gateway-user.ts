@@ -493,7 +493,20 @@ export class GatewayUserV5 extends DurableObject<Env> {
 					}).catch(() => undefined);
 				},
 			);
-			return await google.run(client, args);
+			try {
+				return await google.run(client, args);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				// Google keeps the reason in the response body. An expired or revoked
+				// grant cannot be refreshed, so say what the user can actually do
+				// instead of leaving a bare HTTP 400 in the transcript.
+				if (message.includes("invalid_grant") || message.includes("invalid_client")) {
+					throw new Error(
+						`The Google Calendar sign-in has expired or was revoked. Reconnect Google at ${this.origin()}/console/accounts, then try again. Nothing was changed. (${message})`,
+					);
+				}
+				throw error;
+			}
 		}
 
 		throw new Error(`Unknown tool ${name}.`);
