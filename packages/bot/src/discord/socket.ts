@@ -44,6 +44,15 @@ export interface DiscordMessage {
 	mentions?: DiscordUser[];
 	mention_roles?: string[];
 	thread?: { id: string; parent_id?: string };
+	/** Files the message carries. The URL is signed by Discord and short-lived. */
+	attachments?: {
+		id?: string;
+		filename?: string;
+		content_type?: string;
+		size?: number;
+		url?: string;
+		proxy_url?: string;
+	}[];
 }
 
 /**

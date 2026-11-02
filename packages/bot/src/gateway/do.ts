@@ -242,7 +242,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) return;
 			const text = this.stripMention(message.content ?? "", roleId).trim();
-			if (!text) return;
+			if (!text && this.attachmentsOf(message).length === 0) return;
 			if (STOP_TEXT.has(text.toLowerCase())) {
 				await this.stopThread(guildId, channel.id);
 				return;
@@ -291,7 +291,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				.addThreadMember(threadId, authorId)
 				.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
 		}
-		if (!text) {
+		if (!text && this.attachmentsOf(message).length === 0) {
 			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
 			return;
 		}
@@ -357,6 +357,27 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			.catch(() => undefined);
 	}
 
+	/** The files a Discord message carried, in the shape the session accepts. */
+	private attachmentsOf(message: DiscordMessage): {
+		url: string;
+		name?: string;
+		contentType?: string;
+		size?: number;
+	}[] {
+		return (message.attachments ?? []).flatMap((attachment) => {
+			const url = attachment.url ?? attachment.proxy_url;
+			if (!url) return [];
+			return [
+				{
+					url,
+					...(attachment.filename ? { name: attachment.filename } : {}),
+					...(attachment.content_type ? { contentType: attachment.content_type } : {}),
+					...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
+				},
+			];
+		});
+	}
+
 	/**
 	 * Forward a prompt to the guild's session object and wait for the turn,
 	 * serialised per thread so messages keep their order. The object is named
@@ -379,6 +400,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 					text,
 					author: this.authorName(message),
 					discord,
+					attachments: this.attachmentsOf(message),
 				});
 				return;
 			} catch (error) {

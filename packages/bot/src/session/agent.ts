@@ -22,6 +22,7 @@ import { DiscordStream } from "../discord/stream";
 import { DiscordApi } from "../discord/api";
 import { Workspace } from "../opencode/store";
 import { workspacePlugin } from "../opencode/workspace";
+import { bytesToBase64 } from "../opencode/bytes";
 import { discordPlugin } from "../opencode/discord";
 import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
@@ -34,6 +35,7 @@ import {
 	type ModelOption,
 	type OAuthAttempt,
 	type OAuthStatus,
+	type PromptAttachment,
 	type PromptRequest,
 	type ProviderConnection,
 	type ProviderField,
@@ -42,6 +44,13 @@ import {
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
 const DEFAULT_TURN_TIMEOUT_SECONDS = 900;
+
+/** A Discord attachment larger than this is skipped rather than decoded in the isolate. */
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/** Image types the providers accept as prompt files. */
+const ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** Discord's CDN hosts, so an attachment URL cannot point anywhere else. */
+const ATTACHMENT_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 
 /** Everything the host needs to be built, and to decide whether to rebuild. */
 export interface HostConfig {
@@ -154,7 +163,10 @@ function failureNote(error: string): string {
  */
 function userMessage(request: PromptRequest): string {
 	const author = request.author?.trim();
-	return author ? `${author}: ${request.text}` : request.text;
+	// A message can be only files; say so rather than handing the model an empty
+	// line that reads like a mistake.
+	const text = request.text.trim() || "(attached files)";
+	return author ? `${author}: ${text}` : text;
 }
 
 /** Render the streamed text so far, preferring messages that belong to a step. */
@@ -729,7 +741,16 @@ class GuildAgentImpl implements GuildAgentShape {
 			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 			await this.applyModel(host, request.threadId, sessionID, config.model);
 
-			await host.sessions.prompt({ sessionID, text: userMessage(request) });
+			const attached = await this.attachedImages(request.attachments);
+			const text =
+				attached.notes.length > 0
+					? `${userMessage(request)}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
+					: userMessage(request);
+			await host.sessions.prompt({
+				sessionID,
+				text,
+				...(attached.files.length > 0 ? { files: attached.files } : {}),
+			});
 			const finished = await this.wait(turn);
 			if (!finished) await this.interrupt(request.threadId, false).catch(() => undefined);
 
@@ -763,6 +784,66 @@ class GuildAgentImpl implements GuildAgentShape {
 				this.runs.delete(request.threadId);
 			}
 		}
+	}
+
+	/**
+	 * Turn Discord attachments into prompt files.
+	 *
+	 * The model sees pixels only when they are part of the prompt, so the file is
+	 * fetched from Discord's CDN and embedded as a data URL. Anything too large or
+	 * not an image is left out and reported, because silently dropping an image
+	 * is indistinguishable from the model ignoring it.
+	 */
+	private async attachedImages(
+		attachments: readonly PromptAttachment[] | undefined,
+	): Promise<{ files: { uri: string; name?: string }[]; notes: string[] }> {
+		const files: { uri: string; name?: string }[] = [];
+		const notes: string[] = [];
+		for (const attachment of attachments ?? []) {
+			const name = attachment.name?.trim() || "attachment";
+			let url: URL;
+			try {
+				url = new URL(attachment.url);
+			} catch {
+				notes.push(`${name}: invalid link`);
+				continue;
+			}
+			if (url.protocol !== "https:" || !ATTACHMENT_HOSTS.has(url.hostname)) {
+				notes.push(`${name}: unsupported link`);
+				continue;
+			}
+			const declared = attachment.contentType?.split(";")[0]?.trim().toLowerCase();
+			if (declared && !ATTACHMENT_TYPES.has(declared)) {
+				notes.push(`${name}: only images can be attached`);
+				continue;
+			}
+			if (typeof attachment.size === "number" && attachment.size > MAX_ATTACHMENT_BYTES) {
+				notes.push(`${name}: larger than 5 MB`);
+				continue;
+			}
+			try {
+				const response = await fetch(url, { headers: { accept: "image/*" } });
+				if (!response.ok) {
+					notes.push(`${name}: download failed (HTTP ${response.status})`);
+					continue;
+				}
+				const served = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+				const type = served && ATTACHMENT_TYPES.has(served) ? served : declared;
+				if (!type || !ATTACHMENT_TYPES.has(type)) {
+					notes.push(`${name}: unsupported type ${served ?? declared ?? "unknown"}`);
+					continue;
+				}
+				const bytes = new Uint8Array(await response.arrayBuffer());
+				if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+					notes.push(`${name}: larger than 5 MB`);
+					continue;
+				}
+				files.push({ uri: `data:${type};base64,${bytesToBase64(bytes)}`, name });
+			} catch (error) {
+				notes.push(`${name}: ${describeError(error)}`);
+			}
+		}
+		return { files, notes };
 	}
 
 	/**

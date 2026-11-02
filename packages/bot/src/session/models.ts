@@ -329,6 +329,15 @@ export const GuildConfigSchema = Schema.Struct({
 });
 export type GuildConfig = typeof GuildConfigSchema.Type;
 
+/** One file a Discord message carried, as the session needs it. */
+export const PromptAttachmentSchema = Schema.Struct({
+	url: Schema.String,
+	name: Schema.optional(Schema.String),
+	contentType: Schema.optional(Schema.String),
+	size: Schema.optional(Schema.Number),
+});
+export type PromptAttachment = typeof PromptAttachmentSchema.Type;
+
 export const PromptRequestSchema = Schema.Struct({
 	guildId: Schema.String,
 	threadId: Schema.String,
@@ -338,6 +347,8 @@ export const PromptRequestSchema = Schema.Struct({
 	author: Schema.optional(Schema.String),
 	/** Where the request came from in Discord, recorded on the session. */
 	discord: Schema.optional(DiscordContextSchema),
+	/** Files attached to the message, for the model to read. */
+	attachments: Schema.optional(Schema.Array(PromptAttachmentSchema)),
 	/** Optional override; the session falls back to its own stored config. */
 	config: Schema.optional(GuildConfigSchema),
 });
