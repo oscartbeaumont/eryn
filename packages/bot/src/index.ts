@@ -45,8 +45,10 @@ export async function wake(
 	// A pending restart means the object resets into the new deploy a second from
 	// now, and the replacement starts with no socket. Keep poking for a few
 	// seconds: the call that lands after the reset is what makes it connect. The
-	// reset can be delayed, so one extra poke is not enough to rely on.
-	for (let attempt = 0; attempt < 8 && state && (state.restart || !state.connected); attempt++) {
+	// reset can be delayed, so one extra poke is not enough to rely on. The first
+	// call can also be the one the reset kills, which leaves no state to read —
+	// that is a reason to poke again, not to give up.
+	for (let attempt = 0; attempt < 10 && (!state || state.restart || !state.connected); attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		state = (await call().catch(() => undefined)) ?? state;
 	}

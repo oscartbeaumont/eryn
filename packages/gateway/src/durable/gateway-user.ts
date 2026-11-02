@@ -126,9 +126,12 @@ export class GatewayUserV5 extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
-		await this.ensureCurrentVersion(request);
+		// Count the request before the restart check: a request that arrives while
+		// a restart is already armed must not be aborted in the moment before it
+		// is counted, or the work it carries is lost with no error.
 		this.inFlight += 1;
 		try {
+			await this.ensureCurrentVersion(request);
 			return await this.route(request);
 		} catch (error) {
 			if (error instanceof HttpError) return Response.json({ error: error.message }, { status: error.status });

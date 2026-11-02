@@ -130,6 +130,13 @@ discards the event's storage writes, so a stored marker survives the restart
 and makes every replacement instance restart again. The keepalive alarm is
 armed after the restart alarm, never over it.
 
+The call that discovers a restart is often the one the restart kills, so the
+wake that pokes the bot keeps poking for a few seconds even when its first call
+fails: that is what makes the replacement instance connect immediately instead
+of leaving the bot offline until the next cron tick. Socket work is counted too,
+so a restart waits for a message or interaction already being handled rather than
+cutting off the reply.
+
 That makes a deploy take effect within a second or two, with no renames:
 
 ```sh

@@ -72,6 +72,12 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	 * restart every replacement instance.
 	 */
 	private restartPending = false;
+	/**
+	 * Socket work in progress. A message handler can be waiting on a whole
+	 * agent turn, so a deploy restart waits for it rather than cutting the turn
+	 * off before the reply exists.
+	 */
+	private active = 0;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -79,27 +85,27 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		this.rest = discordRest(this.token);
 		this.keepAliveMs = intFromEnv(env.DISCORD_KEEPALIVE_SECONDS, DEFAULT_KEEPALIVE_SECONDS, 60, 3_600) * 1_000;
 		this.socket = new DiscordSocket(this.token, log, {
-			onMessage: (message) => {
-				void this.onMessage(message).catch((error) => log(`message handling failed: ${describeError(error)}`));
-			},
-			onInteraction: (interaction) => {
-				void this.onInteraction(interaction).catch((error) =>
-					log(`interaction handling failed: ${describeError(error)}`),
-				);
-			},
-			onGuild: (guild) => {
-				void this.onGuild(guild).catch((error) => log(`guild handling failed: ${describeError(error)}`));
-			},
-			onChannelDelete: (channel) => {
-				void this.onChannelDelete(channel).catch((error) =>
-					log(`channel deletion handling failed: ${describeError(error)}`),
-				);
-			},
+			onMessage: (message) => this.track(() => this.onMessage(message), "message handling failed"),
+			onInteraction: (interaction) =>
+				this.track(() => this.onInteraction(interaction), "interaction handling failed"),
+			onGuild: (guild) => this.track(() => this.onGuild(guild), "guild handling failed"),
+			onChannelDelete: (channel) =>
+				this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
 		});
 		// A fresh instance — after a deploy reset or an eviction — has no socket.
 		// Connect before the first request so the bot comes back on its own, rather
 		// than staying offline until something happens to call /wake.
 		state.blockConcurrencyWhile(() => this.ensure());
+	}
+
+	/** Run one socket handler, counting it so a restart can wait for it. */
+	private track(run: () => Promise<void>, failure: string): void {
+		this.active += 1;
+		void run()
+			.catch((error) => log(`${failure}: ${describeError(error)}`))
+			.finally(() => {
+				this.active -= 1;
+			});
 	}
 
 	/** Keeps the gateway alive and arms the next wake-up. */
@@ -109,6 +115,12 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		// event's storage writes, so a persisted marker would survive the restart
 		// and make every new instance restart again.
 		if (this.restartPending) {
+			if (this.active > 0) {
+				// A message or interaction is still being handled. Restarting now
+				// would drop it, so check again once it has finished.
+				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+				return;
+			}
 			this.ctx.abort("deploy changed", { retryAlarm: false });
 			return;
 		}
