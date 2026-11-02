@@ -71,6 +71,13 @@ export default function Servers() {
 	const [groups, setGroups] = createSignal<ToolGroup[]>([]);
 	const [notice, setNotice] = createSignal<NoticeState | undefined>(redirectNotice());
 	const [busy, setBusy] = createSignal(false);
+	/**
+	 * A loopback sign-in waiting for its redirect to be pasted back. It lives
+	 * here rather than in a server card because saving reloads the list, which
+	 * recreates the cards.
+	 */
+	const [signin, setSignin] = createSignal<{ connectionId: string; name: string; url: string }>();
+	const [callback, setCallback] = createSignal("");
 
 	async function reload() {
 		try {
@@ -152,6 +159,10 @@ export default function Servers() {
 													busy={busy()}
 													onMutate={mutate}
 													onNotice={flash}
+													signin={signin()}
+													onSignin={setSignin}
+													callback={callback()}
+													onCallback={setCallback}
 												/>
 											)}
 										</For>
@@ -326,6 +337,10 @@ function ServerCard(props: {
 	busy: boolean;
 	onMutate: (action: ServersAction, success: string) => Promise<ServersResult | undefined>;
 	onNotice: (kind: NoticeState["kind"], message: string) => void;
+	signin?: { connectionId: string; name: string; url: string };
+	onSignin: (value: { connectionId: string; name: string; url: string } | undefined) => void;
+	callback: string;
+	onCallback: (value: string) => void;
 }) {
 	const [renaming, setRenaming] = createSignal(false);
 	const [name, setName] = createSignal(props.server.name);
@@ -342,9 +357,6 @@ function ServerCard(props: {
 	const [clientSecret, setClientSecret] = createSignal("");
 	const [addingUpstream, setAddingUpstream] = createSignal(false);
 	const [loopbackPreferred, setLoopbackPreferred] = createSignal(false);
-	/** The loopback sign-in waiting for its redirect to be pasted back. */
-	const [loopbackSignin, setLoopbackSignin] = createSignal<{ connectionId: string; name: string; url: string }>();
-	const [callbackInput, setCallbackInput] = createSignal("");
 
 	/** The URI a provider has to accept before an OAuth sign-in can come back. */
 	const redirectUri = () => `${window.location.origin}/api/mcp/upstream/callback`;
@@ -488,8 +500,8 @@ function ServerCard(props: {
 		setConnectionTitle("");
 		setAddingUpstream(false);
 		if (result?.ok && result.loopback && result.url && result.connectionId) {
-			setLoopbackSignin({ connectionId: result.connectionId, name: connectionTitle().trim() || url, url: result.url });
-			setCallbackInput("");
+			props.onSignin({ connectionId: result.connectionId, name: connectionTitle().trim() || url, url: result.url });
+			props.onCallback("");
 		}
 	}
 
@@ -506,16 +518,16 @@ function ServerCard(props: {
 			"Sign-in started.",
 		);
 		if (result?.ok && result.loopback && result.url) {
-			setLoopbackSignin({ connectionId: connection.id, name: connection.name, url: result.url });
-			setCallbackInput("");
+			props.onSignin({ connectionId: connection.id, name: connection.name, url: result.url });
+			props.onCallback("");
 		}
 	}
 
 	/** Finish a loopback sign-in with the address the browser was sent to. */
 	async function completeSignin(event: SubmitEvent) {
 		event.preventDefault();
-		const pending = loopbackSignin();
-		const callback = callbackInput().trim();
+		const pending = props.signin;
+		const callback = props.callback.trim();
 		if (!pending || !callback) return;
 		const result = await props.onMutate(
 			{
@@ -528,8 +540,8 @@ function ServerCard(props: {
 			"Signed in.",
 		);
 		if (result?.ok) {
-			setLoopbackSignin(undefined);
-			setCallbackInput("");
+			props.onSignin(undefined);
+			props.onCallback("");
 		}
 	}
 
@@ -822,7 +834,7 @@ function ServerCard(props: {
 												Remove
 											</button>
 										</div>
-										<Show when={loopbackSignin()?.connectionId === connection.id ? loopbackSignin() : undefined}>
+										<Show when={props.signin?.connectionId === connection.id ? props.signin : undefined}>
 											{(current) => (
 												<div class="mt-3 border border-line-strong bg-bg p-3">
 													<p class="max-w-[62ch] text-xs text-muted">
@@ -841,11 +853,11 @@ function ServerCard(props: {
 													<form class="mt-2 flex flex-wrap items-center gap-2" onSubmit={completeSignin}>
 														<input
 															type="text"
-															value={callbackInput()}
+															value={props.callback}
 															placeholder="http://localhost:4788/…?code=…"
 															spellcheck={false}
 															class="min-w-0 flex-1 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
-															onInput={(event) => setCallbackInput(event.currentTarget.value)}
+															onInput={(event) => props.onCallback(event.currentTarget.value)}
 														/>
 														<button type="submit" class={buttonClass.primary} disabled={props.busy}>
 															Finish sign-in
