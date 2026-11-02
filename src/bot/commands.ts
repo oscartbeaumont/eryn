@@ -7,7 +7,7 @@
  * guild's session object, which this file only calls.
  */
 
-import { CLIENT_ID, publicOrigin } from "../config";
+import { CLIENT_ID } from "../config";
 import { describeError } from "../errors";
 import type { DiscordCommand, DiscordCommandOption } from "../discord/api";
 import {
@@ -23,8 +23,8 @@ import {
 import type { DiscordInteraction } from "../discord/socket";
 import { modalValues } from "../discord/socket";
 import { describeTools } from "../mcp/links";
-import type { McpLink, ToolAccess } from "../session/models";
-import { GatewayClient, SessionClient, type HostedServer } from "./client";
+import type { McpLink } from "../session/models";
+import { SessionClient } from "./client";
 
 const MAX_SELECT_OPTIONS = 25;
 /** Discord's own id limit; our encoded ids must stay under it. */
@@ -78,10 +78,6 @@ export const CID = {
 	modelManual: "setup:model:manual",
 	modelModal: "setup:model:modal",
 	mcpAddModal: "mcp:add",
-	mcpAddHosted: "mcp:add:hosted",
-	mcpAddExternal: "mcp:add:external",
-	mcpLinkSelect: "mcp:link",
-	mcpLinkPick: (serverId: string, preset: string) => clip(`mcp:link:${serverId}:${preset}`),
 	mcpRemoveSelect: "mcp:remove",
 	mcpAuthCheck: (attemptId: string) => clip(`mcp:oauth:${attemptId}`),
 	mcpTestAll: "mcp:test:all",
@@ -131,7 +127,6 @@ export interface CommandContext {
 	readonly env: Env;
 	readonly log: (message: string) => void;
 	readonly session: (guildId: string) => SessionClient;
-	readonly gateway: GatewayClient;
 	readonly ownsThread: (threadId: string) => Promise<boolean>;
 	readonly rest: {
 		interactionReply: (id: string, token: string, content: string, options?: { components?: readonly DiscordComponent[]; ephemeral?: boolean }) => Promise<void>;
@@ -171,18 +166,17 @@ export function erynCommand(): DiscordCommand {
 				options: [
 					{
 						name: "add",
-						description: "Add an MCP server: one of yours, or any external server",
+						description: "Add and test an external MCP server",
 						type: 1,
-						options: [{ name: "url", description: "An external server's streamable HTTP URL", type: 3 }],
+						options: [{ name: "url", description: "The server's streamable HTTP URL", type: 3 }],
 					},
-					{ name: "link", description: "Link one of your Eryn-hosted MCP servers", type: 1 },
 					{ name: "list", description: "List this server's linked MCP servers", type: 1 },
 					{ name: "test", description: "Test the linked MCP servers", type: 1 },
 					{ name: "remove", description: "Remove a linked MCP server", type: 1 },
 				],
 			},
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
-			{ name: "help", description: "How Eryn is set up, and where the console is", type: 1 },
+			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
 	};
 }
@@ -273,10 +267,6 @@ function responder(ctx: CommandContext, interaction: DiscordInteraction) {
 	};
 }
 
-function userIdOf(interaction: DiscordInteraction): string {
-	return interaction.member?.user?.id ?? interaction.user?.id ?? "";
-}
-
 /** Run a handler, and always answer the interaction even when it throws. */
 async function guarded(
 	ctx: CommandContext,
@@ -318,7 +308,6 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		return;
 	}
 	const session = ctx.session(guildId);
-	const userId = userIdOf(interaction);
 
 	switch (path) {
 		case "setup:provider":
@@ -332,7 +321,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 				const providers = status.providers.length
 					? status.providers.map((provider) => `• ${provider.integrationID}`).join("\n")
 					: "none";
-				const links = status.links.length ? status.links.map((link) => `• ${link.name} (${link.kind})`).join("\n") : "none";
+				const links = status.links.length ? status.links.map((link) => `• ${link.name}`).join("\n") : "none";
 				await answer.reply(
 					[
 						status.ready ? "**Eryn is ready here.**" : "**Eryn is not set up here yet.** Connect a provider with `/eryn setup provider`.",
@@ -345,28 +334,9 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		case "mcp:add": {
 			const first = sub && "options" in sub ? sub.options?.[0] : undefined;
 			const url = typeof first?.value === "string" ? first.value : undefined;
-			if (url) {
-				await answer.modal(mcpAddModal(url));
-			} else {
-				await answer.reply(
-					[
-						"**Add an MCP server**",
-						"",
-						"**Eryn-hosted** — link one of your own hosted servers. No sign-in: Eryn mints a token scoped to this Discord server for you.",
-						"**External server** — any other MCP server. Eryn tests it first, then uses its token or its own sign-in if it needs one.",
-					].join("\n"),
-					[
-						buttonRow([
-							actionButton("Eryn-hosted", CID.mcpAddHosted, 1),
-							actionButton("External server", CID.mcpAddExternal),
-						]),
-					],
-				);
-			}
+			await answer.modal(mcpAddModal(url));
 			return;
 		}
-		case "mcp:link":
-			return await guarded(ctx, interaction, "reply", () => mcpLinkStart(ctx, interaction, userId));
 		case "mcp:list":
 			return await guarded(ctx, interaction, "reply", async () => {
 				await answer.defer();
@@ -402,7 +372,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 				await session.interrupt(channelId, false).catch(() => undefined);
 			});
 		case "help":
-			return await answer.reply(helpText(ctx));
+			return await answer.reply(helpText());
 		default:
 			return await answer.reply("I did not recognise that command.");
 	}
@@ -672,7 +642,6 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		return;
 	}
 	const session = ctx.session(guildId);
-	const userId = userIdOf(interaction);
 	const values = interaction.data?.values ?? [];
 
 	if (customId === CID.providerSelect) {
@@ -728,14 +697,6 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		await responder(ctx, interaction).modal(modelModal());
 		return;
 	}
-	if (customId === CID.mcpAddHosted) {
-		return await guarded(ctx, interaction, "reply", () => mcpLinkStart(ctx, interaction, userId));
-	}
-	if (customId === CID.mcpAddExternal) {
-		return await guarded(ctx, interaction, "reply", async () => {
-			await responder(ctx, interaction).modal(mcpAddModal());
-		});
-	}
 	if (customId === CID.mcpTestAll) {
 		return await guarded(ctx, interaction, "update", () => testAllLinks(ctx, interaction, session));
 	}
@@ -747,25 +708,12 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		const attemptId = customId.slice("mcp:oauth:".length);
 		return await guarded(ctx, interaction, "update", () => checkMcpAuth(ctx, interaction, session, attemptId));
 	}
-	if (customId === CID.mcpLinkSelect) {
-		const serverId = values[0] ?? "";
-		return await guarded(ctx, interaction, "update", () => pickLinkPreset(ctx, interaction, userId, guildId, serverId));
-	}
-	if (customId.startsWith("mcp:link:")) {
-		const [, , serverId, preset] = customId.split(":");
-		return await guarded(ctx, interaction, "update", () =>
-			completeLink(ctx, interaction, session, userId, guildId, serverId ?? "", preset ?? "rw"),
-		);
-	}
 	if (customId === CID.mcpRemoveSelect) {
 		const linkId = values[0] ?? "";
 		return await guarded(ctx, interaction, "update", async () => {
 			const links = await session.links();
 			const link = links.find((candidate) => candidate.id === linkId);
 			await session.removeLink(linkId);
-			if (link?.kind === "eryn" && link.mcpServerId) {
-				await ctx.gateway.revoke(userId, guildId, link.mcpServerId).catch((error) => ctx.log(`revoke failed: ${describeError(error)}`));
-			}
 			await responder(ctx, interaction).update(`Removed **${link?.name ?? linkId}**.`);
 		});
 	}
@@ -865,110 +813,6 @@ async function startMethod(
 			result.instructions ? `\n\n${result.instructions}` : ""
 		}`,
 		[buttonRow(buttons)],
-	);
-}
-
-async function mcpLinkStart(ctx: CommandContext, interaction: DiscordInteraction, userId: string): Promise<void> {
-	const answer = responder(ctx, interaction);
-	if (!userId) {
-		await answer.reply("I could not tell who you are, so I cannot list your hosted MCP servers.");
-		return;
-	}
-	await answer.defer();
-	const servers = (await ctx.gateway.servers(userId)).filter((server) => server.enabled);
-	if (!servers.length) {
-		await answer.reply(
-			`You have no hosted MCP servers yet. Create one at ${publicOrigin(ctx.env)}/console, then link it here.`,
-		);
-		return;
-	}
-	await answer.reply(
-		[
-			"Which of your hosted MCP servers should this Discord server use?",
-			"Linking is internal: no sign-in, and Eryn mints a token scoped to this server for you.",
-		].join("\n"),
-		[
-			selectRow({
-				type: 3,
-				custom_id: CID.mcpLinkSelect,
-				placeholder: "Pick a hosted server",
-				options: servers.slice(0, MAX_SELECT_OPTIONS).map((server) => ({
-					label: (server.title ?? server.name).slice(0, 100),
-					value: server.id,
-					description: server.name.slice(0, 100),
-				})),
-			}),
-		],
-	);
-}
-
-async function pickLinkPreset(
-	ctx: CommandContext,
-	interaction: DiscordInteraction,
-	userId: string,
-	guildId: string,
-	serverId: string,
-): Promise<void> {
-	const answer = responder(ctx, interaction);
-	await answer.defer();
-	const servers = await ctx.gateway.servers(userId);
-	const server = servers.find((candidate) => candidate.id === serverId);
-	if (!server) {
-		await answer.update("That hosted server is no longer available.");
-		return;
-	}
-	await answer.update(
-		`How much should **${server.title ?? server.name}** be allowed to do in this server?`,
-		[
-			buttonRow([
-				actionButton("Read + write", CID.mcpLinkPick(serverId, "rw"), 1),
-				actionButton("Read only", CID.mcpLinkPick(serverId, "r"), 2),
-			]),
-		],
-	);
-}
-
-async function completeLink(
-	ctx: CommandContext,
-	interaction: DiscordInteraction,
-	session: SessionClient,
-	userId: string,
-	guildId: string,
-	serverId: string,
-	preset: string,
-): Promise<void> {
-	const answer = responder(ctx, interaction);
-	await answer.defer();
-	const servers = await ctx.gateway.servers(userId);
-	const server = servers.find((candidate) => candidate.id === serverId);
-	if (!server) {
-		await answer.update("That hosted server is no longer available.");
-		return;
-	}
-	const tools = preset === "r" ? readOnly(server.tools) : server.tools;
-	// Check before minting the grant below: a refused link would otherwise leave
-	// a token on the gateway that nothing points at or revokes.
-	const links = await session.links();
-	if (links.some((link) => link.name === server.name)) {
-		await answer.update(
-			`**${server.title ?? server.name}** is already linked to this server. Remove it with \`/eryn mcp remove\` before linking it again.`,
-		);
-		return;
-	}
-	const granted = await ctx.gateway.grant(userId, guildId, serverId, tools);
-	const link: McpLink = {
-		id: crypto.randomUUID(),
-		kind: "eryn",
-		name: server.name,
-		url: granted.url,
-		mcpServerId: serverId,
-		token: granted.token,
-		tools,
-		createdAt: Date.now(),
-	};
-	await session.addLink(link);
-	await answer.update(
-		`Linked **${server.title ?? server.name}** to this server (${preset === "r" ? "read only" : "read + write"}). Eryn will use it on the next turn.`,
 	);
 }
 
@@ -1151,15 +995,6 @@ async function mcpAdd(
 	const name = values.name?.trim() || host;
 	const token = values.token?.trim();
 
-	// Eryn's own endpoints have an internal path that needs no browser, so send
-	// the user there instead of running an OAuth flow against ourselves.
-	if (endpoint.origin === publicOrigin(ctx.env) && endpoint.pathname.startsWith("/mcp/")) {
-		await answer.reply(
-			"That URL is an Eryn-hosted server. Use the **Eryn-hosted** button in `/eryn mcp add` (or `/eryn mcp link`) to link it without a sign-in.",
-		);
-		return;
-	}
-
 	// Testing is a round trip to someone else's server, so acknowledge first and
 	// edit the ephemeral reply when there is an answer.
 	await answer.defer();
@@ -1209,7 +1044,6 @@ async function mcpAdd(
 
 	const link: McpLink = {
 		id: crypto.randomUUID(),
-		kind: "external",
 		name,
 		url,
 		tools: { groups: {} },
@@ -1321,30 +1155,18 @@ function clamp(value: string, limit: number): string {
 
 // --- Helpers -------------------------------------------------------------------
 
-/** Narrow a server's access to read only, keeping its per-tool overrides. */
-function readOnly(tools: ToolAccess): ToolAccess {
-	const groups: Record<string, "none" | "read" | "write" | "all"> = {};
-	for (const [group, level] of Object.entries(tools.groups)) {
-		groups[group] = level === "none" ? "none" : "read";
-	}
-	return { groups, ...(tools.tools ? { tools: tools.tools } : {}) };
-}
-
 function linkOptions(links: readonly McpLink[]): DiscordSelectOption[] {
 	return links.slice(0, MAX_SELECT_OPTIONS).map((link) => ({
 		label: link.name.slice(0, 100),
 		value: link.id,
-		description: link.kind === "eryn" ? "Eryn-hosted" : "External",
+		description: hostOf(link.url).slice(0, 100),
 	}));
 }
 
 function formatLinks(links: readonly McpLink[]): string {
 	if (!links.length) return "No MCP servers are linked to this server.";
 	const shown = links.slice(0, 15);
-	const lines = shown.map((link) => {
-		const source = link.kind === "eryn" ? "Eryn-hosted" : "External";
-		return `• **${link.name}** — ${source} (${hostOf(link.url)})`;
-	});
+	const lines = shown.map((link) => `• **${link.name}** — ${hostOf(link.url)}`);
 	if (links.length > shown.length) lines.push(`…and ${links.length - shown.length} more.`);
 	return ["**MCP servers linked to this server:**", ...lines].join("\n");
 }
@@ -1358,18 +1180,14 @@ function hostOf(url: string): string {
 	}
 }
 
-function helpText(ctx: CommandContext): string {
+function helpText(): string {
 	return [
 		"**Eryn setup**",
 		"• `/eryn setup provider` — connect an inference provider for this server",
 		"• `/eryn setup model` — choose which model Eryn runs",
 		"• `/eryn setup status` — what this server has configured",
-		"• `/eryn mcp add` — link one of your hosted servers, or add and test an external one",
+		"• `/eryn mcp add` — add and test an external MCP server",
 		"• `/eryn mcp test` / `list` / `remove` — manage linked MCP servers",
 		"• `/eryn stop` — stop the run in this thread",
-		`\nAccounts and Eryn-hosted MCP servers are managed at ${publicOrigin(ctx.env)}/console.`,
 	].join("\n");
 }
-
-/** `HostedServer` is re-exported so callers can name the shape. */
-export type { HostedServer };

@@ -1,53 +1,13 @@
 # eryn
 
-Two things that used to be one: an **MCP server** you host, and a **Discord bot**
-that runs an OpenCode agent. They are separate packages — `eryn-gateway` and
-`eryn-bot` — that do not import each other, deployed today as a single Worker and
-composed by `src/index.ts`.
+Eryn is a **Discord bot** that runs an OpenCode agent. Mention **@eryn** in a
+server and it opens a thread, runs the request, and streams the reply. Reply in
+the thread and it keeps going in the same session.
 
-```
-eryn/
-├─ packages/
-│  ├─ gateway/   @oscartbeaumont/eryn-gateway   the MCP server + the console's API
-│  ├─ bot/       @oscartbeaumont/eryn-bot       the Discord bot + the OpenCode agent
-│  └─ console/   @oscartbeaumont/eryn-console   the web UI (a Solid SPA)
-└─ src/index.ts  the one file that knows all three exist
-```
+There is no web console and no hosted MCP server. Everything a server needs is
+configured in Discord, and the whole deployment is one Cloudflare Worker.
 
-## The gateway
-
-`https://eryn.otbeaumont.me/mcp/<name>` is a Streamable HTTP MCP endpoint. A user
-creates any number of **hosted MCP servers** in the console; each is a named set
-of tools plus the accounts it may act through, and each has its own URL and its
-own tokens.
-
-- **Accounts.** Connect as many Discord, GitHub, and Google Calendar accounts as
-  you like at `/console/accounts`. Each shows its avatar, username, and name, and
-  links to its public profile where the provider has one. GitHub can be a personal
-  token or Eryn's OAuth app; Google Calendar is OAuth with full read and write.
-- **Tools.** Three groups — `discord`, `github`, `google_calendar` —
-  configured per hosted server as a coarse `none`/`read`/`write`/`all` per group
-  plus optional per-tool overrides. Read and write are derived from each tool's
-  own nature, so a new tool is classified without a hand-maintained list.
-- **Auth.** OAuth 2.1 with RFC 9728 protected-resource metadata, RFC 8414
-  authorization-server metadata, RFC 7591 dynamic client registration, and PKCE.
-  A token names the exact hosted server it was issued for, which is what makes one
-  origin safe: the subject routes the request, and the object serves only that
-  server.
-- **Events.** The MCP Events extension alongside core MCP: `events/list`,
-  `events/subscribe` (webhook), `events/stream` (SSE push, resumable by cursor),
-  `events/poll`, `events/unsubscribe`, and core `subscriptions/listen`. Today the
-  source is `discord.message.created`, fed by a Discord socket the gateway opens
-  lazily — only while something is subscribed.
-
-Core MCP is served by Effect's `McpServer`; the events extension is served beside
-it, because it is a draft that sits outside the negotiated core protocol.
-
-## The bot
-
-Mention **@eryn** in a Discord server and it opens a thread, runs the request
-through an embedded OpenCode server, and streams the reply. Reply in the thread
-and it keeps going in the same session.
+## Setup
 
 **Setup is a conversation, not a web page.** Add the bot and it DMs whoever added
 it (found in the audit log) to start setup. Everything is a slash command:
@@ -57,9 +17,8 @@ it (found in the audit log) to start setup. Everything is a slash command:
 | `/eryn setup provider` | Connect an inference provider for this server (key or OAuth) |
 | `/eryn setup model` | Pick the model, from this server's own catalogue |
 | `/eryn setup status` | Whether the server is ready |
-| `/eryn mcp add` | Link one of your Eryn-hosted servers (no sign-in) or add and test an external one |
-| `/eryn mcp link` | Link one of *your* hosted MCP servers to this server, with tool limits |
-| `/eryn mcp list` / `test` / `remove` | Manage and check them |
+| `/eryn mcp add` | Add and test an external MCP server |
+| `/eryn mcp list` / `test` / `remove` | Manage and check linked MCP servers |
 | `/eryn stop` | Interrupt the running turn |
 | `/eryn help` | What to do next |
 
@@ -67,40 +26,47 @@ Every server brings its own provider keys, sealed and stored in that guild's own
 Durable Object. Inference is billed to the server, not to the operator.
 
 **Nothing is connected implicitly.** The agent uses only the MCP servers an admin
-has explicitly linked, with the tokens those links carry. There is no
-auto-minted token and no impersonation: linking a hosted server is a deliberate,
-revocable act by someone with Manage Server, and it can only ever narrow what the
-hosted server already exposes.
+has explicitly linked, with the tokens those links carry. Linking is a deliberate,
+revocable act by someone with Manage Server.
 
-**Adding an external server is a conversation, not a form.** `/eryn mcp add`
-offers your own hosted servers — those link with an internally minted,
-guild-scoped token, no browser involved — or any other MCP server by URL. An
-external server is tested before it is stored: Eryn calls `initialize` and
-`tools/list`, reports the tools it found, and adds a **Test** button that repeats
-the check. If the server answers `401` with the RFC 9728 challenge, Eryn runs the
-OAuth 2.1 client flow itself — protected-resource and authorization-server
-metadata discovery, dynamic client registration (RFC 7591), PKCE, and a signed
-`state` that returns to `/api/bot/mcp/callback` — and stores the access and
-refresh tokens with the link. A server that wants a static bearer instead gets
-told to add it with a token in the same modal. Access tokens are refreshed as
-they expire, so a link keeps working until it is removed.
+**Adding an MCP server is a conversation, not a form.** `/eryn mcp add` takes any
+external MCP server's streamable HTTP URL. The server is tested before it is
+stored: Eryn calls `initialize` and `tools/list`, reports the tools it found, and
+offers a **Test** button that repeats the check. If the server answers `401` with
+the RFC 9728 challenge, Eryn runs the OAuth 2.1 client flow itself — protected-
+resource and authorization-server metadata discovery, dynamic client registration
+(RFC 7591), PKCE, and a signed `state` that returns to `/api/bot/mcp/callback` —
+and stores the access and refresh tokens with the link. A server that wants a
+static bearer instead gets told to add it with a token in the same modal. Access
+tokens are refreshed as they expire, so a link keeps working until it is removed.
 
 The MCP-events OpenCode plugin is bundled with the bot and is **server-agnostic**:
 `mcpevents_subscribe`, `mcpevents_unsubscribe`, and `mcpsubscribe_listen` take a
-configured server name or an explicit `url` + `headers`, so they work with Eryn's
-own MCP and with any external one.
+configured server name or an explicit `url` + `headers`, so they work with any
+linked MCP server.
 
 ## Layout
 
-| Durable Object | Package | Name | Holds |
-| --- | --- | --- | --- |
-| `BotGateway` | bot | `bot` | the one Discord socket, slash commands, threads, the install DM |
-| `BotSession` | bot | guild id | OpenCode host, provider keys, MCP links, the virtual filesystem |
-| `GatewayUser` | gateway | Eryn user id | accounts, hosted servers, grants, the MCP endpoints |
-| `GatewayDiscord` | gateway | `hub` | the lazy Discord socket and the event subscriptions |
+```
+eryn/
+├─ src/
+│  ├─ index.ts       the Worker entrypoint, health check, MCP sign-in callback
+│  ├─ bot/           the singleton bot object, slash commands, install flow
+│  ├─ session/       one Durable Object per guild: OpenCode host, keys, links
+│  ├─ discord/       Discord REST and gateway socket primitives
+│  ├─ mcp/           external MCP client, linking, and OAuth
+│  ├─ opencode/      the embedded host's storage, shell, and workspace
+│  └─ plugins/       the bundled MCP-events plugin
+├─ cloudflare.config.ts
+└─ vite.config.ts
+```
 
-One Worker composes both packages; the console is static assets served by the
-runtime. Nothing else is required.
+| Durable Object | Name | Holds |
+| --- | --- | --- |
+| `BotGateway` | `bot` | the one Discord socket, slash commands, threads, the install DM |
+| `BotSession` | guild id | OpenCode host, provider keys, MCP links, the virtual filesystem |
+
+One Worker composes both objects. Nothing else is required.
 
 ## Development
 
@@ -108,12 +74,9 @@ runtime. Nothing else is required.
 pnpm install
 cp .dev.vars.example .dev.vars
 pnpm dev          # cf dev
-pnpm typecheck    # cf workers types && tsc && tsc -p tsconfig.client.json
+pnpm typecheck    # cf workers types && tsc
 pnpm deploy       # cf deploy
 ```
-
-The Discord OAuth flow needs a registered redirect URI, so sign-in works against
-the deployed origin rather than a local one.
 
 ### Deploying
 
@@ -134,8 +97,8 @@ The call that discovers a restart is often the one the restart kills, so the
 wake that pokes the bot keeps poking for a few seconds even when its first call
 fails: that is what makes the replacement instance connect immediately instead
 of leaving the bot offline until the next cron tick. Socket work is counted too,
-so a restart waits for a message or interaction already being handled rather than
-cutting off the reply.
+so a restart waits for a message or interaction already being handled rather
+than cutting off the reply.
 
 That makes a deploy take effect within a second or two, with no renames:
 
@@ -146,31 +109,21 @@ curl -s https://eryn.otbeaumont.me/health
 ```
 
 `deploy` and `bot.deploy` matching means the objects are running the code you
-just shipped; if they differ, the object has not restarted yet. A first deploy
-that introduces this mechanism (or a change to an object's storage layout)
-still needs a class rename with a `renamed` tombstone, which migrates storage to
-objects that start on the new code.
+just shipped; if they differ, the object has not restarted yet.
 
 ## Configuration
 
 ```
-DISCORD_BOT_TOKEN            the bot's token; also the Discord tools and events socket
-DISCORD_CLIENT_ID            the application id
-DISCORD_CLIENT_SECRET        the console's sign-in
+DISCORD_BOT_TOKEN            the bot's token: the socket, slash commands, threads
 ENCRYPTION_KEY               base64url 32-byte key sealing every stored credential
-SESSION_SECRET               signs sessions, OAuth state, and MCP tokens
-GITHUB_OAUTH_CLIENT_ID       the OAuth App used to connect GitHub accounts
-GITHUB_OAUTH_CLIENT_SECRET
-GOOGLE_CLIENT_ID             for Google Calendar accounts
-GOOGLE_CLIENT_SECRET
+SESSION_SECRET               signs external MCP sign-in state and callback links
 PUBLIC_ORIGIN                the origin used in links and OAuth callbacks
-POSTHOG_*                    analytics; an empty POSTHOG_KEY disables it
-DISCORD_KEEPALIVE_SECONDS    the bot socket's keepalive alarm interval
-DISCORD_TURN_TIMEOUT_SECONDS how long one turn may run
+DISCORD_KEEPALIVE_SECONDS     the bot socket's keepalive alarm interval
+DISCORD_TURN_TIMEOUT_SECONDS  how long one turn may run
 ```
 
 Credentials are sealed with AES-GCM under `ENCRYPTION_KEY`; only a key's first
-characters are ever in the clear, and only so the console can identify it.
+characters are ever in the clear.
 
 ## Known limits
 
@@ -182,7 +135,3 @@ characters are ever in the clear, and only so the console can identify it.
 - The virtual filesystem lives in the guild's Durable Object storage, one key per
   file, and is shared by that server's threads.
 - Discord channels only; DMs have no threads and are ignored.
-- Events today come from Discord only; GitHub and Google Calendar events are not
-  sources yet.
-- The bot's agent no longer carries GitHub workspace tools — clone, branch, and
-  pull request live in the gateway's GitHub tools now.

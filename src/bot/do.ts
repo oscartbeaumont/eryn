@@ -29,7 +29,7 @@ import {
 import type { DiscordContext } from "../discord/context";
 import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
-import { GatewayClient, SessionClient } from "./client";
+import { SessionClient } from "./client";
 import { maybeAnnounceInstall } from "./install";
 
 const WAKE_PATH = "/wake";
@@ -314,7 +314,6 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			env: this.env,
 			log: (message) => log(message),
 			session: (guildId) => new SessionClient(this.env, guildId),
-			gateway: new GatewayClient(this.env),
 			ownsThread: (threadId) => this.ownsThread(threadId),
 			rest: this.rest,
 		};

@@ -5,9 +5,6 @@
 # dependency with optional peers, which pnpm's default isolated linker mislinks.
 nodeLinker: hoisted
 
-packages:
-  - "."
-
 allowBuilds:
   esbuild: true
   workerd: true

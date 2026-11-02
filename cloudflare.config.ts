@@ -2,13 +2,10 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 /**
- * One Worker, three packages.
+ * One Worker: the Discord bot.
  *
- * `@oscartbeaumont/eryn-gateway` (the MCP server) and
- * `@oscartbeaumont/eryn-bot` (the Discord bot) are composed by `src/index.ts`;
- * `@oscartbeaumont/eryn-console` is served as static assets. The packages never
- * import each other, and each keeps its own standalone entrypoint, so this file
- * is the only place that knows all three exist.
+ * `src/index.ts` is the entrypoint; the bot's two Durable Objects are the whole
+ * deployment. There is no console, MCP endpoint, or static asset bundle.
  */
 export default defineConfig({
 	worker: {
@@ -20,8 +17,8 @@ export default defineConfig({
 		domains: ["eryn.otbeaumont.me"],
 		observability: {
 			enabled: true,
-			// Our own routes carry OAuth codes, code challenges, and session state in
-			// the query string, so keep them out of logs and traces.
+			// OAuth codes and state live in the query string, so keep them out of
+			// logs and traces.
 			redactQueryString: true,
 			logs: { enabled: true, invocationLogs: true, persist: true },
 			traces: { enabled: true, persist: true },
@@ -30,65 +27,21 @@ export default defineConfig({
 		// A slow safety net for the bot's gateway object. Its own alarm is the real
 		// mechanism; running this every minute would pay for a request for nothing.
 		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
-		assets: {
-			notFoundHandling: "single-page-application",
-			runWorkerFirst: [
-				// The bot's and gateway's own routes.
-				"/api/*",
-				"/auth/*",
-				"/github/*",
-				"/google/*",
-				"/health",
-				// The gateway's MCP endpoint, its OAuth discovery, and registration.
-				"/mcp",
-				"/mcp/*",
-				"/.well-known/*",
-				"/oauth/*",
-				// The PostHog reverse proxy.
-				"/ingest/*",
-			],
-		},
 		env: {
-			// The gateway: one object per Eryn user, plus the singleton events hub
-			// that owns the lazily-opened Discord socket for MCP events.
-			GATEWAY_USER: bindings.durableObject({ worker: "eryn", exportName: "GatewayUserV5" }),
-			GATEWAY_DISCORD: bindings.durableObject({ worker: "eryn", exportName: "GatewayDiscordV5" }),
 			// The bot: the singleton Discord socket, and one session per guild.
 			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV5" }),
 			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV5" }),
 
-			// Discord: the bot token powers the socket and the Discord tools, and the
-			// client id/secret drive the console's sign-in.
+			// Discord: the bot token powers the socket, slash commands, and threads.
 			DISCORD_BOT_TOKEN: bindings.secret(),
-			DISCORD_CLIENT_ID: bindings.text("1561290858668494959"),
-			DISCORD_CLIENT_SECRET: bindings.secret(),
 
 			// base64url 32-byte key protecting every stored credential at rest.
 			ENCRYPTION_KEY: bindings.secret(),
-			// Signs sessions, OAuth state, and MCP tokens.
+			// Signs external MCP sign-in state and callback links.
 			SESSION_SECRET: bindings.secret(),
-
-			// GitHub accounts are connected with an OAuth App sign-in or a personal
-			// access token; both are a user access token. The client id is public; the
-			// secret is a dashboard secret binding.
-			GITHUB_OAUTH_CLIENT_ID: bindings.text("Ov23li72FJNRRw9YbyIh"),
-			GITHUB_OAUTH_CLIENT_SECRET: bindings.secret(),
-
-			// Google Calendar accounts.
-			GOOGLE_CLIENT_ID: bindings.text("306342405758-5ig9m9es6gf4m6nqotrf48bd77r4gvtf.apps.googleusercontent.com"),
-			GOOGLE_CLIENT_SECRET: bindings.secret(),
 
 			// Public origin used in links and OAuth callbacks.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
-
-			// PostHog. The token is public and ships in the console bundle; an empty
-			// token disables analytics. Requests go to this origin's /ingest path and
-			// are proxied onward, so they are first-party and ad blockers leave them
-			// alone.
-			POSTHOG_KEY: bindings.text("phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2"),
-			POSTHOG_INGEST_HOST: bindings.text("https://us.i.posthog.com"),
-			POSTHOG_ASSETS_HOST: bindings.text("https://us-assets.i.posthog.com"),
-			POSTHOG_UI_HOST: bindings.text("https://us.posthog.com"),
 
 			// How often the bot gateway's keepalive alarm fires; a long interval is
 			// both safe and cheap because a session resume loses no messages.
@@ -103,8 +56,6 @@ export default defineConfig({
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
-			GatewayUserV5: exports.durableObject({ storage: "sqlite" }),
-			GatewayDiscordV5: exports.durableObject({ storage: "sqlite" }),
 			BotGatewayV5: exports.durableObject({ storage: "sqlite" }),
 			BotSessionV5: exports.durableObject({ storage: "sqlite" }),
 			// A deploy does not restart a live Durable Object, so the classes were
@@ -112,18 +63,22 @@ export default defineConfig({
 			// new classes, which start on this deploy's code. V3 is the last rename
 			// needed: from here the Worker tells each object which deploy is current
 			// and the object restarts itself, so code changes take effect on their own.
-			GatewayUserV4: exports.durableObject({ state: "renamed", renamedTo: "GatewayUserV5" }),
-			GatewayDiscordV4: exports.durableObject({ state: "renamed", renamedTo: "GatewayDiscordV5" }),
 			BotGatewayV4: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV5" }),
 			BotSessionV4: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV5" }),
-			GatewayUserV3: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV3: exports.durableObject({ state: "deleted" }),
 			BotGatewayV3: exports.durableObject({ state: "deleted" }),
 			BotSessionV3: exports.durableObject({ state: "deleted" }),
-			GatewayUserV2: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV2: exports.durableObject({ state: "deleted" }),
 			BotGatewayV2: exports.durableObject({ state: "deleted" }),
 			BotSessionV2: exports.durableObject({ state: "deleted" }),
+			// The MCP gateway is gone. Its user and events-hub objects held hosted
+			// servers, accounts, grants, and subscriptions, all of which are abandoned.
+			GatewayUserV5: exports.durableObject({ state: "deleted" }),
+			GatewayDiscordV5: exports.durableObject({ state: "deleted" }),
+			GatewayUserV4: exports.durableObject({ state: "deleted" }),
+			GatewayDiscordV4: exports.durableObject({ state: "deleted" }),
+			GatewayUserV3: exports.durableObject({ state: "deleted" }),
+			GatewayDiscordV3: exports.durableObject({ state: "deleted" }),
+			GatewayUserV2: exports.durableObject({ state: "deleted" }),
+			GatewayDiscordV2: exports.durableObject({ state: "deleted" }),
 			// The redesign was a clean break: these four namespaces held the old
 			// single-Worker layout, and their storage is intentionally abandoned.
 			ErynGateway: exports.durableObject({ state: "deleted" }),
