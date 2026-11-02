@@ -338,6 +338,9 @@ function ServerCard(props: {
 	const [clientSecret, setClientSecret] = createSignal("");
 	const [addingUpstream, setAddingUpstream] = createSignal(false);
 
+	/** The URI a provider has to accept before an OAuth sign-in can come back. */
+	const redirectUri = () => `${window.location.origin}/api/mcp/upstream/callback`;
+
 	/** One upstream connection as a tool group, with the names this server exposes. */
 	function upstreamGroup(connection: UpstreamConnection): ToolGroup {
 		return {
@@ -738,8 +741,10 @@ function ServerCard(props: {
 											</div>
 										</Show>
 										<Show when={connection.auth === "oauth" && !connection.authenticated}>
-											<p class="mt-1 text-xs text-muted">
-												{connection.pending ? "Waiting for the sign-in to finish." : "Not signed in yet."}
+											<p class="mt-1 max-w-[62ch] text-xs text-muted">
+												{connection.pending
+													? "Waiting for the sign-in to finish."
+													: "The sign-in did not finish. Some providers only accept redirect URIs they have registered — register the one below with them, or switch this connection to custom headers."}
 											</p>
 										</Show>
 										<div class="mt-2 flex flex-wrap gap-2">
@@ -857,10 +862,18 @@ function ServerCard(props: {
 									onInput={(event) => setClientSecret(event.currentTarget.value)}
 								/>
 							</div>
-							<p class="text-xs text-muted">
+							<p class="max-w-[62ch] text-xs text-muted">
 								Leave both blank and Eryn registers itself, or presents a client metadata document when the
-								server accepts one instead of registering.
+								server accepts one instead of registering. A provider that only accepts registered redirect
+								URIs needs this one registered with it first.
 							</p>
+							<div class="flex flex-wrap items-center gap-2">
+								<span class="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">Redirect URI</span>
+								<code class="min-w-0 flex-1 truncate border border-line-strong bg-bg px-2 py-1.5 font-mono text-[11px] text-muted">
+									{redirectUri()}
+								</code>
+								<CopyButton value={redirectUri()} />
+							</div>
 						</Show>
 						<Show when={connectionAuth() === "headers"}>
 							<div class="flex flex-col gap-2">

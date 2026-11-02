@@ -259,6 +259,9 @@ function handleServersGet(request: HttpServerRequest.HttpServerRequest) {
 	});
 }
 
+/** How long a started upstream sign-in is worth waiting for. */
+const SIGNIN_TTL_MS = 15 * 60_000;
+
 function summariseConnections(server: McpServer): ConnectionSummary[] {
 	return (server.connections ?? []).map((connection) => ({
 		id: connection.id,
@@ -269,7 +272,11 @@ function summariseConnections(server: McpServer): ConnectionSummary[] {
 		auth: connection.auth.kind,
 		headerNames: Object.keys(connection.auth.headers ?? {}),
 		authenticated: connected(connection.auth),
-		pending: Boolean(connection.auth.oauth?.verifier),
+		// A sign-in that never came back is not still waiting: the browser tab
+		// has been abandoned, so offer a fresh one instead of a dead state.
+		pending:
+			connection.auth.oauth?.verifier !== undefined &&
+			(connection.auth.oauth.startedAt ?? 0) > Date.now() - SIGNIN_TTL_MS,
 		tools: connection.tools.map((tool) => ({
 			name: tool.name,
 			exposedName: exposedToolName(connection.name, tool.name),
