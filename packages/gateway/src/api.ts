@@ -18,6 +18,7 @@ import {
 	STATE_TTL_MS,
 	TOOL_GROUPS,
 	TOOL_GROUP_NAMES,
+	TOOL_GROUP_PROVIDERS,
 	UPSTREAM_CALLBACK_PATH,
 } from "./config";
 import { CLIENT_ID } from "./discord-ids";
@@ -650,6 +651,17 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			await callUser(session.uid, "/store/server", { method: "PUT", body: JSON.stringify(updated) });
 			return json({ ok: true, servers: await summaries(session.uid, origin) });
 		}
+		if (form.action === "access") {
+			// Accounts and their tools are one decision, so they are written
+			// together rather than in two round trips that can half-apply.
+			const updated: McpServer = {
+				...target,
+				accountIds: form.accountIds ?? target.accountIds,
+				tools: form.tools ?? target.tools,
+			};
+			await callUser(session.uid, "/store/server", { method: "PUT", body: JSON.stringify(updated) });
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
+		}
 		if (form.action === "tools") {
 			const updated: McpServer = { ...target, tools: form.tools ?? EMPTY_ACCESS };
 			await callUser(session.uid, "/store/server", { method: "PUT", body: JSON.stringify(updated) });
@@ -659,6 +671,15 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			const result = await callUser<{ tools: unknown[] }>(session.uid, "/tools", { method: "POST", body: JSON.stringify({ slug: target.name }) });
 			return json({ ok: true, tools: result.tools });
 		}
+
+		// Every connection action writes the whole server record, so the access
+		// the console has staged travels with it instead of being silently
+		// reverted to what was last saved.
+		const withAccess = (server: McpServer): McpServer => ({
+			...server,
+			...(form.accountIds ? { accountIds: form.accountIds } : {}),
+			...(form.tools ? { tools: form.tools } : {}),
+		});
 
 		if (form.action === "connection-add") {
 			const url = form.url?.trim() ?? "";
@@ -693,7 +714,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 					clientSecret: form.clientSecret?.trim() || undefined,
 				});
 				connection = started.connection;
-				await saveServer(session.uid, { ...target, connections: [...(target.connections ?? []), connection] });
+				await saveServer(session.uid, { ...withAccess(target), connections: [...(target.connections ?? []), connection] });
 				return withCookie(
 					json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
 					UPSTREAM_COOKIE,
@@ -707,7 +728,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			const clash = toolClash(name, probe.tools);
 			if (clash) return json({ error: clash }, 400);
 			connection = { ...connection, tools: probe.tools };
-			await saveServer(session.uid, { ...target, connections: [...(target.connections ?? []), connection] });
+			await saveServer(session.uid, { ...withAccess(target), connections: [...(target.connections ?? []), connection] });
 			return json({ ok: true, servers: await summaries(session.uid, origin) });
 		}
 
@@ -716,7 +737,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			if (!connection) return json({ error: "That connection does not exist." }, 404);
 			if (!env.SESSION_SECRET?.trim()) return json({ error: "The deployment has no session secret." }, 500);
 			const started = await startUpstreamSignin(session.uid, target, connection, origin);
-			await saveServer(session.uid, replaceConnection(target, started.connection));
+			await saveServer(session.uid, replaceConnection(withAccess(target), started.connection));
 			return withCookie(
 				json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
 				UPSTREAM_COOKIE,
@@ -733,7 +754,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			if (!probe.ok) return json({ error: probe.error ?? "That server did not answer as MCP." }, 400);
 			const clash = toolClash(connection.name, probe.tools);
 			if (clash) return json({ error: clash }, 400);
-			await saveServer(session.uid, replaceConnection(target, { ...connection, tools: probe.tools, updatedAt: Date.now() }));
+			await saveServer(session.uid, replaceConnection(withAccess(target), { ...connection, tools: probe.tools, updatedAt: Date.now() }));
 			return json({ ok: true, servers: await summaries(session.uid, origin) });
 		}
 
@@ -745,17 +766,18 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 				...(form.title !== undefined ? { title: form.title.trim() || undefined } : {}),
 				...(form.enabled !== undefined ? { enabled: form.enabled } : {}),
 			};
-			await saveServer(session.uid, replaceConnection(target, updated));
+			await saveServer(session.uid, replaceConnection(withAccess(target), updated));
 			return json({ ok: true, servers: await summaries(session.uid, origin) });
 		}
 
 		if (form.action === "connection-remove") {
 			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
 			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			const staged = withAccess(target);
 			const exposed = new Set(connection.tools.map((tool) => exposedToolName(connection.name, tool.name)));
-			const groups = { ...target.tools.groups };
+			const groups = { ...staged.tools.groups };
 			delete groups[connection.name];
-			const overrides = { ...(target.tools.tools ?? {}) };
+			const overrides = { ...(staged.tools.tools ?? {}) };
 			const tools = {
 				...(overrides.include ? { include: overrides.include.filter((name) => !exposed.has(name)) } : {}),
 				...(overrides.exclude ? { exclude: overrides.exclude.filter((name) => !exposed.has(name)) } : {}),
@@ -766,7 +788,7 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 					: {}),
 			};
 			await saveServer(session.uid, {
-				...target,
+				...staged,
 				connections: (target.connections ?? []).filter((entry) => entry.id !== connection.id),
 				tools: { groups, ...(Object.keys(tools).length ? { tools } : {}) },
 			});
@@ -949,7 +971,7 @@ export function gatewayRoutes() {
 					: json({ signedIn: false });
 			}),
 		),
-		HttpRouter.add("GET", "/api/tools", () => Effect.sync(() => json({ groups: TOOL_GROUPS.map((id) => ({ id, name: TOOL_GROUP_NAMES[id], tools: catalogForConsole().filter((tool) => tool.group === id) })) }))),
+		HttpRouter.add("GET", "/api/tools", () => Effect.sync(() => json({ groups: TOOL_GROUPS.map((id) => ({ id, name: TOOL_GROUP_NAMES[id], provider: TOOL_GROUP_PROVIDERS[id], tools: catalogForConsole().filter((tool) => tool.group === id) })) }))),
 		HttpRouter.add("GET", "/api/accounts", (request) => handleAccountsGet(request)),
 		HttpRouter.add("POST", "/api/accounts", (request) =>
 			Effect.gen(function* () {

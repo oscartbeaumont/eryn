@@ -42,3 +42,10 @@ export const TOOL_GROUP_NAMES: Record<ToolGroup, string> = {
 	github: "GitHub",
 	google_calendar: "Google Calendar",
 };
+
+/** The account provider each built-in group acts through. */
+export const TOOL_GROUP_PROVIDERS: Record<ToolGroup, "discord" | "github" | "google"> = {
+	discord: "discord",
+	github: "github",
+	google_calendar: "google",
+};

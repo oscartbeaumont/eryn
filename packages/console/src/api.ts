@@ -63,6 +63,8 @@ export interface ToolEntry {
 export interface ToolGroup {
 	id: string;
 	name: string;
+	/** The account provider whose tools these are; absent for an upstream group. */
+	provider?: ProviderId;
 	tools: ToolEntry[];
 }
 
@@ -231,15 +233,22 @@ export interface ServersResult extends ActionResult {
 	tools?: ToolEntry[];
 }
 
+/** The staged access a connection action carries so it is not reverted. */
+export interface StagedAccess {
+	accountIds?: string[];
+	tools?: ToolAccess;
+}
+
 export type ServersAction =
 	| { action: "create"; name: string; title?: string }
 	| { action: "update"; id: string; name?: string; title?: string; enabled?: boolean }
 	| { action: "delete"; id: string }
 	| { action: "accounts"; id: string; accountIds: string[] }
+	| { action: "access"; id: string; accountIds: string[]; tools: ToolAccess }
 	| { action: "tools"; id: string; tools: ToolAccess }
 	| { action: "tools-list"; id: string }
 	| { action: "revoke-grant"; id: string; guildId: string }
-	| {
+	| ({
 			action: "connection-add";
 			id: string;
 			url: string;
@@ -247,11 +256,13 @@ export type ServersAction =
 			title?: string;
 			auth: "none" | "headers" | "oauth";
 			headers?: Record<string, string>;
-	  }
-	| { action: "connection-refresh"; id: string; connectionId: string }
-	| { action: "connection-signin"; id: string; connectionId: string }
-	| { action: "connection-update"; id: string; connectionId: string; title?: string; enabled?: boolean }
-	| { action: "connection-remove"; id: string; connectionId: string };
+			clientId?: string;
+			clientSecret?: string;
+	  } & StagedAccess)
+	| ({ action: "connection-refresh"; id: string; connectionId: string } & StagedAccess)
+	| ({ action: "connection-signin"; id: string; connectionId: string } & StagedAccess)
+	| ({ action: "connection-update"; id: string; connectionId: string; title?: string; enabled?: boolean } & StagedAccess)
+	| ({ action: "connection-remove"; id: string; connectionId: string } & StagedAccess);
 
 export function fetchServers(): Promise<ServersData> {
 	return request<ServersData>("/api/servers");
