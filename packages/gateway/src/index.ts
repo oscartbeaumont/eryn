@@ -12,7 +12,7 @@
 
 import { env } from "cloudflare:workers";
 import { DEFAULT_ORIGIN, MCP_PATH } from "./config";
-import { protectionMetadata, gatewayRoutes } from "./api";
+import { protectionMetadata, gatewayRoutes, clientMetadataDocument } from "./api";
 import { AS_METADATA_PATH, bearerToken, challenge, verifyAccessToken } from "./mcp/oauth";
 import { DEPLOY_HEADER, currentDeploy } from "./deploy";
 
@@ -112,6 +112,9 @@ export async function handle(request: Request): Promise<Response | undefined> {
 
 	const metadata = protectionMetadata(path, originOf(request));
 	if (metadata) return metadata;
+	// The client metadata document some authorization servers fetch instead of
+	// registering a client for a public redirect URI.
+	if (path.startsWith("/api/mcp/client-metadata/")) return clientMetadataDocument(originOf(request), request.url);
 
 	if (!owns(path)) return undefined;
 

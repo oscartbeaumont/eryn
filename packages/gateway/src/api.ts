@@ -18,6 +18,7 @@ import {
 	STATE_TTL_MS,
 	TOOL_GROUPS,
 	TOOL_GROUP_NAMES,
+	UPSTREAM_CALLBACK_PATH,
 } from "./config";
 import { CLIENT_ID } from "./discord-ids";
 import { withDeploy } from "./deploy";
@@ -32,10 +33,23 @@ import {
 	providerName,
 } from "./account-oauth";
 import { authorizeUrl, canManage, currentUser, exchangeCode, listUserGuilds, type DiscordGuild } from "./discord-oauth";
-import { EMPTY_ACCESS, ToolAccess, newId, slugify, type Account, type AccountSummary, type McpServer, type ServerSummary } from "./model";
+import { EMPTY_ACCESS, ToolAccess, newId, slugify, type Account, type AccountSummary, type ConnectionSummary, type McpServer, type ServerSummary, type UpstreamConnection } from "./model";
 import { AS_METADATA_PATH, PRM_PATHS, REGISTER_PATH, TOKEN_PATH, authorizationServerMetadata, protectedResourceMetadata } from "./mcp/oauth";
-import { catalogForConsole } from "./tools/catalog";
-import { cookieOptions, readSession, readState, sessionTtlMs, signSession, signState, SESSION_COOKIE, STATE_COOKIE, type Session } from "./session";
+import { BUILTIN_GROUPS, catalogForConsole, exposedToolName } from "./tools/catalog";
+import {
+	discoverUpstream,
+	exchangeUpstreamCode,
+	connected,
+	pkce,
+	probeUpstream,
+	refreshUpstreamToken,
+	registerUpstreamClient,
+	requestedScope,
+	staticHeaders,
+	upstreamAuthorizationUrl,
+	validateHeaders,
+} from "./mcp/upstream";
+import { cookieOptions, readSession, readState, sessionTtlMs, signSession, signState, SESSION_COOKIE, STATE_COOKIE, UPSTREAM_COOKIE, type Session } from "./session";
 import { registerClient, exchangeAuthorizationCode, exchangeRefreshToken, inspectAuthorization, approveAuthorization, denyAuthorization, readAuthorizeParams, OAuthError } from "./mcp/oauth";
 
 function json(body: unknown, status = 200): HttpServerResponse.HttpServerResponse {
@@ -118,6 +132,12 @@ const ServersRequest = Schema.Struct({
 	accountIds: Schema.optional(Schema.Array(Schema.String)),
 	tools: Schema.optional(ToolAccess),
 	guildId: Schema.optional(Schema.String),
+	connectionId: Schema.optional(Schema.String),
+	url: Schema.optional(Schema.String),
+	auth: Schema.optional(Schema.Literals(["none", "headers", "oauth"])),
+	headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+	clientId: Schema.optional(Schema.String),
+	clientSecret: Schema.optional(Schema.String),
 });
 
 function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
@@ -238,6 +258,27 @@ function handleServersGet(request: HttpServerRequest.HttpServerRequest) {
 	});
 }
 
+function summariseConnections(server: McpServer): ConnectionSummary[] {
+	return (server.connections ?? []).map((connection) => ({
+		id: connection.id,
+		name: connection.name,
+		...(connection.title ? { title: connection.title } : {}),
+		url: connection.url,
+		enabled: connection.enabled,
+		auth: connection.auth.kind,
+		headerNames: Object.keys(connection.auth.headers ?? {}),
+		authenticated: connected(connection.auth),
+		pending: Boolean(connection.auth.oauth?.verifier),
+		tools: connection.tools.map((tool) => ({
+			name: tool.name,
+			exposedName: exposedToolName(connection.name, tool.name),
+			...(tool.title ? { title: tool.title } : {}),
+			...(tool.description ? { description: tool.description } : {}),
+			access: tool.access,
+		})),
+	}));
+}
+
 async function summaries(uid: string, origin: string): Promise<ServerSummary[]> {
 	const [{ servers }, { accounts }, { grants }] = await Promise.all([
 		callUser<{ servers: McpServer[] }>(uid, "/store/servers"),
@@ -259,9 +300,309 @@ async function summaries(uid: string, origin: string): Promise<ServerSummary[]> 
 				...(account.profile.avatarUrl ? { avatarUrl: account.profile.avatarUrl } : {}),
 			})),
 		tools: server.tools,
+		connections: summariseConnections(server),
 		endpoint: `${origin}${MCP_PATH}/${server.name}`,
 		grants: grants.filter((grant) => grant.mcpServerId === server.id).map((grant) => ({ guildId: grant.guildId })),
 	}));
+}
+
+/** Write a whole server record back through its object. */
+function saveServer(uid: string, server: McpServer): Promise<unknown> {
+	return callUser(uid, "/store/server", { method: "PUT", body: JSON.stringify(server) });
+}
+
+function replaceConnection(server: McpServer, connection: UpstreamConnection): McpServer {
+	return {
+		...server,
+		connections: (server.connections ?? []).map((entry) => (entry.id === connection.id ? connection : entry)),
+	};
+}
+
+/** A slug for a connection, unique within its server and safe as a tool prefix. */
+function connectionName(server: McpServer, requested: string | undefined, url: string): string | undefined {
+	let base = slugify(requested?.trim() ?? "");
+	if (!base) {
+		try {
+			const host = new URL(url).hostname.replace(/^www\./, "");
+			const labels = host.split(".");
+			const first = labels[0] ?? "";
+			base = slugify(["api", "mcp", "www"].includes(first) ? (labels[1] ?? first) : first) || slugify(host);
+		} catch {
+			base = "";
+		}
+	}
+	if (!base) return undefined;
+	const taken = new Set((server.connections ?? []).map((connection) => connection.name));
+	if (!taken.has(base)) return base;
+	for (let index = 2; index < 100; index += 1) {
+		const candidate = `${base}-${index}`;
+		if (!taken.has(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/** Explain a tool name that would shadow a built-in one, or nothing. */
+function toolClash(name: string, tools: readonly { name: string }[]): string | undefined {
+	const builtin = new Set(catalogForConsole().map((tool) => tool.name));
+	const clashes = tools.map((tool) => exposedToolName(name, tool.name)).filter((exposed) => builtin.has(exposed));
+	if (!clashes.length) return undefined;
+	return `These tool names would shadow Eryn's own: ${clashes.slice(0, 5).join(", ")}. Pick another name for the connection.`;
+}
+
+/** Headers for a connection, refreshing an OAuth token that is about to lapse. */
+async function connectionHeaders(
+	uid: string,
+	server: McpServer,
+	connection: UpstreamConnection,
+): Promise<Record<string, string>> {
+	const oauth = connection.auth.oauth;
+	if (connection.auth.kind !== "oauth" || !oauth) {
+		if (!connected(connection.auth)) throw new Error("This connection has no credentials yet.");
+		return staticHeaders(connection.auth);
+	}
+	if (!oauth.accessToken) throw new Error("This connection needs a sign-in.");
+	if (
+		oauth.expiresAt &&
+		oauth.expiresAt - 60_000 <= Date.now() &&
+		oauth.refreshToken &&
+		oauth.tokenEndpoint &&
+		oauth.clientId
+	) {
+		const next = await refreshUpstreamToken({
+			tokenEndpoint: oauth.tokenEndpoint,
+			clientId: oauth.clientId,
+			...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
+			refreshToken: oauth.refreshToken,
+			...(oauth.resource ? { resource: oauth.resource } : {}),
+		});
+		const updated: UpstreamConnection = {
+			...connection,
+			auth: {
+				...connection.auth,
+				oauth: {
+					...oauth,
+					accessToken: next.accessToken,
+					...(next.refreshToken ? { refreshToken: next.refreshToken } : {}),
+					expiresAt: Date.now() + (next.expiresIn ?? 3_600) * 1_000,
+					...(next.scope ? { scope: next.scope } : {}),
+				},
+			},
+		};
+		await saveServer(uid, replaceConnection(server, updated));
+		return { authorization: `Bearer ${next.accessToken}` };
+	}
+	return { authorization: `Bearer ${oauth.accessToken}` };
+}
+
+/**
+ * Start a sign-in with an upstream server.
+ *
+ * The client registration, the PKCE verifier, and the endpoints all travel on
+ * the connection record; the browser only carries a signed pointer to it.
+ */
+async function startUpstreamSignin(
+	uid: string,
+	server: McpServer,
+	connection: UpstreamConnection,
+	origin: string,
+	client?: { clientId?: string; clientSecret?: string },
+): Promise<{ url: string; state: string; connection: UpstreamConnection }> {
+	const secrets = env.SESSION_SECRET?.trim();
+	if (!secrets) throw new Error("The deployment has no session secret.");
+	const probe = await probeUpstream({ url: connection.url });
+	if (probe.ok) throw new Error("This server did not ask for a sign-in.");
+	if (!probe.needsAuth) throw new Error("This server does not accept a Bearer sign-in. Use headers instead.");
+	const discovery = await discoverUpstream(connection.url, probe.resourceMetadataUrl);
+	const redirectUri = `${origin}${UPSTREAM_CALLBACK_PATH}`;
+	const scope = requestedScope(discovery, probe.scope ?? connection.auth.oauth?.scope);
+	const existing = connection.auth.oauth;
+
+	// The client to present: what the user typed, what this connection already
+	// registered, a metadata document the server can read, or a fresh
+	// registration. Fastmail, for one, publishes no registration for public
+	// redirect URIs but does read a metadata document.
+	const typed = client?.clientId ? { clientId: client.clientId, ...(client.clientSecret ? { clientSecret: client.clientSecret } : {}) } : undefined;
+	const stored = existing?.clientId ? { clientId: existing.clientId, ...(existing.clientSecret ? { clientSecret: existing.clientSecret } : {}) } : undefined;
+	const staleMetadata = stored ? isMetadataClientId(stored.clientId, origin) && stored.clientId !== metadataClientId(origin, connection.id) : false;
+	const resolved =
+		typed ??
+		(stored && !staleMetadata ? stored : undefined) ??
+		(discovery.metadataDocument
+			? { clientId: metadataClientId(origin, connection.id) }
+			: discovery.registrationEndpoint
+				? await registerUpstreamClient({
+						registrationEndpoint: discovery.registrationEndpoint,
+						redirectUri,
+						...(scope ? { scope } : {}),
+					})
+				: undefined);
+	if (!resolved) {
+		throw new Error("This server wants a sign-in but offers no way for Eryn to register. Use headers instead.");
+	}
+
+	const { verifier, challenge } = await pkce();
+	const state = await signState({ uid, serverId: server.id, connectionId: connection.id }, secrets);
+	const url = upstreamAuthorizationUrl(discovery, {
+		clientId: resolved.clientId,
+		redirectUri,
+		state,
+		challenge,
+		...(scope ? { scope } : {}),
+	});
+	return {
+		url,
+		state,
+		connection: {
+			...connection,
+			auth: {
+				kind: "oauth",
+				oauth: {
+					clientId: resolved.clientId,
+					...(resolved.clientSecret ? { clientSecret: resolved.clientSecret } : {}),
+					authorizationEndpoint: discovery.authorizationEndpoint,
+					tokenEndpoint: discovery.tokenEndpoint,
+					...(discovery.registrationEndpoint ? { registrationEndpoint: discovery.registrationEndpoint } : {}),
+					resource: discovery.resource,
+					...(scope ? { scope } : {}),
+					verifier,
+					startedAt: Date.now(),
+				},
+			},
+		},
+	};
+}
+
+/** Whether a client id is one of this deployment's metadata documents. */
+function isMetadataClientId(clientId: string, origin: string): boolean {
+	return clientId.startsWith(`${origin}/api/mcp/client-metadata/`);
+}
+
+/** Set a short-lived signed cookie on a JSON response. */
+function withCookie(
+	response: HttpServerResponse.HttpServerResponse,
+	name: string,
+	value: string,
+	origin: string,
+): HttpServerResponse.HttpServerResponse {
+	return HttpServerResponse.setCookieUnsafe(response, name, value, {
+		...cookieOptions(origin),
+		expires: new Date(Date.now() + STATE_TTL_MS),
+	});
+}
+
+/**
+ * The client metadata document an authorization server fetches.
+ *
+ * Some servers, Fastmail's among them, will not register an arbitrary public
+ * redirect URI, but will accept a client whose `client_id` is an https URL that
+ * describes itself. The document is the same for every connection, and its
+ * `client_id` is the URL it was fetched from, which is what the server checks.
+ */
+export function clientMetadataDocument(origin: string, requestUrl: string): Response {
+	const clientId = `${origin}${new URL(requestUrl).pathname}`;
+	return Response.json(
+		{
+			client_id: clientId,
+			client_name: "Eryn",
+			client_uri: origin,
+			redirect_uris: [`${origin}${UPSTREAM_CALLBACK_PATH}`],
+			grant_types: ["authorization_code", "refresh_token"],
+			response_types: ["code"],
+			token_endpoint_auth_method: "none",
+		},
+		{ headers: { "cache-control": "public, max-age=300" } },
+	);
+}
+
+/** The client id this deployment presents to a server that reads metadata documents. */
+export function metadataClientId(origin: string, connectionId: string): string {
+	return `${origin}/api/mcp/client-metadata/${encodeURIComponent(connectionId)}`;
+}
+
+/** Finish an upstream sign-in with the code its authorization server returned. */
+function handleUpstreamCallback() {
+	return (request: HttpServerRequest.HttpServerRequest) =>
+		safe(async () => {
+			const origin = originOf(request);
+			const url = new URL(request.originalUrl);
+			const secrets = env.SESSION_SECRET?.trim();
+			const state = url.searchParams.get("state") ?? "";
+			const cookie = cookies(request)[UPSTREAM_COOKIE];
+			const verified =
+				secrets && cookie && cookie === state
+					? await readState<{ uid: string; serverId: string; connectionId: string; exp: number }>(state, secrets)
+					: undefined;
+			const done = (params: { ok?: string; error?: string }) =>
+				HttpServerResponse.expireCookieUnsafe(UPSTREAM_COOKIE, cookieOptions(origin))(
+					redirect(
+						`/console?${new URLSearchParams({ ...(params.ok ? { ok: params.ok } : {}), ...(params.error ? { error: params.error } : {}) })}`,
+					),
+				);
+			if (!verified) return done({ error: "That sign-in could not be verified. Start it again." });
+
+			const { servers } = await callUser<{ servers: McpServer[] }>(verified.uid, "/store/servers");
+			const server = servers.find((entry) => entry.id === verified.serverId);
+			const connection = (server?.connections ?? []).find((entry) => entry.id === verified.connectionId);
+			if (!server || !connection) return done({ error: "That connection is no longer there." });
+			const oauth = connection.auth.oauth;
+			if (!oauth?.verifier || !oauth.tokenEndpoint || !oauth.clientId) {
+				return done({ error: "That sign-in had expired. Start it again." });
+			}
+
+			const failure = url.searchParams.get("error_description") ?? url.searchParams.get("error");
+			const code = url.searchParams.get("code");
+			if (failure || !code) {
+				await saveServer(verified.uid, replaceConnection(server, clearPending(connection)));
+				return done({ error: failure ?? "The sign-in did not return a code." });
+			}
+
+			try {
+				const tokens = await exchangeUpstreamCode({
+					tokenEndpoint: oauth.tokenEndpoint,
+					clientId: oauth.clientId,
+					...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
+					redirectUri: `${origin}${UPSTREAM_CALLBACK_PATH}`,
+					code,
+					verifier: oauth.verifier,
+					...(oauth.resource ? { resource: oauth.resource } : {}),
+				});
+				const headers = { authorization: `Bearer ${tokens.accessToken}` };
+				const probe = await probeUpstream({ url: connection.url, headers });
+				if (!probe.ok) {
+					await saveServer(verified.uid, replaceConnection(server, clearPending(connection)));
+					return done({ error: probe.error ?? "The server still refused the sign-in." });
+				}
+				const cleared = clearPending(connection);
+				const updated: UpstreamConnection = {
+					...cleared,
+					tools: probe.tools,
+					updatedAt: Date.now(),
+					auth: {
+						kind: "oauth",
+						oauth: {
+							...(cleared.auth.oauth ?? oauth),
+							accessToken: tokens.accessToken,
+							...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+							expiresAt: Date.now() + (tokens.expiresIn ?? 3_600) * 1_000,
+							...(tokens.scope ? { scope: tokens.scope } : {}),
+						},
+					},
+				};
+				await saveServer(verified.uid, replaceConnection(server, updated));
+				return done({ ok: `${connection.title ?? connection.name} is connected.` });
+			} catch (error) {
+				await saveServer(verified.uid, replaceConnection(server, clearPending(connection)));
+				return done({ error: describe(error) });
+			}
+		});
+}
+
+/** Drop a half-finished sign-in, keeping whatever the connection already had. */
+function clearPending(connection: UpstreamConnection): UpstreamConnection {
+	const oauth = connection.auth.oauth;
+	if (!oauth) return connection;
+	const { verifier: _verifier, startedAt: _startedAt, ...rest } = oauth;
+	return { ...connection, auth: { ...connection.auth, oauth: rest } };
 }
 
 function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: Schema.Schema.Type<typeof ServersRequest>) {
@@ -318,6 +659,120 @@ function handleServersPost(request: HttpServerRequest.HttpServerRequest, form: S
 			const result = await callUser<{ tools: unknown[] }>(session.uid, "/tools", { method: "POST", body: JSON.stringify({ slug: target.name }) });
 			return json({ ok: true, tools: result.tools });
 		}
+
+		if (form.action === "connection-add") {
+			const url = form.url?.trim() ?? "";
+			const kind = form.auth ?? "none";
+			const headerError = validateHeaders(form.headers);
+			if (headerError) return json({ error: headerError }, 400);
+			if (!url) return json({ error: "An MCP server URL is required." }, 400);
+			const name = connectionName(target, form.name, url);
+			if (!name) return json({ error: "That name is taken. Pick another one." }, 400);
+			if ((BUILTIN_GROUPS as readonly string[]).includes(name)) {
+				return json({ error: `"${name}" is a built-in group. Pick another name.` }, 400);
+			}
+			const secrets = env.SESSION_SECRET?.trim();
+			if (!secrets) return json({ error: "The deployment has no session secret." }, 500);
+
+			let connection: UpstreamConnection = {
+				id: newId("up"),
+				name,
+				...(form.title?.trim() ? { title: form.title.trim() } : {}),
+				url,
+				enabled: true,
+				auth: { kind, ...(kind === "headers" ? { headers: form.headers ?? {} } : {}) },
+				tools: [],
+				createdAt: Date.now(),
+			};
+
+			if (kind === "oauth") {
+				// The connection is stored first so the callback has a record to
+				// come back to; it stays unusable until the sign-in completes.
+				const started = await startUpstreamSignin(session.uid, target, connection, origin, {
+					clientId: form.clientId?.trim() || undefined,
+					clientSecret: form.clientSecret?.trim() || undefined,
+				});
+				connection = started.connection;
+				await saveServer(session.uid, { ...target, connections: [...(target.connections ?? []), connection] });
+				return withCookie(
+					json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
+					UPSTREAM_COOKIE,
+					started.state,
+					origin,
+				);
+			}
+
+			const probe = await probeUpstream({ url, headers: kind === "headers" ? form.headers ?? {} : {} });
+			if (!probe.ok) return json({ error: probe.error ?? "That server did not answer as MCP." }, 400);
+			const clash = toolClash(name, probe.tools);
+			if (clash) return json({ error: clash }, 400);
+			connection = { ...connection, tools: probe.tools };
+			await saveServer(session.uid, { ...target, connections: [...(target.connections ?? []), connection] });
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
+		}
+
+		if (form.action === "connection-signin") {
+			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
+			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			if (!env.SESSION_SECRET?.trim()) return json({ error: "The deployment has no session secret." }, 500);
+			const started = await startUpstreamSignin(session.uid, target, connection, origin);
+			await saveServer(session.uid, replaceConnection(target, started.connection));
+			return withCookie(
+				json({ ok: true, url: started.url, servers: await summaries(session.uid, origin) }),
+				UPSTREAM_COOKIE,
+				started.state,
+				origin,
+			);
+		}
+
+		if (form.action === "connection-refresh") {
+			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
+			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			const headers = await connectionHeaders(session.uid, target, connection);
+			const probe = await probeUpstream({ url: connection.url, headers });
+			if (!probe.ok) return json({ error: probe.error ?? "That server did not answer as MCP." }, 400);
+			const clash = toolClash(connection.name, probe.tools);
+			if (clash) return json({ error: clash }, 400);
+			await saveServer(session.uid, replaceConnection(target, { ...connection, tools: probe.tools, updatedAt: Date.now() }));
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
+		}
+
+		if (form.action === "connection-update") {
+			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
+			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			const updated: UpstreamConnection = {
+				...connection,
+				...(form.title !== undefined ? { title: form.title.trim() || undefined } : {}),
+				...(form.enabled !== undefined ? { enabled: form.enabled } : {}),
+			};
+			await saveServer(session.uid, replaceConnection(target, updated));
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
+		}
+
+		if (form.action === "connection-remove") {
+			const connection = (target.connections ?? []).find((entry) => entry.id === form.connectionId);
+			if (!connection) return json({ error: "That connection does not exist." }, 404);
+			const exposed = new Set(connection.tools.map((tool) => exposedToolName(connection.name, tool.name)));
+			const groups = { ...target.tools.groups };
+			delete groups[connection.name];
+			const overrides = { ...(target.tools.tools ?? {}) };
+			const tools = {
+				...(overrides.include ? { include: overrides.include.filter((name) => !exposed.has(name)) } : {}),
+				...(overrides.exclude ? { exclude: overrides.exclude.filter((name) => !exposed.has(name)) } : {}),
+				...(overrides.access
+					? {
+							access: Object.fromEntries(Object.entries(overrides.access).filter(([name]) => !exposed.has(name))),
+						}
+					: {}),
+			};
+			await saveServer(session.uid, {
+				...target,
+				connections: (target.connections ?? []).filter((entry) => entry.id !== connection.id),
+				tools: { groups, ...(Object.keys(tools).length ? { tools } : {}) },
+			});
+			return json({ ok: true, servers: await summaries(session.uid, origin) });
+		}
+
 		if (form.action === "revoke-grant") {
 			if (!form.guildId) return json({ error: "Which guild?" }, 400);
 			await callUser(session.uid, "/grant", { method: "DELETE", body: JSON.stringify({ slug: target.name, guildId: form.guildId }) });
@@ -523,6 +978,7 @@ export function gatewayRoutes() {
 		HttpRouter.add("GET", "/auth/logout", (request) => Effect.sync(() => handleLogout(request))),
 		HttpRouter.add("GET", "/github/callback", (request) => handleAccountCallback("github")(request)),
 		HttpRouter.add("GET", "/google/callback", (request) => handleAccountCallback("google")(request)),
+		HttpRouter.add("GET", UPSTREAM_CALLBACK_PATH, (request) => handleUpstreamCallback()(request)),
 		HttpRouter.add("GET", AS_METADATA_PATH, (request) => Effect.sync(() => json(authorizationServerMetadata(originOf(request))))),
 		HttpRouter.add("POST", REGISTER_PATH, (request) =>
 			Effect.gen(function* () {

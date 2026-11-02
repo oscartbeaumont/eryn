@@ -102,6 +102,7 @@ GET  /auth/discord | /auth/callback | /auth/logout
 GET  /api/accounts                   -> { signedIn, accounts: AccountSummary[], providers: ProviderSummary[] }
 POST /api/accounts                   { action, ... }
 GET  /github/callback | /google/callback
+GET  /api/mcp/upstream/callback    (an upstream MCP sign-in returning)
 GET  /api/tools                      -> { groups: ToolGroup[] }
 GET  /api/servers                    -> { signedIn, servers: ServerSummary[] }
 POST /api/servers                    { action, ... }
@@ -115,7 +116,9 @@ POST /api/mcp/authorize              -> consent decide
 
 `POST /api/servers` actions: `create { name, title? }`, `update { id, name?, title?, enabled? }`,
 `delete { id }`, `accounts { id, accountIds[] }`, `tools { id, tools }`,
-`tools-list { id }`, `revoke-grant { id, guildId }`.
+`tools-list { id }`, `revoke-grant { id, guildId }`, `connection-add { id, url, name?, title?, auth: "none"|"headers"|"oauth", headers? }`,
+`connection-refresh { id, connectionId }`, `connection-signin { id, connectionId }`,
+`connection-update { id, connectionId, title?, enabled? }`, `connection-remove { id, connectionId }`.
 
 ## 6. Models (all parsed with Effect `Schema`)
 
@@ -124,11 +127,16 @@ AccountSummary  { id, provider: "discord"|"github"|"google", label,
                   profile: { id, username, name?, avatarUrl?, url? }, createdAt }
 ProviderSummary { id, name, connect: ("oauth"|"pat")[], configured }
 ToolAccess      { groups: Record<string, "none"|"read"|"write"|"all">,
-                  tools?: { include?: string[]; exclude?: string[] } }
+                  tools?: { include?: string[]; exclude?: string[];
+                            access?: Record<string, "read"|"write"> } }
 ToolGroup       { id, name, tools: { name, title, description, group, access: "read"|"write" }[] }
 ServerSummary   { id, name, title?, enabled, accounts: { id, provider, label }[],
-                  tools: ToolAccess, endpoint, grants: { guildId }[] }
-Grant           { guildId, mcpServerId, toolNames: string[], createdAt }
+                  tools: ToolAccess, connections: ConnectionSummary[], endpoint,
+                  grants: { guildId }[] }
+ConnectionSummary { id, name, title?, url, enabled, auth: "none"|"headers"|"oauth",
+                  headerNames: string[], authenticated, pending,
+                  tools: { name, exposedName, title?, description?, access }[] }
+Grant           { guildId, mcpServerId, toolNames: string[], tools?: ToolAccess, createdAt }
 McpLink         { id, kind: "eryn"|"external", name, url, mcpServerId?, oauth?: McpOAuth, tools: ToolAccess, createdAt }
 McpOAuth        { refreshToken?, clientId, clientSecret?, tokenEndpoint, expiresAt, scope?, resource? }
 McpToolSummary  { name, title?, description? }
@@ -136,7 +144,8 @@ PendingMcpAuth  { attemptId, name, url, channelId?, state, clientId, clientSecre
                   resource?, scope?, codeVerifier, redirectUri, status, message?, linkId?, createdAt }
 ```
 
-Accounts, provider keys, and MCP tokens are sealed (AES-GCM, `ENCRYPTION_KEY`).
+Accounts, provider keys, upstream headers and upstream OAuth tokens, and MCP tokens
+are sealed (AES-GCM, `ENCRYPTION_KEY`).
 
 ## 7. Conventions
 

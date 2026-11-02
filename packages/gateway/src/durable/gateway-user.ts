@@ -21,11 +21,12 @@ import { describeError, discordRest, type DiscordRest } from "../discord/api";
 import { descriptors, DISCORD_MESSAGE_EVENT, type Occurrence } from "../events";
 import { mintGrantToken } from "../mcp/access";
 import { createEndpoint, type Endpoint } from "../mcp/endpoint";
-import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer } from "../model";
-import { catalog, groupOf, visibleToolNames } from "../tools/catalog";
+import { EMPTY_ACCESS, newId, type Account, type Grant, type McpServer, type UpstreamConnection } from "../model";
+import { catalog, entriesFor, exposedToolName, inferAccess, visibleToolNames } from "../tools/catalog";
 import { discordTool } from "../tools/discord";
 import { githubApi, githubTool, type GitHubApi } from "../tools/github";
 import { googleApi, googleTool } from "../tools/google";
+import { callUpstreamTool, refreshUpstreamToken, staticHeaders } from "../mcp/upstream";
 import {
 	deleteAccount,
 	deleteGrant,
@@ -44,6 +45,13 @@ import {
 
 function log(message: string): void {
 	console.log(`[eryn:gateway:user] ${message}`);
+}
+
+/** The same level with writing taken away, for a link that never allowed it. */
+function readOnlyLevel(level: "none" | "read" | "write" | "all"): "none" | "read" | "write" | "all" {
+	if (level === "all") return "read";
+	if (level === "write") return "none";
+	return level;
 }
 
 class HttpError extends Error {
@@ -156,6 +164,7 @@ export class GatewayUserV5 extends DurableObject<Env> {
 			if (request.method === "PUT") {
 				const server = await request.json<McpServer>();
 				await putServer(this.ctx.storage, this.secret, server);
+				await this.catchUpGrants(server);
 				return Response.json({ ok: true });
 			}
 			if (request.method === "DELETE") {
@@ -206,11 +215,20 @@ export class GatewayUserV5 extends DurableObject<Env> {
 				(body.slug ? await getServerByName(this.ctx.storage, this.secret, body.slug) : undefined) ??
 				(body.mcpServerId ? await getServer(this.ctx.storage, this.secret, body.mcpServerId) : undefined);
 			if (!server) throw new HttpError(404, "no such server");
-			const all = visibleToolNames(server.tools);
+			const entries = entriesFor(server);
+			const all = visibleToolNames(server.tools, entries);
 			// A caller may narrow with either a tool list or a whole ToolAccess.
-			const requested = body.toolNames ?? (body.tools ? visibleToolNames(body.tools) : all);
+			const requested = body.toolNames ?? (body.tools ? visibleToolNames(body.tools, entries) : all);
 			const toolNames = requested.filter((name) => all.includes(name));
-			const grant: Grant = { guildId: body.guildId, mcpServerId: server.id, toolNames, createdAt: Date.now() };
+			const grant: Grant = {
+				guildId: body.guildId,
+				mcpServerId: server.id,
+				toolNames,
+				// Keeping the access, not just its names, is what lets a tool added
+				// to the server later show up in this link at the same level.
+				...(body.tools ? { tools: body.tools } : {}),
+				createdAt: Date.now(),
+			};
 			await putGrant(this.ctx.storage, this.secret, grant, server.name);
 			if (!this.env.SESSION_SECRET) throw new HttpError(500, "the deployment has no session secret");
 			const token = await mintGrantToken({ sub: this.userId, mcp: server.name, guild: body.guildId }, this.env.SESSION_SECRET);
@@ -233,7 +251,7 @@ export class GatewayUserV5 extends DurableObject<Env> {
 			if (!server) throw new HttpError(404, "no such server");
 			const accounts = await listAccounts(this.ctx.storage, this.secret);
 			const allowed = this.allowedFor(server, accounts);
-			return Response.json({ tools: catalog().filter((tool) => allowed.includes(tool.name)) });
+			return Response.json({ tools: entriesFor(server).filter((tool) => allowed.includes(tool.name)) });
 		}
 
 		return Response.json({ error: "not found" }, { status: 404 });
@@ -245,23 +263,94 @@ export class GatewayUserV5 extends DurableObject<Env> {
 	}
 
 	/**
+	 * Give links made before grants carried their access the access they had.
+	 *
+	 * A link created by an older deploy stored only the names it exposed. Those
+	 * names still say what each group's level was, so it is recovered here and
+	 * written back; from then on the link follows its server as tools are added
+	 * instead of being frozen at the set it was made with.
+	 */
+	private async catchUpGrants(server: McpServer): Promise<void> {
+		const grants = await listGrants(this.ctx.storage, this.secret);
+		const overrides = server.tools.tools?.access ?? {};
+		const entries = entriesFor(server).map((entry) => ({ ...entry, access: overrides[entry.name] ?? entry.access }));
+		for (const grant of grants) {
+			if (grant.mcpServerId !== server.id || grant.tools || !grant.toolNames.length) continue;
+			await putGrant(
+				this.ctx.storage,
+				this.secret,
+				{ ...grant, tools: inferAccess(grant.toolNames, entries) },
+				server.name,
+			);
+		}
+	}
+
+	/**
+	 * The tool names a guild link may use.
+	 *
+	 * A link is the access it was created with, re-derived against the server's
+	 * current tools, so tools added later show up at the same level. A group the
+	 * link has never been asked about — one whose connection was added after the
+	 * link — follows the server, capped at read when the link itself does not
+	 * allow writing anywhere: a read-only link should not gain write access
+	 * because a new upstream arrived.
+	 */
+	private grantAllowed(grant: Grant, server: McpServer, entries: ReturnType<typeof entriesFor>): Set<string> {
+		if (!grant.tools) return new Set(grant.toolNames);
+		const groups = { ...grant.tools.groups };
+		const writes = Object.values(groups).some((level) => level === "write" || level === "all");
+		for (const entry of entries) {
+			if (entry.group in groups) continue;
+			const serverLevel = server.tools.groups[entry.group] ?? "none";
+			groups[entry.group] = writes ? serverLevel : readOnlyLevel(serverLevel);
+		}
+		// A tool's read/write classification is the server's, not the link's: the
+		// link was granted "everything in this group", and what the group holds is
+		// whatever the server says the tools are. A link's own override still wins
+		// when one is set.
+		const access = { ...(server.tools.tools?.access ?? {}), ...(grant.tools.tools?.access ?? {}) };
+		const tools = {
+			...(grant.tools.tools ?? {}),
+			...(Object.keys(access).length ? { access } : {}),
+		};
+		return new Set(visibleToolNames({ ...grant.tools, groups, tools }, entries));
+	}
+
+	/**
 	 * The tool names this server can actually run.
 	 *
-	 * A group needs an account of the matching provider to act with, so a group
-	 * that was switched on before its account was removed is not exposed.
+	 * A built-in group needs an account of the matching provider to act with, so
+	 * a group that was switched on before its account was removed is not
+	 * exposed. An upstream connection needs no account: its own auth is what it
+	 * acts with.
 	 */
 	private allowedFor(server: McpServer, accounts: Account[]): string[] {
 		const assigned = new Set(
 			accounts.filter((account) => server.accountIds.includes(account.id)).map((account) => account.provider),
 		);
-		return visibleToolNames(server.tools, catalog()).filter((name) => {
-			const group = groupOf(name);
+		const builtinGroups = new Map(catalog().map((tool) => [tool.name, tool.group] as const));
+		return visibleToolNames(server.tools, entriesFor(server)).filter((name) => {
+			const group = builtinGroups.get(name);
+			// Anything the built-in catalogue does not know is an upstream tool.
 			if (!group) return true;
 			if (group === "discord") return assigned.has("discord");
 			if (group === "github") return assigned.has("github");
 			if (group === "google_calendar") return assigned.has("google");
 			return false;
 		});
+	}
+
+	/** A stable account of a server's tools, so a config change rebuilds the endpoint. */
+	private signatureOf(server: McpServer, allowed: readonly string[]): string {		const connections = (server.connections ?? [])
+			.map((connection) =>
+				[
+					connection.id,
+					connection.enabled ? "on" : "off",
+					connection.tools.map((tool) => `${tool.name}:${tool.access}`).join("+"),
+				].join(":"),
+			)
+			.join("|");
+		return `${[...allowed].sort().join(",")}|${[...server.accountIds].sort().join(",")}|${connections}`;
 	}
 
 	// --- MCP -------------------------------------------------------------------
@@ -275,13 +364,12 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		// A guild token is only as good as the grant behind it, so a revoked link
 		// stops working on the next call rather than at token expiry.
 		const guild = request.headers.get("x-eryn-guild");
-		let grantToolNames: readonly string[] | undefined;
+		let grant: Grant | undefined;
 		if (guild) {
-			const grant = await getGrant(this.ctx.storage, this.secret, slug, guild);
+			grant = await getGrant(this.ctx.storage, this.secret, slug, guild);
 			if (!grant) {
 				return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "This guild's link was revoked." } }, { status: 403 });
 			}
-			grantToolNames = grant.toolNames;
 		}
 
 		const events = await this.eventsRequest(request, slug);
@@ -292,18 +380,20 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		}
 
 		const accounts = await listAccounts(this.ctx.storage, this.secret);
+		const entries = entriesFor(server);
 		// A guild link can only ever narrow what the server exposes, so its tool
-		// list is intersected with the server's own.
-		const allowed = this.allowedFor(server, accounts).filter(
-			(name) => grantToolNames === undefined || grantToolNames.includes(name),
-		);
-		const signature = `${[...allowed].sort().join(",")}|${[...server.accountIds].sort().join(",")}`;
+		// list is intersected with the server's own. A link that carries the whole
+		// access it was granted with re-derives its names here, which is what lets
+		// tools added to the server later appear in a link that already exists.
+		const grantAllowed = grant ? this.grantAllowed(grant, server, entries) : undefined;
+		const allowed = this.allowedFor(server, accounts).filter((name) => !grantAllowed || grantAllowed.has(name));
+		const signature = this.signatureOf(server, allowed);
 		// One endpoint per (server, guild): two guilds can link the same server with
 		// different restrictions, and each must see only its own tool set.
 		const cacheKey = `${slug}|${guild ?? ""}`;
 		let entry = this.endpoints.get(cacheKey);
 		if (!entry || entry.signature !== signature) {
-			const tools = catalog().filter((tool) => allowed.includes(tool.name));
+			const tools = entries.filter((tool) => allowed.includes(tool.name));
 			const endpoint = await createEndpoint({
 				origin: this.origin(),
 				slug,
@@ -352,6 +442,12 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		name: string,
 		args: Record<string, unknown>,
 	): Promise<string> {
+		const upstream = this.upstreamFor(server, name);
+		if (upstream) {
+			const headers = await this.headersFor(server, upstream.connection);
+			return await callUpstreamTool({ url: upstream.connection.url, headers, name: upstream.tool, args });
+		}
+
 		const assigned = server.accountIds
 			.map((id) => accounts.find((account) => account.id === id))
 			.filter((account): account is Account => account !== undefined);
@@ -391,6 +487,83 @@ export class GatewayUserV5 extends DurableObject<Env> {
 		}
 
 		throw new Error(`Unknown tool ${name}.`);
+	}
+
+	/**
+	 * The upstream connection behind an exposed tool name, if it is one.
+	 *
+	 * The lookup repeats the order `upstreamEntries` uses, so a name that was
+	 * dropped there as a duplicate is never routed here either.
+	 */
+	private upstreamFor(
+		server: McpServer,
+		name: string,
+	): { connection: UpstreamConnection; tool: string } | undefined {
+		const taken = new Set(catalog().map((tool) => tool.name));
+		for (const connection of server.connections ?? []) {
+			if (!connection.enabled) continue;
+			for (const tool of connection.tools) {
+				const exposed = exposedToolName(connection.name, tool.name);
+				if (taken.has(exposed)) continue;
+				taken.add(exposed);
+				if (exposed === name) return { connection, tool: tool.name };
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * The headers to call one connection with.
+	 *
+	 * An OAuth access token lives an hour, so it is refreshed just before it
+	 * lapses and the rotated pair is written back; a refresh that fails is left
+	 * to the call itself, whose 401 is the error the user can act on.
+	 */
+	private async headersFor(server: McpServer, connection: UpstreamConnection): Promise<Record<string, string>> {
+		const oauth = connection.auth.oauth;
+		if (connection.auth.kind !== "oauth" || !oauth) return staticHeaders(connection.auth);
+		if (!oauth.accessToken) {
+			throw new Error(`**${connection.title ?? connection.name}** needs a sign-in. Open it in the Eryn console.`);
+		}
+		const expires = oauth.expiresAt;
+		if (
+			expires !== undefined &&
+			expires - 60_000 <= Date.now() &&
+			oauth.refreshToken &&
+			oauth.tokenEndpoint &&
+			oauth.clientId
+		) {
+			try {
+				const next = await refreshUpstreamToken({
+					tokenEndpoint: oauth.tokenEndpoint,
+					clientId: oauth.clientId,
+					...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
+					refreshToken: oauth.refreshToken,
+					...(oauth.resource ? { resource: oauth.resource } : {}),
+				});
+				const credential = {
+					...oauth,
+					accessToken: next.accessToken,
+					...(next.refreshToken ? { refreshToken: next.refreshToken } : {}),
+					expiresAt: Date.now() + (next.expiresIn ?? 3_600) * 1_000,
+					...(next.scope ? { scope: next.scope } : {}),
+				};
+				await this.saveConnection(server, { ...connection, auth: { ...connection.auth, oauth: credential } });
+				return { authorization: `Bearer ${next.accessToken}` };
+			} catch {
+				// Fall through with the old token so the call reports the server's
+				// own rejection rather than a refresh failure nobody can action.
+			}
+		}
+		return { authorization: `Bearer ${oauth.accessToken}` };
+	}
+
+	/** Write one connection back into its server record. */
+	private async saveConnection(server: McpServer, updated: UpstreamConnection): Promise<void> {
+		const connections = (server.connections ?? []).map((connection) =>
+			connection.id === updated.id ? updated : connection,
+		);
+		await putServer(this.ctx.storage, this.secret, { ...server, connections });
 	}
 
 	private async githubFor(assigned: Account[]): Promise<GitHubApi | undefined> {

@@ -28,6 +28,14 @@ export const ToolAccess = Schema.Struct({
 		Schema.Struct({
 			include: Schema.optional(Schema.Array(Schema.String)),
 			exclude: Schema.optional(Schema.Array(Schema.String)),
+			/**
+			 * What a tool counts as when its group is `read` or `write`.
+			 *
+			 * A tool's own `read`/`write` is the default, so this only has to be
+			 * set for a tool whose nature the server does not describe, such as one
+			 * from an upstream MCP server with no annotations.
+			 */
+			access: Schema.optional(Schema.Record(Schema.String, Schema.Literals(["read", "write"]))),
 		}),
 	),
 });
@@ -76,6 +84,64 @@ export const AccountSummary = Schema.Struct({
 });
 export type AccountSummary = Schema.Schema.Type<typeof AccountSummary>;
 
+/** One tool an upstream MCP server advertised when it was last read. */
+export const UpstreamTool = Schema.Struct({
+	name: Schema.String,
+	title: Schema.optional(Schema.String),
+	description: Schema.optional(Schema.String),
+	/** What the tool does: taken from its annotation, or set by hand. */
+	access: Schema.Literals(["read", "write"]),
+	inputSchema: Schema.optional(Schema.Unknown),
+});
+export type UpstreamTool = Schema.Schema.Type<typeof UpstreamTool>;
+
+/**
+ * How to authenticate with one upstream server.
+ *
+ * `headers` carries whatever the server wants, such as an API token in
+ * `Authorization`, and `oauth` carries the client registration and tokens a
+ * sign-in produced. Both are stored sealed with the server record and never
+ * leave the gateway except as a request header.
+ */
+export const UpstreamAuth = Schema.Struct({
+	kind: Schema.Literals(["none", "headers", "oauth"]),
+	headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+	oauth: Schema.optional(
+		Schema.Struct({
+			clientId: Schema.optional(Schema.String),
+			clientSecret: Schema.optional(Schema.String),
+			authorizationEndpoint: Schema.optional(Schema.String),
+			tokenEndpoint: Schema.optional(Schema.String),
+			registrationEndpoint: Schema.optional(Schema.String),
+			/** The resource indicator to send (RFC 8707). */
+			resource: Schema.optional(Schema.String),
+			scope: Schema.optional(Schema.String),
+			accessToken: Schema.optional(Schema.String),
+			refreshToken: Schema.optional(Schema.String),
+			expiresAt: Schema.optional(Schema.Number),
+			/** The PKCE verifier for a sign-in the browser has not finished. */
+			verifier: Schema.optional(Schema.String),
+			startedAt: Schema.optional(Schema.Number),
+		}),
+	),
+});
+export type UpstreamAuth = Schema.Schema.Type<typeof UpstreamAuth>;
+
+/** A federated MCP server: its URL, its auth, and the tools it last offered. */
+export const UpstreamConnection = Schema.Struct({
+	id: Schema.String,
+	/** The slug its tools are prefixed with, and the group they belong to. */
+	name: Schema.String,
+	title: Schema.optional(Schema.String),
+	url: Schema.String,
+	enabled: Schema.Boolean,
+	auth: UpstreamAuth,
+	tools: Schema.Array(UpstreamTool),
+	createdAt: Schema.Number,
+	updatedAt: Schema.optional(Schema.Number),
+});
+export type UpstreamConnection = Schema.Schema.Type<typeof UpstreamConnection>;
+
 export const McpServer = Schema.Struct({
 	id: Schema.String,
 	/** The URL slug; unique per user and the last segment of the endpoint. */
@@ -85,15 +151,53 @@ export const McpServer = Schema.Struct({
 	/** The accounts its tools may act through. */
 	accountIds: Schema.Array(Schema.String),
 	tools: ToolAccess,
+	/** Other MCP servers whose tools this one federates. */
+	connections: Schema.optional(Schema.Array(UpstreamConnection)),
 	createdAt: Schema.Number,
 });
 export type McpServer = Schema.Schema.Type<typeof McpServer>;
+
+/** An upstream server as the console sees it: no headers, no tokens. */
+export const ConnectionSummary = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	title: Schema.optional(Schema.String),
+	url: Schema.String,
+	enabled: Schema.Boolean,
+	/** `headers` is reported without its values. */
+	auth: Schema.Literals(["none", "headers", "oauth"]),
+	/** Header names, for the console to show what is being sent. */
+	headerNames: Schema.Array(Schema.String),
+	/** Whether an OAuth connection has a token it can use. */
+	authenticated: Schema.Boolean,
+	/** Whether a sign-in is waiting for the browser to come back. */
+	pending: Schema.Boolean,
+	tools: Schema.Array(
+		Schema.Struct({
+			name: Schema.String,
+			/** The name the hosted server exposes, which is what a tool rule uses. */
+			exposedName: Schema.String,
+			title: Schema.optional(Schema.String),
+			description: Schema.optional(Schema.String),
+			access: Schema.Literals(["read", "write"]),
+		}),
+	),
+});
+export type ConnectionSummary = Schema.Schema.Type<typeof ConnectionSummary>;
 
 export const Grant = Schema.Struct({
 	guildId: Schema.String,
 	mcpServerId: Schema.String,
 	/** The subset of tool names this guild may use. */
 	toolNames: Schema.Array(Schema.String),
+	/**
+	 * The access the link was granted with, when it is known.
+	 *
+	 * Deriving the names again from this on every request is what lets tools
+	 * added to a server later appear in a link that already exists, at the same
+	 * read/write level the link was created with.
+	 */
+	tools: Schema.optional(ToolAccess),
 	createdAt: Schema.Number,
 });
 export type Grant = Schema.Schema.Type<typeof Grant>;
@@ -107,6 +211,7 @@ export const ServerSummary = Schema.Struct({
 		Schema.Struct({ id: Schema.String, provider: Provider, label: Schema.String, avatarUrl: Schema.optional(Schema.String) }),
 	),
 	tools: ToolAccess,
+	connections: Schema.Array(ConnectionSummary),
 	endpoint: Schema.String,
 	grants: Schema.Array(Schema.Struct({ guildId: Schema.String })),
 });

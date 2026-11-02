@@ -12,6 +12,8 @@ import { SESSION_TTL_MS, STATE_TTL_MS } from "./config";
 
 export const SESSION_COOKIE = "eryn_session";
 export const STATE_COOKIE = "eryn_state";
+/** The one-shot value that carries an upstream MCP sign-in back to its connection. */
+export const UPSTREAM_COOKIE = "eryn_upstream";
 
 export interface Session {
 	uid: string;

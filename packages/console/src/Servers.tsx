@@ -14,6 +14,7 @@ import {
 	type ToolEntry,
 	type ToolGroup,
 	type ToolOverride,
+	type UpstreamConnection,
 } from "./api";
 import { session } from "./session";
 import { A, buttonClass, Chip, Code, CopyButton, Footer, Header, Kicker, Notice } from "./ui";
@@ -47,16 +48,27 @@ function cloneAccess(access: ToolAccess): ToolAccess {
 			? {
 					include: access.tools.include ? [...access.tools.include] : undefined,
 					exclude: access.tools.exclude ? [...access.tools.exclude] : undefined,
+					access: access.tools.access ? { ...access.tools.access } : undefined,
 				}
 			: undefined,
 	};
+}
+
+/** A notice carried in on a redirect, such as an upstream sign-in finishing. */
+function redirectNotice(): NoticeState | undefined {
+	const params = new URLSearchParams(window.location.search);
+	const error = params.get("error");
+	if (error) return { kind: "error", message: error };
+	const ok = params.get("ok");
+	if (ok) return { kind: "ok", message: ok };
+	return undefined;
 }
 
 export default function Servers() {
 	const [data, setData] = createSignal<ServersData>();
 	const [accounts, setAccounts] = createSignal<AccountSummary[]>([]);
 	const [groups, setGroups] = createSignal<ToolGroup[]>([]);
-	const [notice, setNotice] = createSignal<NoticeState>();
+	const [notice, setNotice] = createSignal<NoticeState | undefined>(redirectNotice());
 	const [busy, setBusy] = createSignal(false);
 
 	async function reload() {
@@ -78,6 +90,12 @@ export default function Servers() {
 		try {
 			const result = await serversAction(action);
 			capture(`server_${action.action}`);
+			if (result.url) {
+				// An OAuth action hands back where to sign in; leaving the page
+				// lets the provider's own consent screen do the rest.
+				window.location.href = result.url;
+				return;
+			}
 			flash("ok", result.message ?? success);
 			await reload();
 		} catch (error) {
@@ -219,16 +237,36 @@ function ServerCard(props: {
 	const [title, setTitle] = createSignal(props.server.title ?? "");
 	const [selected, setSelected] = createSignal<string[]>(props.server.accounts.map((account) => account.id));
 	const [access, setAccess] = createSignal<ToolAccess>(cloneAccess(props.server.tools));
+	const [connectionUrl, setConnectionUrl] = createSignal("");
+	const [connectionTitle, setConnectionTitle] = createSignal("");
+	const [connectionAuth, setConnectionAuth] = createSignal<"none" | "headers" | "oauth">("oauth");
+	const [connectionHeaders, setConnectionHeaders] = createSignal<{ name: string; value: string }[]>([
+		{ name: "Authorization", value: "" },
+	]);
+	const [clientId, setClientId] = createSignal("");
+	const [clientSecret, setClientSecret] = createSignal("");
 
-	/** Only the groups the accounts assigned to this server can act with. */
-	const visibleGroups = () => {
+	/** Only the groups a server can act with: built-in ones need an account. */
+	const visibleGroups = (): ToolGroup[] => {
 		const providers = new Set(props.server.accounts.map((account) => account.provider));
-		return props.groups.filter((group) => {
+		const builtin = props.groups.filter((group) => {
 			if (group.id === "discord") return providers.has("discord");
 			if (group.id === "github") return providers.has("github");
 			if (group.id === "google_calendar") return providers.has("google");
 			return false;
 		});
+		const upstream = props.server.connections.map((connection) => ({
+			id: connection.name,
+			name: connection.title ?? connection.name,
+			tools: connection.tools.map((tool) => ({
+				name: tool.exposedName,
+				title: tool.title ?? tool.name,
+				description: tool.description ?? "",
+				group: connection.name,
+				access: tool.access,
+			})),
+		}));
+		return [...builtin, ...upstream];
 	};
 
 	function toggleEnabled() {
@@ -274,9 +312,32 @@ function ServerCard(props: {
 			exclude.delete(tool);
 			if (mode === "include") include.add(tool);
 			if (mode === "exclude") exclude.add(tool);
-			const tools: ToolOverride = {};
+			const tools: ToolOverride = {
+				...(current.tools?.access && Object.keys(current.tools.access).length
+					? { access: { ...current.tools.access } }
+					: {}),
+			};
 			if (include.size) tools.include = [...include];
 			if (exclude.size) tools.exclude = [...exclude];
+			return { groups: { ...current.groups }, tools };
+		});
+	}
+
+	/** What a tool counts as when its group is read or write. */
+	function toolKind(tool: ToolEntry): "read" | "write" {
+		return access().tools?.access?.[tool.name] ?? tool.access;
+	}
+
+	function setToolKind(tool: string, kind: "" | "read" | "write") {
+		setAccess((current) => {
+			const overrides = { ...(current.tools?.access ?? {}) };
+			if (kind) overrides[tool] = kind;
+			else delete overrides[tool];
+			const tools: ToolOverride = {
+				...(current.tools?.include ? { include: [...current.tools.include] } : {}),
+				...(current.tools?.exclude ? { exclude: [...current.tools.exclude] } : {}),
+				...(Object.keys(overrides).length ? { access: overrides } : {}),
+			};
 			return { groups: { ...current.groups }, tools };
 		});
 	}
@@ -294,6 +355,63 @@ function ServerCard(props: {
 			for (const group of visibleGroups()) groups[group.id] = level;
 			return { groups, tools: current.tools };
 		});
+	}
+
+	function addConnection(event: SubmitEvent) {
+		event.preventDefault();
+		const url = connectionUrl().trim();
+		if (!url) return;
+		const headers: Record<string, string> = {};
+		for (const row of connectionHeaders()) {
+			if (row.name.trim() && row.value.trim()) headers[row.name.trim()] = row.value.trim();
+		}
+		props.onMutate(
+			{
+				action: "connection-add",
+				id: props.server.id,
+				url,
+				title: connectionTitle().trim() || undefined,
+				auth: connectionAuth(),
+				...(connectionAuth() === "headers" ? { headers } : {}),
+				...(connectionAuth() === "oauth" && clientId().trim() ? { clientId: clientId().trim() } : {}),
+				...(connectionAuth() === "oauth" && clientSecret().trim() ? { clientSecret: clientSecret().trim() } : {}),
+			},
+			"Upstream server added.",
+		);
+		setConnectionUrl("");
+		setConnectionTitle("");
+	}
+
+	function refreshConnection(connection: UpstreamConnection) {
+		props.onMutate(
+			{ action: "connection-refresh", id: props.server.id, connectionId: connection.id },
+			"Upstream tools refreshed.",
+		);
+	}
+
+	function signIn(connection: UpstreamConnection) {
+		props.onMutate({ action: "connection-signin", id: props.server.id, connectionId: connection.id }, "Signed in.");
+	}
+
+	function toggleConnection(connection: UpstreamConnection) {
+		props.onMutate(
+			{ action: "connection-update", id: props.server.id, connectionId: connection.id, enabled: !connection.enabled },
+			connection.enabled ? "Upstream disabled." : "Upstream enabled.",
+		);
+	}
+
+	function removeConnection(connection: UpstreamConnection) {
+		if (!confirm(`Remove the ${connection.name} upstream? Its tools stop being exposed.`)) return;
+		props.onMutate(
+			{ action: "connection-remove", id: props.server.id, connectionId: connection.id },
+			"Upstream removed.",
+		);
+	}
+
+	function setHeader(index: number, field: "name" | "value", value: string) {
+		setConnectionHeaders((current) =>
+			current.map((row, position) => (position === index ? { ...row, [field]: value } : row)),
+		);
 	}
 
 	function saveTools() {
@@ -430,11 +548,211 @@ function ServerCard(props: {
 				</Show>
 			</div>
 
+			{/* Other MCP servers whose tools this one republishes. */}
+			<div class="mb-5">
+				<div class="mb-2 flex items-center gap-3">
+					<span class="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">Upstream servers</span>
+				</div>
+				<p class="mb-3 max-w-[62ch] text-sm text-muted">
+					Federate another MCP server's tools here. Sign in with OAuth when it asks for one, or send your own
+					headers. Its tools appear below as their own group, prefixed with the connection's name.
+				</p>
+				<Show
+					when={props.server.connections.length > 0}
+					fallback={
+						<p class="text-sm text-muted">
+							No upstream servers yet. Add one below, or connect an account above for the built-in groups.
+						</p>
+					}
+				>
+					<div class="divide-y divide-line border border-line-strong">
+						<For each={props.server.connections}>
+							{(connection) => (
+								<div class="px-4 py-3">
+									<div class="flex flex-wrap items-center gap-3">
+										<span class="min-w-0 flex-1 truncate font-mono text-sm">{connection.name}</span>
+										<Show when={connection.title}>
+											{(current) => <span class="text-xs text-muted">{current()}</span>}
+										</Show>
+										<Chip tone={connection.enabled ? "ok" : "danger"}>
+											{connection.enabled ? "On" : "Off"}
+										</Chip>
+										<span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+											{connection.auth}
+										</span>
+										<span class="text-xs text-muted">
+											{connection.tools.length} tool{connection.tools.length === 1 ? "" : "s"}
+										</span>
+									</div>
+									<div class="mt-1 truncate font-mono text-xs text-muted">{connection.url}</div>
+									<Show when={connection.headerNames.length > 0}>
+										<div class="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+											headers: {connection.headerNames.join(", ")}
+										</div>
+									</Show>
+									<Show when={connection.auth === "oauth" && !connection.authenticated}>
+										<p class="mt-1 text-xs text-muted">
+											{connection.pending ? "Waiting for the sign-in to finish." : "Not signed in yet."}
+										</p>
+									</Show>
+									<div class="mt-2 flex flex-wrap gap-2">
+										<Show when={connection.auth === "oauth" && (!connection.authenticated || connection.pending)}>
+											<button
+												type="button"
+												class={buttonClass.primary}
+												disabled={props.busy}
+												onClick={() => signIn(connection)}
+											>
+												{connection.pending ? "Restart sign-in" : "Sign in"}
+											</button>
+										</Show>
+										<button
+											type="button"
+											class={buttonClass.small}
+											disabled={props.busy || !connection.authenticated}
+											onClick={() => refreshConnection(connection)}
+										>
+											Refresh tools
+										</button>
+										<button
+											type="button"
+											class={buttonClass.small}
+											disabled={props.busy}
+											onClick={() => toggleConnection(connection)}
+										>
+											{connection.enabled ? "Disable" : "Enable"}
+										</button>
+										<button
+											type="button"
+											class={buttonClass.danger}
+											disabled={props.busy}
+											onClick={() => removeConnection(connection)}
+										>
+											Remove
+										</button>
+									</div>
+								</div>
+							)}
+						</For>
+					</div>
+				</Show>
+
+				<form class="mt-3 flex flex-col gap-3 border border-line-strong p-4" onSubmit={addConnection}>
+					<div class="flex flex-wrap items-end gap-3">
+						<label class="min-w-0 flex-1">
+							<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+								Server URL
+							</span>
+							<input
+								type="url"
+								value={connectionUrl()}
+								placeholder="https://api.example.com/mcp"
+								spellcheck={false}
+								class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+								onInput={(event) => setConnectionUrl(event.currentTarget.value)}
+							/>
+						</label>
+						<label class="min-w-0 flex-1">
+							<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+								Name (optional)
+							</span>
+							<input
+								type="text"
+								value={connectionTitle()}
+								placeholder="fastmail"
+								spellcheck={false}
+								class="w-full border border-line-strong bg-bg px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+								onInput={(event) => setConnectionTitle(event.currentTarget.value)}
+							/>
+						</label>
+						<label class="flex flex-col">
+							<span class="mb-2 block font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
+								Auth
+							</span>
+							<select
+								value={connectionAuth()}
+								onChange={(event) =>
+									setConnectionAuth(event.currentTarget.value as "none" | "headers" | "oauth")
+								}
+								class="border border-line-strong bg-surface px-3 py-3 font-mono text-sm text-fg outline-none focus:border-fg"
+							>
+								<option value="oauth">OAuth sign-in</option>
+								<option value="headers">Custom headers</option>
+								<option value="none">No auth</option>
+							</select>
+						</label>
+					</div>
+					<Show when={connectionAuth() === "oauth"}>
+						<div class="flex flex-wrap items-center gap-2">
+							<input
+								type="text"
+								value={clientId()}
+								placeholder="Client ID (optional)"
+								spellcheck={false}
+								class="min-w-0 flex-1 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+								onInput={(event) => setClientId(event.currentTarget.value)}
+							/>
+							<input
+								type="password"
+								value={clientSecret()}
+								placeholder="Client secret (optional)"
+								class="min-w-0 flex-1 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+								onInput={(event) => setClientSecret(event.currentTarget.value)}
+							/>
+						</div>
+						<p class="text-xs text-muted">
+							Leave both blank and Eryn registers itself, or presents a client metadata document when the
+							server accepts one instead of registering.
+						</p>
+					</Show>
+					<Show when={connectionAuth() === "headers"}>
+						<div class="flex flex-col gap-2">
+							<For each={connectionHeaders()}>
+								{(row, index) => (
+									<div class="flex flex-wrap items-center gap-2">
+										<input
+											type="text"
+											value={row.name}
+											placeholder="Authorization"
+											spellcheck={false}
+											class="w-40 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+											onInput={(event) => setHeader(index(), "name", event.currentTarget.value)}
+										/>
+										<input
+											type="password"
+											value={row.value}
+											placeholder="Bearer …"
+											class="min-w-0 flex-1 border border-line-strong bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+											onInput={(event) => setHeader(index(), "value", event.currentTarget.value)}
+										/>
+									</div>
+								)}
+							</For>
+							<button
+								type="button"
+								class={buttonClass.small}
+								onClick={() => setConnectionHeaders((current) => [...current, { name: "", value: "" }])}
+							>
+								Add header
+							</button>
+						</div>
+					</Show>
+					<div class="flex items-center gap-3">
+						<button type="submit" class={buttonClass.primary} disabled={props.busy}>
+							{connectionAuth() === "oauth" ? "Add and sign in" : "Add upstream"}
+						</button>
+						<span class="text-xs text-muted">
+							Headers are stored encrypted and never shown again.
+						</span>
+					</div>
+				</form>
+			</div>
+
 			{/* Tool access, by group and per tool. Gated on an assigned account. */}
 			<div class="mb-5">
 				<div class="mb-2 flex items-center gap-3">
 					<span class="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">Tools</span>
-					<Show when={props.server.accounts.length > 0}>
+					<Show when={visibleGroups().length > 0}>
 						<span class="ml-auto flex flex-wrap gap-2">
 							<button type="button" class={buttonClass.small} onClick={() => setEveryGroup("read")}>
 								All read
@@ -446,11 +764,10 @@ function ServerCard(props: {
 					</Show>
 				</div>
 				<Show
-					when={props.server.accounts.length > 0}
+					when={visibleGroups().length > 0}
 					fallback={
 						<p class="text-sm text-muted">
-							Assign at least one account above, then save, to choose the tools this server exposes. The
-							groups available depend on which providers those accounts belong to.
+							Assign an account above, or add an upstream server, to choose the tools this server exposes.
 						</p>
 					}
 				>
@@ -490,9 +807,16 @@ function ServerCard(props: {
 																<div class="font-mono text-xs text-fg">{tool.name}</div>
 																<div class="text-xs text-muted">{tool.title}</div>
 															</div>
-															<span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-																{tool.access}
-															</span>
+															<select
+																value={toolKind(tool)}
+																onChange={(event) => setToolKind(tool.name, event.currentTarget.value as "" | "read" | "write")}
+																title="What this tool counts as"
+																class="border border-line-strong bg-surface px-2 py-2 font-mono text-xs text-fg outline-none focus:border-fg"
+															>
+																<option value="">Default ({tool.access})</option>
+																<option value="read">Read</option>
+																<option value="write">Write</option>
+															</select>
 															<select
 																value={overrideMode(tool.name)}
 																onChange={(event) =>

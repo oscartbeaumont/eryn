@@ -16,6 +16,9 @@ export const AUTHORIZE_PATH = "/console/authorize";
 export const GITHUB_CALLBACK_PATH = "/github/callback";
 export const GOOGLE_CALLBACK_PATH = "/google/callback";
 
+/** Where signing in to an upstream MCP server sends the browser back. */
+export const UPSTREAM_CALLBACK_PATH = "/api/mcp/upstream/callback";
+
 /** Where the console's Discord sign-in sends the browser back. */
 export const DISCORD_CALLBACK_PATH = "/auth/callback";
 

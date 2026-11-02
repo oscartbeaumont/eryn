@@ -43,6 +43,8 @@ export interface ProviderSummary {
 export interface ToolOverride {
 	include?: string[];
 	exclude?: string[];
+	/** What a tool counts as when its group is read or write. */
+	access?: Record<string, "read" | "write">;
 }
 
 export interface ToolAccess {
@@ -83,8 +85,36 @@ export interface ServerSummary {
 	enabled: boolean;
 	accounts: ServerAccountRef[];
 	tools: ToolAccess;
+	/** Other MCP servers whose tools this one federates. */
+	connections: UpstreamConnection[];
 	endpoint: string;
 	grants: ServerGrant[];
+}
+
+/** One tool an upstream MCP server offers, as the console lists it. */
+export interface UpstreamTool {
+	/** The name on the upstream server. */
+	name: string;
+	/** The name this hosted server exposes; a tool rule uses this one. */
+	exposedName: string;
+	title?: string;
+	description?: string;
+	access: "read" | "write";
+}
+
+/** A federated MCP server. Headers and tokens never reach the browser. */
+export interface UpstreamConnection {
+	id: string;
+	name: string;
+	title?: string;
+	url: string;
+	enabled: boolean;
+	auth: "none" | "headers" | "oauth";
+	/** Header names, without their values. */
+	headerNames: string[];
+	authenticated: boolean;
+	pending: boolean;
+	tools: UpstreamTool[];
 }
 
 export interface Grant {
@@ -208,7 +238,20 @@ export type ServersAction =
 	| { action: "accounts"; id: string; accountIds: string[] }
 	| { action: "tools"; id: string; tools: ToolAccess }
 	| { action: "tools-list"; id: string }
-	| { action: "revoke-grant"; id: string; guildId: string };
+	| { action: "revoke-grant"; id: string; guildId: string }
+	| {
+			action: "connection-add";
+			id: string;
+			url: string;
+			name?: string;
+			title?: string;
+			auth: "none" | "headers" | "oauth";
+			headers?: Record<string, string>;
+	  }
+	| { action: "connection-refresh"; id: string; connectionId: string }
+	| { action: "connection-signin"; id: string; connectionId: string }
+	| { action: "connection-update"; id: string; connectionId: string; title?: string; enabled?: boolean }
+	| { action: "connection-remove"; id: string; connectionId: string };
 
 export function fetchServers(): Promise<ServersData> {
 	return request<ServersData>("/api/servers");
