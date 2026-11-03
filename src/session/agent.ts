@@ -25,6 +25,7 @@ import { Workspace } from "../opencode/store";
 import { workspacePlugin } from "../opencode/workspace";
 import { bytesToBase64 } from "../opencode/bytes";
 import { discordPlugin } from "../opencode/discord";
+import { mcpGuidancePlugin } from "../opencode/guidance";
 import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
 import { createHost } from "./host";
@@ -485,6 +486,8 @@ class GuildAgentImpl implements GuildAgentShape {
 				discordPlugin(),
 				mcpeventsPlugin,
 			];
+			const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
+			if (guidance) plugins.push(guidance);
 
 			const catalogueProviders = new Set(config.connections.map((connection) => connection.integrationID));
 			for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
