@@ -25,6 +25,7 @@ import { Workspace } from "../opencode/store";
 import { workspacePlugin } from "../opencode/workspace";
 import { bytesToBase64 } from "../opencode/bytes";
 import { discordPlugin } from "../opencode/discord";
+import { agentInstructionsPlugin } from "../opencode/instructions";
 import { mcpGuidancePlugin } from "../opencode/guidance";
 import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
@@ -500,6 +501,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			// MCP-events plugin parses upstream envelopes with Effect Schema, but its
 			// lifecycle is the promise plugin API.
 			const plugins: PromisePlugin.Plugin[] = [
+				agentInstructionsPlugin(),
 				workspacePlugin(this.files),
 				discordPlugin(),
 				mcpeventsPlugin,

@@ -37,7 +37,7 @@ const THREAD_PREFIX = "thread:";
 const MAX_THREAD_NAME = 100;
 const KEEPALIVE_MS = 840_000;
 /** Text that interrupts the running turn when sent in an owned thread. */
-const STOP_TEXT = new Set(["stop", "cancel", "!stop", "!cancel", "/stop", "/cancel"]);
+const STOP_TEXT = new Set(["stop", "cancel", "!stop", "!cancel", "/stop", "/cancel", "eryn stop", "eryn cancel"]);
 
 function log(message: string): void {
 	botLog("gateway", message);
@@ -490,7 +490,14 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			bot?: boolean;
 		}[] = [];
 		for (const user of message.mentions ?? []) {
-			if (!user.id || user.id === message.author?.id || seen.has(user.id)) continue;
+			if (
+				!user.id ||
+				user.id === this.botUserId ||
+				user.id === message.author?.id ||
+				seen.has(user.id)
+			) {
+				continue;
+			}
 			seen.add(user.id);
 			const username = user.username?.trim();
 			mentions.push({
@@ -565,8 +572,14 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	private stripMention(content: string, roleId: string | undefined): string {
 		const pattern = this.mentionPattern();
-		let text = pattern ? content.replace(pattern, " ") : content;
-		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, " ");
+		let without = pattern ? content.replace(pattern, " ") : content;
+		if (roleId !== undefined) without = without.replaceAll(`<@&${roleId}>`, " ");
+		// A message that was only a ping is still empty; it should not become a
+		// one-word request just because the ping is rendered as "Eryn".
+		if (!without.replace(/\s+/g, " ").trim()) return "";
+
+		let text = pattern ? content.replace(pattern, "Eryn") : content;
+		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, "Eryn");
 		return text.replace(/\s+/g, " ").trim();
 	}
 
