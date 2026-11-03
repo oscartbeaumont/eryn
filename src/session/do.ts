@@ -6,8 +6,8 @@
  * linked MCP tokens all live in storage that no other guild can be routed to.
  *
  * It is a thin shell: it composes layers over its own storage and delegates to
- * `GuildStore` and `GuildAgent`. It exposes the internal routes the bot calls
- * (`CONTRACT.md` §3), and holds no Discord socket and no timer of its own.
+ * `GuildStore` and `GuildAgent`. It exposes the internal routes the bot calls,
+ * and holds no Discord socket and no timer of its own.
  */
 
 import { DurableObject } from "cloudflare:workers";
