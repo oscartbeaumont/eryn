@@ -705,6 +705,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	async connectKey(config: HostConfig, integrationID: string, key: string): Promise<void> {
 		const host = await this.hostFor(config);
 		await host.integration.connect.key({ integrationID, key, location: { directory: LOCATION } });
+		this.modelCache = undefined;
 	}
 
 	async oauthConnect(

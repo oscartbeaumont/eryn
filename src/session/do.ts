@@ -392,12 +392,16 @@ export class BotSessionV5 extends DurableObject<Env> {
 				if (!isValidModel(model)) return json({ error: "model must be a provider/model reference" }, 400);
 				return yield* attempt(async () => {
 					const config = await loadConfig();
-					const provider = model.split("/")[0] ?? "";
-					if (!config.connections.some((connection) => connection.integrationID === provider)) {
-						const connected = config.connections.map((connection) => connection.integrationID).join(", ") || "none";
+					const models = await agent.models(config).catch(() => []);
+					const candidate = models.find((entry) => entry.id === model);
+					if (!candidate) {
+						return json({ error: `That model is not in the current catalogue.` }, 400);
+					}
+					if (!candidate.connected) {
+						const connected = [...new Set(models.filter((entry) => entry.connected).map((entry) => entry.provider))].join(", ") || "none";
 						return json(
 							{
-								error: `\`${provider}\` is not connected here, so \`${model}\` cannot run. Connected providers: ${connected}. Pick a model from one of those.`,
+								error: `The provider for \`${model}\` is not connected here. Connected providers: ${connected}. Pick a model from one of those.`,
 							},
 							400,
 						);
