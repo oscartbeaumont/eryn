@@ -50,6 +50,8 @@ a { color: inherit; }
 .button { display: inline-block; padding: 0.7rem 1.1rem; border: 1px solid var(--fg); border-radius: 2px;
           background: var(--fg); color: var(--bg); font-weight: 600; text-decoration: none; }
 dl { display: grid; gap: 1rem; margin: 0; padding-top: 2rem; border-top: 1px solid var(--line); }
+footer { max-width: 44rem; margin: 0 auto; padding: 0 1.5rem 4rem; color: var(--muted); font-size: 0.9rem; }
+footer a { color: var(--muted); margin-right: 1rem; }
 dt { margin: 0 0 0.2rem; font: 11px/1.4 ui-monospace, monospace; letter-spacing: 0.12em;
      text-transform: uppercase; color: var(--muted); }
 dd { margin: 0; color: var(--muted); }
@@ -66,10 +68,15 @@ code { color: var(--fg); font: 0.9em/1.4 ui-monospace, monospace; }
 <a class="button" href="${installUrl()}" rel="noreferrer">Add to Discord</a>
 </div>
 <dl>
-<div><dt>Setup</dt><dd>Add Eryn, then run <code>/eryn setup provider</code> and <code>/eryn setup model</code>.</dd></div>
+<div><dt>Setup</dt><dd>Add Eryn, then run <code>/eryn setup</code> to connect a provider and choose a model.</dd></div>
 <div><dt>Tools</dt><dd>Link any external MCP server from <code>/eryn setup</code>.</dd></div>
 </dl>
 </main>
+<footer>
+<a href="/terms">Terms of Service</a>
+<a href="/privacy">Privacy Policy</a>
+<a href="mailto:oscar@otbeaumont.me">Contact</a>
+</footer>
 </body>
 </html>`,
 		{

@@ -14,6 +14,7 @@ import { BotGatewayV5 } from "./bot/do";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
 import { log } from "./config";
 import { landingPage } from "./landing";
+import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
 import { MCP_CALLBACK_PATH } from "./mcp/links";
@@ -65,6 +66,13 @@ export async function handle(request: Request): Promise<Response | undefined> {
 	// The public origin is a landing page, since the bot's whole UI is Discord.
 	if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
 		return landingPage();
+	}
+
+	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") {
+		return termsPage();
+	}
+	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") {
+		return privacyPage();
 	}
 
 	// The filtered models.dev catalogue an embedded host points at, so it does
