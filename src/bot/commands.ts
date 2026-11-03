@@ -22,7 +22,7 @@ import {
 import type { DiscordInteraction } from "../discord/socket";
 import { modalValues } from "../discord/socket";
 import { describeTools } from "../mcp/links";
-import type { McpLink, PublicLink } from "../session/models";
+import type { IntegrationOption, McpLink, PublicLink } from "../session/models";
 import { SessionClient } from "./client";
 
 const MAX_SELECT_OPTIONS = 25;
@@ -78,6 +78,7 @@ export const CID = {
 	removeProviderSelect: "setup:provider:remove:select",
 	removeProviderConfirm: (integrationID: string) => clip(`setup:provider:remove:confirm:${integrationID}`),
 	providerSelect: "setup:provider",
+	providerPick: (integrationID: string) => clip(`setup:provider:pick:${integrationID}`),
 	providerSearch: "setup:search",
 	method: (integrationID: string, methodID: string) => clip(`setup:method:${integrationID}:${methodID}`),
 	keyModal: (integrationID: string) => clip(`setup:key:${integrationID}`),
@@ -86,6 +87,8 @@ export const CID = {
 	modelSelect: "setup:model",
 	modelManual: "setup:model:manual",
 	modelModal: "setup:model:modal",
+	modelSearch: "setup:model:search",
+	modelSearchModal: "setup:model:search:modal",
 	mcpAddModal: "mcp:add",
 	mcpRemoveSelect: "mcp:remove",
 	mcpAuthCheck: (attemptId: string) => clip(`mcp:oauth:${attemptId}`),
@@ -105,6 +108,12 @@ const INSTALL_PREFIX = "install:setup:";
 
 function providerSelectId(guildId?: string): string {
 	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:provider`) : CID.providerSelect;
+}
+
+function providerPickId(guildId: string | undefined, integrationID: string): string {
+	return guildId
+		? clip(`${INSTALL_PREFIX}${guildId}:provider:pick:${integrationID}`)
+		: CID.providerPick(integrationID);
 }
 
 function methodId(guildId: string | undefined, integrationID: string, methodID: string): string {
@@ -147,6 +156,14 @@ function modelManualId(guildId?: string): string {
 
 function modelModalId(guildId?: string): string {
 	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model:modal`) : CID.modelModal;
+}
+
+function modelSearchId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model:search`) : CID.modelSearch;
+}
+
+function modelSearchModalId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model:search:modal`) : CID.modelSearchModal;
 }
 
 /** The world the command handlers read from. */
@@ -425,14 +442,32 @@ async function setupProvider(
 		value: provider.id,
 		description: (provider.connected ? "connected" : provider.methods.map((method) => method.label).join(", ")).slice(0, 100),
 	}));
+	const recommended = PREFERRED_PROVIDERS.map((id) => providers.find((provider) => provider.id === id))
+		.filter((provider): provider is IntegrationOption => provider !== undefined)
+		.slice(0, 5);
+	const components: DiscordComponent[] = [];
+	if (recommended.length) {
+		components.push(
+			buttonRow(
+				recommended.map((provider) =>
+					actionButton(provider.name.slice(0, 80), providerPickId(dmGuildId, provider.id), 2),
+				),
+			),
+		);
+	}
+	components.push(
+		selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Browse all providers", options }),
+	);
+	components.push(buttonRow([actionButton("Search all providers", providerSearchId(dmGuildId), 2)]));
 	await answer.reply(
-		providers.length > shown.length
-			? `Which provider should this server use for inference?\nShowing ${shown.length} of ${providers.length}; use **Search providers** for the rest.`
-			: "Which provider should this server use for inference?",
 		[
-			selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Pick a provider", options }),
-			buttonRow([actionButton("Search providers", providerSearchId(dmGuildId), 2)]),
-		],
+			"Which provider should this server use for inference?",
+			recommended.length ? "Pick a common provider below, or browse the full list." : "Browse the list or search for a provider.",
+			...(providers.length > shown.length
+				? [`Showing ${shown.length} of ${providers.length} in the list; use Search all providers for the rest.`]
+				: []),
+		].join("\n"),
+		components,
 	);
 }
 
@@ -508,15 +543,70 @@ async function setupModel(
 		);
 		return;
 	}
-	const options: DiscordSelectOption[] = models.slice(0, MAX_SELECT_OPTIONS - 1).map((model) => ({
+	const shown = models.slice(0, MAX_SELECT_OPTIONS - 1);
+	const options: DiscordSelectOption[] = shown.map((model) => ({
 		label: `${model.connected ? "★ " : ""}${model.name}`.slice(0, 100),
 		value: model.id,
 		description: `${model.provider} · ${model.status}`.slice(0, 100),
 	}));
-	await answer.reply("Which model should Eryn run here?", [
-		selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
-		buttonRow([actionButton("Enter a model reference", modelManualId(dmGuildId))]),
-	]);
+	await answer.reply(
+		[
+			"Which model should Eryn run here?",
+			...(models.length > shown.length
+				? [`Showing ${shown.length} of ${models.length}; use Search models to narrow the list.`]
+				: []),
+		].join("\n"),
+		[
+			selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
+			buttonRow([
+				actionButton("Search models", modelSearchId(dmGuildId), 2),
+				actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
+			]),
+		],
+	);
+}
+
+async function searchModels(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	query: string,
+	dmGuildId?: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const needle = query.trim().toLowerCase();
+	const models = (await session.models()).filter((model) => model.connected);
+	const matches = models.filter(
+		(model) =>
+			!needle ||
+			`${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle),
+	);
+	const shown = matches.slice(0, MAX_SELECT_OPTIONS - 1);
+	if (!shown.length) {
+		await answer.reply(`No models match “${query.trim()}”.`, [
+			buttonRow([actionButton("Search again", modelSearchId(dmGuildId), 2)]),
+		]);
+		return;
+	}
+	const options: DiscordSelectOption[] = shown.map((model) => ({
+		label: `${model.connected ? "★ " : ""}${model.name}`.slice(0, 100),
+		value: model.id,
+		description: `${model.provider} · ${model.status}`.slice(0, 100),
+	}));
+	await answer.reply(
+		[
+			`Models matching “${query.trim()}”${matches.length > shown.length ? ` (showing ${shown.length} of ${matches.length})` : ""}`,
+			"Pick one below.",
+		].join("\n"),
+		[
+			selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
+			buttonRow([
+				actionButton("Search again", modelSearchId(dmGuildId), 2),
+				actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
+			]),
+		],
+	);
 }
 
 async function selectModel(
@@ -719,6 +809,29 @@ function keyModal(integrationID: string, dmGuildId?: string): DiscordModal {
 	};
 }
 
+function modelSearchModal(dmGuildId?: string): DiscordModal {
+	return {
+		custom_id: modelSearchModalId(dmGuildId),
+		title: "Search models",
+		components: [
+			{
+				type: 1,
+				components: [
+					{
+						type: 4,
+						custom_id: "query",
+						label: "Model name, id, or provider",
+						style: 1,
+						required: true,
+						max_length: 100,
+						placeholder: "claude, gpt-5, opencode-go",
+					},
+				],
+			},
+		],
+	};
+}
+
 function providerSearchModal(dmGuildId?: string): DiscordModal {
 	return {
 		custom_id: providerSearchId(dmGuildId),
@@ -792,6 +905,10 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 			await responder(ctx, interaction).update("Manage MCP servers from the server with `/eryn setup`.");
 			return;
 		}
+		if (rest === "model:search") {
+			await responder(ctx, interaction).modal(modelSearchModal(dmGuildId));
+			return;
+		}
 		if (rest === "model") {
 			return await guarded(ctx, interaction, "update", () =>
 				selectModel(ctx, interaction, session, interaction.data?.values?.[0] ?? ""),
@@ -800,6 +917,11 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		if (rest === "model:manual") {
 			await responder(ctx, interaction).modal(modelModal(dmGuildId));
 			return;
+		}
+		if (rest.startsWith("provider:pick:")) {
+			return await guarded(ctx, interaction, "update", () =>
+				pickProviderMethod(ctx, interaction, session, rest.slice("provider:pick:".length), dmGuildId),
+			);
 		}
 		if (rest === "provider") {
 			return await guarded(ctx, interaction, "update", () =>
@@ -885,6 +1007,11 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		const integrationID = customId.slice("setup:provider:remove:confirm:".length);
 		return await guarded(ctx, interaction, "update", () => removeProvider(ctx, interaction, session, integrationID));
 	}
+	if (customId.startsWith("setup:provider:pick:")) {
+		return await guarded(ctx, interaction, "update", () =>
+			pickProviderMethod(ctx, interaction, session, customId.slice("setup:provider:pick:".length)),
+		);
+	}
 	if (customId === CID.providerSelect) {
 		return await guarded(ctx, interaction, "update", () =>
 			pickProviderMethod(ctx, interaction, session, values[0] ?? ""),
@@ -933,6 +1060,10 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		return await guarded(ctx, interaction, "update", () =>
 			selectModel(ctx, interaction, session, values[0] ?? ""),
 		);
+	}
+	if (customId === CID.modelSearch) {
+		await responder(ctx, interaction).modal(modelSearchModal());
+		return;
 	}
 	if (customId === CID.modelManual) {
 		await responder(ctx, interaction).modal(modelModal());
@@ -1153,6 +1284,11 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 				completeCode(ctx, interaction, session, rest.slice("code:".length), values.code ?? "", dmGuildId),
 			);
 		}
+		if (rest === "model:search:modal") {
+			return await guarded(ctx, interaction, "reply", () =>
+				searchModels(ctx, interaction, session, values.query ?? "", dmGuildId),
+			);
+		}
 		if (rest === "model:modal") {
 			return await guarded(ctx, interaction, "reply", () =>
 				selectModel(ctx, interaction, session, values.model?.trim() ?? ""),
@@ -1205,6 +1341,11 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 	if (customId.startsWith("setup:code:")) {
 		return await guarded(ctx, interaction, "reply", () =>
 			completeCode(ctx, interaction, session, customId.slice("setup:code:".length), values.code ?? ""),
+		);
+	}
+	if (customId === CID.modelSearchModal) {
+		return await guarded(ctx, interaction, "reply", () =>
+			searchModels(ctx, interaction, session, values.query ?? ""),
 		);
 	}
 	if (customId === CID.modelModal) {
