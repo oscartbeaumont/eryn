@@ -36,10 +36,6 @@ Everything is a slash command:
 | Command | Purpose |
 | --- | --- |
 | `/eryn setup` | Setup menu: connect or remove a provider, choose a model, manage MCP servers, and see status |
-| `/eryn mcp add` | Add and test an external MCP server |
-| `/eryn mcp list` | List linked MCP servers |
-| `/eryn mcp test` | Check that linked servers still respond |
-| `/eryn mcp remove` | Remove a linked MCP server |
 | `/eryn stop` | Stop the current turn |
 | `/eryn help` | Show the available commands |
 
@@ -48,10 +44,10 @@ available to everyone.
 
 ## MCP servers
 
-Open the setup menu with `/eryn setup` and choose **MCP servers**, or use
-`/eryn mcp add` directly. Both accept an external MCP server's streamable HTTP
-URL. Eryn tests it before saving it: it calls `initialize` and `tools/list`,
-reports the tools it found, and lets you repeat the test later.
+Open the setup menu with `/eryn setup` and choose **MCP servers**. Linking
+accepts an external MCP server's streamable HTTP URL. Eryn tests it before
+saving it: it calls `initialize` and `tools/list`, reports the tools it found,
+and lets you repeat the test later.
 
 If the server asks for OAuth, Eryn handles the sign-in and stores the access and
 refresh tokens with the link. A server that wants a static bearer token can be

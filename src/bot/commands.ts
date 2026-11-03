@@ -199,22 +199,6 @@ export function erynCommand(): DiscordCommand {
 				description: "Open Eryn's setup menu",
 				type: 1,
 			},
-			{
-				name: "mcp",
-				description: "Link MCP servers to this server",
-				type: 2,
-				options: [
-					{
-						name: "add",
-						description: "Add and test an external MCP server",
-						type: 1,
-						options: [{ name: "url", description: "The server's streamable HTTP URL", type: 3 }],
-					},
-					{ name: "list", description: "List this server's linked MCP servers", type: 1 },
-					{ name: "test", description: "Test the linked MCP servers", type: 1 },
-					{ name: "remove", description: "Remove a linked MCP server", type: 1 },
-				],
-			},
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
 			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
@@ -384,25 +368,6 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(ctx, interaction, "reply", () => setupProvider(ctx, interaction, session));
 		case "setup:model":
 			return await guarded(ctx, interaction, "reply", () => setupModel(ctx, interaction, session));
-		case "mcp:add": {
-			const first = sub && "options" in sub ? sub.options?.[0] : undefined;
-			const url = typeof first?.value === "string" ? first.value : undefined;
-			await answer.modal(mcpAddModal(url));
-			return;
-		}
-		case "mcp:list":
-			return await guarded(ctx, interaction, "reply", async () => {
-				await answer.defer();
-				const links = await session.links();
-				await answer.reply(
-					formatLinks(links),
-					links.length ? [buttonRow([actionButton("Test all", CID.mcpTestAll, 1)])] : undefined,
-				);
-			});
-		case "mcp:test":
-			return await guarded(ctx, interaction, "reply", () => testAllLinks(ctx, interaction, session));
-		case "mcp:remove":
-			return await guarded(ctx, interaction, "reply", () => promptRemoveMcp(ctx, interaction, session));
 		case "stop":
 			return await guarded(ctx, interaction, "reply", async () => {
 				const channelId = interaction.channel_id;
@@ -1428,7 +1393,7 @@ async function mcpAdd(
 					`**${name}** needs authorisation before Eryn can use it.`,
 					started.error ?? "",
 					"",
-					`If you have a token for it, run \`/eryn mcp add url:${url}\` and paste it in the modal.`,
+					`If you have a token for it, run \`/eryn setup\`, open MCP servers, and link it with the token.`,
 				]
 					.filter(Boolean)
 					.join("\n"),
@@ -1477,12 +1442,12 @@ async function checkMcpAuth(
 	}
 	if (status.status === "failed") {
 		await answer.update(
-			`The sign-in did not complete: ${status.message ?? "the server gave no reason"}.\n\nStart again with \`/eryn mcp add\`.`,
+			`The sign-in did not complete: ${status.message ?? "the server gave no reason"}.\n\nStart again from \`/eryn setup\` under MCP servers.`,
 		);
 		return;
 	}
 	if (status.status === "missing") {
-		await answer.update("That sign-in is no longer available. Start again with `/eryn mcp add`.");
+		await answer.update("That sign-in is no longer available. Start again from `/eryn setup` under MCP servers.");
 		return;
 	}
 	await answer.update("Still waiting for the sign-in. Finish it in your browser, then press **I've finished** again.", [
@@ -1580,7 +1545,6 @@ function helpText(): string {
 	return [
 		"**Eryn setup**",
 		"• `/eryn setup` — providers, models, MCP servers, and current status",
-		"• `/eryn mcp` — shortcuts for linked MCP servers",
 		"• `/eryn stop` — stop the run in this thread",
 	].join("\n");
 }

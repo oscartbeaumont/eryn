@@ -513,7 +513,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 					const attemptRecord = await store.getAuthAttempt(body.attemptId);
 					if (!attemptRecord) return json({ status: "missing" });
 					if (attemptRecord.status === "pending" && Date.now() - attemptRecord.createdAt > AUTH_TTL_MS) {
-						const message = "That sign-in expired. Start it again from `/eryn mcp add`.";
+						const message = "That sign-in expired. Start it again from `/eryn setup` under MCP servers.";
 						await store.putAuthAttempt({ ...attemptRecord, status: "failed", message });
 						return json({ status: "failed", message });
 					}

@@ -133,7 +133,7 @@ export async function finishAuthorization(
 		return { status: "complete", ...(link ? { link } : {}) };
 	}
 	if ((pending.status === "pending" || pending.status === "failed") && Date.now() - pending.createdAt > AUTH_TTL_MS) {
-		return await fail(store, pending, "That sign-in expired. Start it again from `/eryn mcp add`.");
+		return await fail(store, pending, "That sign-in expired. Start it again from `/eryn setup` under MCP servers.");
 	}
 	if (input.error) {
 		return await fail(store, pending, "The sign-in was cancelled or refused.");

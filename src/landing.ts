@@ -67,7 +67,7 @@ code { color: var(--fg); font: 0.9em/1.4 ui-monospace, monospace; }
 </div>
 <dl>
 <div><dt>Setup</dt><dd>Add Eryn, then run <code>/eryn setup provider</code> and <code>/eryn setup model</code>.</dd></div>
-<div><dt>Tools</dt><dd>Link any external MCP server with <code>/eryn mcp add</code>.</dd></div>
+<div><dt>Tools</dt><dd>Link any external MCP server from <code>/eryn setup</code>.</dd></div>
 </dl>
 </main>
 </body>
