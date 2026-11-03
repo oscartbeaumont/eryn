@@ -84,7 +84,6 @@ type RemoteMcpServer = {
 	url: string;
 	headers?: Record<string, string>;
 	oauth: false;
-	codemode: boolean;
 };
 
 interface Host {
@@ -447,7 +446,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				type: "remote",
 				url: link.url,
 				oauth: false,
-				codemode: false,
+				// Leave codemode unset. OpenCode uses Code Mode for normal MCP
+				// servers and keeps Executor/PostHog direct because they already
+				// expose their own execute tool.
 				...(link.token ? { headers: { Authorization: `Bearer ${link.token}` } } : {}),
 			};
 		}
