@@ -75,7 +75,7 @@ pnpm install
 cp .dev.vars.example .dev.vars
 pnpm dev          # cf dev
 pnpm typecheck    # cf workers types && tsc
-pnpm deploy       # cf deploy
+pnpm run deploy   # cf deploy
 ```
 
 ### Deploying
@@ -103,7 +103,7 @@ than cutting off the reply.
 That makes a deploy take effect within a second or two, with no renames:
 
 ```sh
-pnpm deploy
+pnpm run deploy
 curl -s https://eryn.otbeaumont.me/health
 # {"ok":true,"deploy":"<worker deploy>","bot":{"connected":true,"deploy":"<bot object deploy>"}}
 ```

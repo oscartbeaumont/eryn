@@ -5,6 +5,7 @@
   "engines": {
     "node": "^22.18.0 || >=23.5.0"
   },
+  "packageManager": "pnpm@10.33.1",
   "scripts": {
     "dev": "cf dev",
     "build": "cf build",
@@ -28,6 +29,15 @@
     "vite": "^8.3.5"
   },
   "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "workerd"],
+    "ignoredBuiltDependencies": [
+      "@parcel/watcher",
+      "tree-sitter-bash",
+      "tree-sitter-powershell",
+      "@mongodb-js/zstd",
+      "node-liblzma",
+      "core-js"
+    ],
     "overrides": {
       "seroval": "^1.7.6",
       "seroval-plugins": "^1.7.6"
