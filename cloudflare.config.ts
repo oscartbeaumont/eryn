@@ -56,35 +56,11 @@ export default defineConfig({
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
+			// The only objects left. The old gateway and pre-redesign namespaces were
+			// deleted by earlier deploys, so their `deleted` and `renamed` tombstones
+			// have done their job and are gone too.
 			BotGatewayV5: exports.durableObject({ storage: "sqlite" }),
 			BotSessionV5: exports.durableObject({ storage: "sqlite" }),
-			// A deploy does not restart a live Durable Object, so the classes were
-			// renamed: the `renamed` tombstones move every object's storage to the
-			// new classes, which start on this deploy's code. V3 is the last rename
-			// needed: from here the Worker tells each object which deploy is current
-			// and the object restarts itself, so code changes take effect on their own.
-			BotGatewayV4: exports.durableObject({ state: "renamed", renamedTo: "BotGatewayV5" }),
-			BotSessionV4: exports.durableObject({ state: "renamed", renamedTo: "BotSessionV5" }),
-			BotGatewayV3: exports.durableObject({ state: "deleted" }),
-			BotSessionV3: exports.durableObject({ state: "deleted" }),
-			BotGatewayV2: exports.durableObject({ state: "deleted" }),
-			BotSessionV2: exports.durableObject({ state: "deleted" }),
-			// The MCP gateway is gone. Its user and events-hub objects held hosted
-			// servers, accounts, grants, and subscriptions, all of which are abandoned.
-			GatewayUserV5: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV5: exports.durableObject({ state: "deleted" }),
-			GatewayUserV4: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV4: exports.durableObject({ state: "deleted" }),
-			GatewayUserV3: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV3: exports.durableObject({ state: "deleted" }),
-			GatewayUserV2: exports.durableObject({ state: "deleted" }),
-			GatewayDiscordV2: exports.durableObject({ state: "deleted" }),
-			// The redesign was a clean break: these four namespaces held the old
-			// single-Worker layout, and their storage is intentionally abandoned.
-			ErynGateway: exports.durableObject({ state: "deleted" }),
-			ErynSession: exports.durableObject({ state: "deleted" }),
-			ErynRegistry: exports.durableObject({ state: "deleted" }),
-			ErynMcp: exports.durableObject({ state: "deleted" }),
 		},
 	},
 });
