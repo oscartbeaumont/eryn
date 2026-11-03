@@ -206,9 +206,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	private async keepAlive(): Promise<void> {
 		if (!this.token || this.socket.fatallyClosed) return;
 		// A pending restart owns the alarm; replacing it with the keepalive would
-		// postpone the restart for a whole cycle.
+		// postpone the restart for a whole cycle. A closed socket gets a short
+		// retry so a failed first connect does not wait for the long interval.
 		if (!this.restartPending) {
-			await this.ctx.storage.setAlarm(Date.now() + this.keepAliveMs);
+			const delay = this.socket.open ? this.keepAliveMs : Math.min(this.keepAliveMs, 10_000);
+			await this.ctx.storage.setAlarm(Date.now() + delay);
 		}
 		await this.ensure();
 		if (!this.socket.open) this.socket.ensure();
