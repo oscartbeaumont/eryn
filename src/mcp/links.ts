@@ -48,7 +48,6 @@ export interface BeginAuthorizationInput {
 	guildId: string;
 	name: string;
 	url: string;
-	channelId?: string;
 	applicationId?: string;
 	interactionToken?: string;
 	resourceMetadataUrl?: string;
@@ -98,7 +97,6 @@ export async function beginAuthorization(
 		attemptId,
 		name: input.name,
 		url: input.url,
-		...(input.channelId ? { channelId: input.channelId } : {}),
 		...(input.applicationId ? { applicationId: input.applicationId } : {}),
 		...(input.interactionToken ? { interactionToken: input.interactionToken } : {}),
 		state,

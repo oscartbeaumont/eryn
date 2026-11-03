@@ -94,8 +94,6 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	attemptId: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
-	/** Where to confirm completion, so the browser callback can say so. */
-	channelId: Schema.optional(Schema.String),
 	state: Schema.String,
 	/** The full authorization URL, for the short browser redirect. */
 	authorizationUrl: Schema.optional(Schema.String),
@@ -302,7 +300,6 @@ export const McpAuthStartRequestSchema = Schema.Struct({
 	guildId: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
-	channelId: Schema.optional(Schema.String),
 	applicationId: Schema.optional(Schema.String),
 	interactionToken: Schema.optional(Schema.String),
 	/** The `resource_metadata` URL from the server's challenge, when it gave one. */

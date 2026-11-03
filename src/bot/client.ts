@@ -164,7 +164,6 @@ export class SessionClient {
 	async mcpAuthStart(input: {
 		name: string;
 		url: string;
-		channelId?: string;
 		applicationId?: string;
 		interactionToken?: string;
 		resourceMetadataUrl?: string;

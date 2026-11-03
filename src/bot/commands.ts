@@ -1366,7 +1366,6 @@ async function mcpAdd(
 			const started = await session.mcpAuthStart({
 				name,
 				url,
-				...(interaction.channel_id ? { channelId: interaction.channel_id } : {}),
 				applicationId: interaction.application_id,
 				interactionToken: interaction.token,
 				...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
