@@ -15,9 +15,11 @@ import type { Plugin as PromisePlugin } from "@opencode/plugin";
 
 import { CATALOGUE_PATH } from "../catalogue";
 import { KEYS, log, publicOrigin } from "../config";
+import { withDeploy } from "../deploy";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
-import { DISCORD_METADATA_KEY, escapeXml, readDiscordContext, type DiscordContext } from "../discord/context";
+import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
+import { renderUserMessage } from "../discord/render";
 import { DiscordStream } from "../discord/stream";
 import { fetchWithRedirects } from "../http";
 import { DiscordApi } from "../discord/api";
@@ -40,7 +42,6 @@ import {
 	type OAuthStatus,
 	type PromptAttachment,
 	type PromptRequest,
-	type PromptUser,
 	type ProviderConnection,
 	type ProviderField,
 } from "./models";
@@ -158,43 +159,11 @@ function errorDetail(error: unknown): string | undefined {
  */
 function failureNote(error: string): string {
 	const hint = /deprecat|unavailable|not found/i.test(error)
-		? "\n\nThe model for this server is no longer available — pick another with `/eryn setup model`."
+		? "\n\nThe model for this server is no longer available — pick another with `/eryn setup`."
 		: /credential|unauthor|401|403/i.test(error)
-			? "\n\nThe key for this server was rejected — check or replace it with `/eryn setup provider`."
+			? "\n\nThe key for this server was rejected — check or replace it with `/eryn setup`."
 			: "";
 	return `**That turn failed.**\n> ${error}${hint}`;
-}
-
-/**
- * The message as the model should read it.
- *
- * Discord threads are multi-user and the transcript does not otherwise record
- * who spoke: without this the agent cannot tell whether it is answering the
- * person who opened the thread or someone else who just joined it.
- */
-function userTag(user: PromptUser): string {
-	const attributes: [string, string][] = [
-		["name", user.name],
-		...(user.username ? [["username", user.username] as [string, string]] : []),
-		...(user.id ? [["id", user.id] as [string, string]] : []),
-		...(user.bot ? [["bot", "true"] as [string, string]] : []),
-	];
-	return `<user ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
-}
-
-function userMessage(request: PromptRequest): string {
-	// A message can be only files; say so rather than handing the model an empty
-	// line that reads like a mistake.
-	const text = request.text.trim() || "(attached files)";
-	const blocks: string[] = [];
-	if (request.author) blocks.push(userTag(request.author));
-	const mentions = request.mentions ?? [];
-	if (mentions.length > 0) {
-		blocks.push(`<mentions>\n${mentions.map((user) => `  ${userTag(user)}`).join("\n")}\n</mentions>`);
-	}
-	// Keep account metadata separate from the user's text. Inline <@id> mentions
-	// stay in the text and resolve through the <user> references above.
-	return blocks.length > 0 ? `${blocks.join("\n")}\n\n${text}` : text;
 }
 
 /** Render the streamed text so far, preferring messages that belong to a step. */
@@ -457,6 +426,20 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	// --- Host -----------------------------------------------------------------
 
+	/** Add or remove the bot gateway's marker for a subscribed thread. */
+	private async setThreadSubscription(threadId: string, subscribed: boolean): Promise<void> {
+		const stub = this.env.BOT_GATEWAY.get(this.env.BOT_GATEWAY.idFromName("bot"));
+		const response = await stub.fetch(
+			"https://bot.internal/subscription",
+			withDeploy(this.env, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ guildId: this.guildId, threadId, subscribed }),
+			}),
+		);
+		if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
+	}
+
 	private mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {
 		const servers: Record<string, RemoteMcpServer> = {};
 		for (const link of links) {
@@ -506,7 +489,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				agentInstructionsPlugin(),
 				workspacePlugin(this.files),
 				discordPlugin(),
-				discordToolsPlugin(this.rest, this.guildId),
+				discordToolsPlugin(this.rest, this.guildId, (threadId, subscribed) => this.setThreadSubscription(threadId, subscribed)),
 				mcpeventsPlugin,
 			];
 			const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
@@ -835,10 +818,11 @@ class GuildAgentImpl implements GuildAgentShape {
 			await this.applyModel(host, request.threadId, sessionID, config.model);
 
 			const attached = await this.attachedImages(request.attachments);
+			const message = renderUserMessage(request.author, request.mentions ?? [], request.text.trim() || "(attached files)");
 			const text =
 				attached.notes.length > 0
-					? `${userMessage(request)}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
-					: userMessage(request);
+					? `${message}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
+					: message;
 			await host.sessions.prompt({
 				sessionID,
 				text,

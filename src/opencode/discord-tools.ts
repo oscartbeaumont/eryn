@@ -14,6 +14,7 @@ import { Plugin } from "@opencode/plugin";
 
 import { describeError } from "../errors";
 import { THREAD_TYPES, type DiscordChannelRef, type DiscordRest } from "../discord/api";
+import { renderChannel, renderMessage } from "../discord/render";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({
 	type: "object",
@@ -36,7 +37,11 @@ function channelSummary(channel: DiscordChannelRef) {
 	};
 }
 
-export function discordToolsPlugin(rest: DiscordRest, guildId: string) {
+export function discordToolsPlugin(
+	rest: DiscordRest,
+	guildId: string,
+	setSubscription: (threadId: string, subscribed: boolean) => Promise<void>,
+) {
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await rest.channel(channelId);
@@ -56,6 +61,7 @@ export function discordToolsPlugin(rest: DiscordRest, guildId: string) {
 	return Plugin.define({
 		id: "eryn.discord-tools",
 		async setup(ctx) {
+			const botUserId = await rest.me().then((me) => me.id).catch(() => undefined);
 			await ctx.tool.transform((tools) => {
 				tools.add({
 					name: "discord_list_channels",
@@ -106,12 +112,14 @@ export function discordToolsPlugin(rest: DiscordRest, guildId: string) {
 					execute: async (rawInput) => {
 						try {
 							const input = rawInput as { channelId: string; limit?: number; before?: string };
-							await channel(input.channelId);
+							const channelInfo = await channel(input.channelId);
 							const messages = await rest.channelMessages(input.channelId, {
 								limit: Math.min(Math.max(Math.trunc(input.limit ?? 20), 1), 50),
 								...(input.before ? { before: input.before } : {}),
 							});
-							return text(messages);
+							return {
+								content: [renderChannel(channelInfo), ...messages.map((message) => renderMessage(message, botUserId))].join("\n\n"),
+							};
 						} catch (error) {
 							return failed(error);
 						}
@@ -200,14 +208,16 @@ export function discordToolsPlugin(rest: DiscordRest, guildId: string) {
 
 				tools.add({
 					name: "discord_join_thread",
-					description: "Follow a thread so it stays in the bot's thread list.",
+					description:
+						"Join a thread and subscribe Eryn to its messages. New messages in the thread will start a turn without needing a mention.",
 					input: objectSchema({ threadId: { type: "string", description: "Thread id" } }, ["threadId"]),
 					execute: async (rawInput) => {
 						try {
 							const input = rawInput as { threadId: string };
 							await thread(input.threadId);
 							await rest.joinThread(input.threadId);
-							return text({ ok: true, threadId: input.threadId });
+							await setSubscription(input.threadId, true);
+							return text({ ok: true, threadId: input.threadId, subscribed: true });
 						} catch (error) {
 							return failed(error);
 						}
@@ -216,14 +226,15 @@ export function discordToolsPlugin(rest: DiscordRest, guildId: string) {
 
 				tools.add({
 					name: "discord_leave_thread",
-					description: "Stop following a thread.",
+					description: "Leave a thread and stop Eryn from responding to its messages.",
 					input: objectSchema({ threadId: { type: "string", description: "Thread id" } }, ["threadId"]),
 					execute: async (rawInput) => {
 						try {
 							const input = rawInput as { threadId: string };
 							await thread(input.threadId);
 							await rest.leaveThread(input.threadId);
-							return text({ ok: true, threadId: input.threadId });
+							await setSubscription(input.threadId, false);
+							return text({ ok: true, threadId: input.threadId, subscribed: false });
 						} catch (error) {
 							return failed(error);
 						}

@@ -52,7 +52,9 @@ export interface DiscordMessageView {
 	channel_id: string;
 	content?: string;
 	timestamp?: string;
+	edited_timestamp?: string | null;
 	author?: { id?: string; username?: string; global_name?: string; bot?: boolean };
+	mentions?: DiscordUser[];
 	attachments?: { filename?: string; url?: string; content_type?: string; size?: number }[];
 	referenced_message?: { id?: string } | null;
 }

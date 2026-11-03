@@ -33,6 +33,7 @@ import { SessionClient } from "./client";
 import { maybeAnnounceInstall } from "./install";
 
 const WAKE_PATH = "/wake";
+const SUBSCRIPTION_PATH = "/subscription";
 const THREAD_PREFIX = "thread:";
 const MAX_THREAD_NAME = 100;
 const KEEPALIVE_MS = 840_000;
@@ -149,6 +150,19 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
+		if (pathname === SUBSCRIPTION_PATH) {
+			await this.ensureCurrentVersion(request);
+			if (request.method !== "POST") return json({ error: "not found" }, 404);
+			const body = (await request.json().catch(() => undefined)) as
+				| { guildId?: unknown; threadId?: unknown; subscribed?: unknown }
+				| undefined;
+			if (typeof body?.threadId !== "string" || typeof body.subscribed !== "boolean") {
+				return json({ error: "bad request" }, 400);
+			}
+			if (body.subscribed) await this.ctx.storage.put(THREAD_PREFIX + body.threadId, true);
+			else await this.ctx.storage.delete(THREAD_PREFIX + body.threadId);
+			return json({ ok: true });
+		}
 		if (pathname === WAKE_PATH) {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle
 			// that reconnects the socket before Cloudflare's 15 minute cap.
