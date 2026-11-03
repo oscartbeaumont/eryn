@@ -17,7 +17,7 @@ import { CATALOGUE_PATH } from "../catalogue";
 import { KEYS, log, publicOrigin } from "../config";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
-import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
+import { DISCORD_METADATA_KEY, escapeXml, readDiscordContext, type DiscordContext } from "../discord/context";
 import { DiscordStream } from "../discord/stream";
 import { fetchWithRedirects } from "../http";
 import { DiscordApi } from "../discord/api";
@@ -170,11 +170,20 @@ function failureNote(error: string): string {
  * person who opened the thread or someone else who just joined it.
  */
 function userMessage(request: PromptRequest): string {
-	const author = request.author?.trim();
 	// A message can be only files; say so rather than handing the model an empty
 	// line that reads like a mistake.
 	const text = request.text.trim() || "(attached files)";
-	return author ? `${author}: ${text}` : text;
+	const author = request.author;
+	if (!author) return text;
+	const attributes: [string, string][] = [
+		["name", author.name],
+		...(author.username ? [["username", author.username] as [string, string]] : []),
+		...(author.id ? [["userId", author.id] as [string, string]] : []),
+	];
+	// Keep the speaker metadata separate from the user's text. A single
+	// self-closing element matches the Discord context block and cannot be
+	// confused with a mention or a line of the request.
+	return `<speaker ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />\n\n${text}`;
 }
 
 /** Render the streamed text so far, preferring messages that belong to a step. */

@@ -37,7 +37,7 @@ export const DiscordContextSchema = Schema.Struct({
 export type DiscordContext = typeof DiscordContextSchema.Type;
 
 /** Escape a value for an XML attribute, so a channel named `&` cannot break the block. */
-function escape(value: string): string {
+export function escapeXml(value: string): string {
 	return value.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
 }
 
@@ -66,7 +66,7 @@ export function describeDiscordContext(context: DiscordContext): string {
 		["thread", context.thread.name ?? context.thread.id],
 		["threadId", context.thread.id],
 	];
-	return `<discord ${attributes.map(([name, value]) => `${name}="${escape(value)}"`).join(" ")} />`;
+	return `<discord ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
 }
 
 /** The marker {@link describeDiscordContext} emits, for callers that must not repeat themselves. */

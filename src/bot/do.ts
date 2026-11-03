@@ -399,7 +399,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 					threadId,
 					title,
 					text,
-					author: this.authorLabel(message),
+					author: this.authorInfo(message),
 					discord,
 					attachments: this.attachmentsOf(message),
 				});
@@ -451,22 +451,24 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	/**
 	 * Everything the agent needs to identify the speaker: the guild nickname or
-	 * display name, the account handle, and the Discord mention form of the id.
-	 * Discord's name precedence is server nickname, then display name, then the
-	 * handle.
+	 * display name, the account handle, and the Discord id. Discord's name
+	 * precedence is server nickname, then display name, then the handle.
 	 */
-	private authorLabel(message: DiscordMessage): string {
+	private authorInfo(message: DiscordMessage): {
+		name: string;
+		username?: string;
+		id?: string;
+	} {
 		const username = message.author?.username?.trim();
-		const name =
-			message.member?.nick?.trim() ||
-			message.author?.global_name?.trim() ||
-			username ||
-			"someone";
-		const id = message.author?.id;
-		const parts = [name];
-		if (username && username !== name) parts.push(`@${username}`);
-		if (id) parts.push(`<@${id}>`);
-		return parts.join(" ");
+		return {
+			name:
+				message.member?.nick?.trim() ||
+				message.author?.global_name?.trim() ||
+				username ||
+				"someone",
+			...(username ? { username } : {}),
+			...(message.author?.id ? { id: message.author.id } : {}),
+		};
 	}
 
 	/**
