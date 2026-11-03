@@ -511,27 +511,18 @@ async function setupModel(
 		);
 		return;
 	}
-	const shown = models.slice(0, MAX_SELECT_OPTIONS - 1);
-	const options: DiscordSelectOption[] = shown.map((model) => ({
+	const options: DiscordSelectOption[] = models.slice(0, MAX_SELECT_OPTIONS).map((model) => ({
 		label: `${model.connected ? "★ " : ""}${model.name}`.slice(0, 100),
 		value: model.id,
 		description: `${model.provider} · ${model.status}`.slice(0, 100),
 	}));
-	await answer.reply(
-		[
-			"Which model should Eryn run here?",
-			...(models.length > shown.length
-				? [`Showing ${shown.length} of ${models.length}; use Search models to narrow the list.`]
-				: []),
-		].join("\n"),
-		[
-			selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
-			buttonRow([
-				actionButton("Search models", modelSearchId(dmGuildId), 2),
-				actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
-			]),
-		],
-	);
+	await answer.reply("Which model should Eryn run here?", [
+		selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
+		buttonRow([
+			actionButton("Search models", modelSearchId(dmGuildId), 2),
+			actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
+		]),
+	]);
 }
 
 async function searchModels(
@@ -550,7 +541,7 @@ async function searchModels(
 			!needle ||
 			`${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle),
 	);
-	const shown = matches.slice(0, MAX_SELECT_OPTIONS - 1);
+	const shown = matches.slice(0, MAX_SELECT_OPTIONS);
 	if (!shown.length) {
 		await answer.reply(`No models match “${query.trim()}”.`, [
 			buttonRow([actionButton("Search again", modelSearchId(dmGuildId), 2)]),
@@ -562,19 +553,13 @@ async function searchModels(
 		value: model.id,
 		description: `${model.provider} · ${model.status}`.slice(0, 100),
 	}));
-	await answer.reply(
-		[
-			`Models matching “${query.trim()}”${matches.length > shown.length ? ` (showing ${shown.length} of ${matches.length})` : ""}`,
-			"Pick one below.",
-		].join("\n"),
-		[
-			selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
-			buttonRow([
-				actionButton("Search again", modelSearchId(dmGuildId), 2),
-				actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
-			]),
-		],
-	);
+	await answer.reply(`Models matching “${query.trim()}”`, [
+		selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
+		buttonRow([
+			actionButton("Search again", modelSearchId(dmGuildId), 2),
+			actionButton("Enter a model reference", modelManualId(dmGuildId), 2),
+		]),
+	]);
 }
 
 async function selectModel(
