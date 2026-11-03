@@ -99,6 +99,9 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	state: Schema.String,
 	/** The full authorization URL, for the short browser redirect. */
 	authorizationUrl: Schema.optional(Schema.String),
+	/** The interaction that posted the sign-in message, for editing it later. */
+	applicationId: Schema.optional(Schema.String),
+	interactionToken: Schema.optional(Schema.String),
 	clientId: Schema.String,
 	clientSecret: Schema.optional(Schema.String),
 	tokenEndpoint: Schema.String,
@@ -300,6 +303,8 @@ export const McpAuthStartRequestSchema = Schema.Struct({
 	name: Schema.String,
 	url: Schema.String,
 	channelId: Schema.optional(Schema.String),
+	applicationId: Schema.optional(Schema.String),
+	interactionToken: Schema.optional(Schema.String),
 	/** The `resource_metadata` URL from the server's challenge, when it gave one. */
 	resourceMetadataUrl: Schema.optional(Schema.String),
 	scope: Schema.optional(Schema.String),

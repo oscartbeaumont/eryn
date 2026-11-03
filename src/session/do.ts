@@ -498,6 +498,8 @@ export class BotSessionV5 extends DurableObject<Env> {
 							name,
 							url: body.url,
 							...(body.channelId ? { channelId: body.channelId } : {}),
+							...(body.applicationId ? { applicationId: body.applicationId } : {}),
+							...(body.interactionToken ? { interactionToken: body.interactionToken } : {}),
 							...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
 							...(probe.scope ? { scope: probe.scope } : {}),
 						});
@@ -569,15 +571,29 @@ export class BotSessionV5 extends DurableObject<Env> {
 						...(body.code ? { code: body.code } : {}),
 						...(body.error ? { error: body.error } : {}),
 					});
-					if (firstFinish && result.link && attemptRecord.channelId) {
-						// The browser is on its own page, so say the outcome where the
-						// conversation started rather than only in the tab.
-						await rest
-							.sendMessage(
-								attemptRecord.channelId,
-								`**${result.link.name} is connected.** ${describeTools(result.tools ?? [])} Eryn will use it on the next turn.`,
-							)
-							.catch((error) => log("session", `could not announce the MCP link: ${describeError(error)}`));
+					if (firstFinish && result.link) {
+						const message = `**${result.link.name} is connected.** ${describeTools(result.tools ?? [])} Eryn will use it on the next turn.`;
+						let edited = false;
+						if (attemptRecord.applicationId && attemptRecord.interactionToken) {
+							try {
+								await rest.interactionEditOriginal(
+									attemptRecord.applicationId,
+									attemptRecord.interactionToken,
+									message,
+									{ components: [] },
+								);
+								edited = true;
+							} catch (error) {
+								log("session", `could not update the MCP sign-in message: ${describeError(error)}`);
+							}
+						}
+						if (!edited && attemptRecord.channelId) {
+							// The interaction token can expire before a slow browser flow
+							// returns. Say the outcome in the channel instead.
+							await rest
+								.sendMessage(attemptRecord.channelId, message)
+								.catch((error) => log("session", `could not announce the MCP link: ${describeError(error)}`));
+						}
 					}
 					return json({
 						ok: result.status === "complete",

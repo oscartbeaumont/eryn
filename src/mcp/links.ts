@@ -49,6 +49,8 @@ export interface BeginAuthorizationInput {
 	name: string;
 	url: string;
 	channelId?: string;
+	applicationId?: string;
+	interactionToken?: string;
 	resourceMetadataUrl?: string;
 	scope?: string;
 }
@@ -97,6 +99,8 @@ export async function beginAuthorization(
 		name: input.name,
 		url: input.url,
 		...(input.channelId ? { channelId: input.channelId } : {}),
+		...(input.applicationId ? { applicationId: input.applicationId } : {}),
+		...(input.interactionToken ? { interactionToken: input.interactionToken } : {}),
 		state,
 		authorizationUrl: url,
 		clientId: client.clientId,

@@ -165,6 +165,8 @@ export class SessionClient {
 		name: string;
 		url: string;
 		channelId?: string;
+		applicationId?: string;
+		interactionToken?: string;
 		resourceMetadataUrl?: string;
 		scope?: string;
 	}): Promise<McpAuthStartResponse> {

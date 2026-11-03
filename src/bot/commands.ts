@@ -1367,6 +1367,8 @@ async function mcpAdd(
 				name,
 				url,
 				...(interaction.channel_id ? { channelId: interaction.channel_id } : {}),
+				applicationId: interaction.application_id,
+				interactionToken: interaction.token,
 				...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
 				...(probe.scope ? { scope: probe.scope } : {}),
 			});
