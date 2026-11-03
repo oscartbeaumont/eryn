@@ -28,6 +28,8 @@ import { SessionClient } from "./client";
 const MAX_SELECT_OPTIONS = 25;
 /** Discord's own id limit; our encoded ids must stay under it. */
 const MAX_CUSTOM_ID = 100;
+/** Discord rejects a link button whose URL is longer than this. */
+const MAX_LINK_URL = 512;
 
 /**
  * Providers worth showing first.
@@ -1121,24 +1123,32 @@ async function startMethod(
 	// A device-code flow shows a code to type on the provider's page rather than
 	// sending the browser back to us, so it finishes with a code, not a poll.
 	if (result.mode === "code") {
-		const buttons: DiscordButton[] = [
-			linkButton("Open sign-in page", result.url),
-			actionButton("Enter code", codeModalId(dmGuildId, integrationID), 1),
-		];
+		const buttons: DiscordButton[] = [];
+		if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Open sign-in page", result.url));
+		buttons.push(actionButton("Enter code", codeModalId(dmGuildId, integrationID), 1));
 		await answer.update(
-			`**${integrationID}** needs a code to finish signing in.${
-				result.instructions ? `\n\n${result.instructions}` : ""
-			}\n\nOpen the page, then choose **Enter code**.`,
+			[
+				`**${integrationID}** needs a code to finish signing in.`,
+				...(result.instructions ? [result.instructions] : []),
+				...(result.url.length > MAX_LINK_URL ? ["", result.url] : []),
+				"",
+				"Open the page, then choose **Enter code**.",
+			].join("\n"),
 			[buttonRow(buttons)],
 		);
 		return;
 	}
-	const buttons: DiscordButton[] = [linkButton("Sign in", result.url)];
+	const buttons: DiscordButton[] = [];
+	if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", result.url));
 	buttons.push(actionButton("I've finished", oauthCheckId(dmGuildId, integrationID, result.attemptID), 3));
 	await answer.update(
-		`**${integrationID}** signs in through your browser. Open the link, finish the flow, then confirm.${
-			result.instructions ? `\n\n${result.instructions}` : ""
-		}`,
+		[
+			`**${integrationID}** signs in through your browser.`,
+			...(result.instructions ? [result.instructions] : []),
+			...(result.url.length > MAX_LINK_URL ? ["", result.url] : []),
+			"",
+			"Finish the flow, then confirm here.",
+		].join("\n"),
 		[buttonRow(buttons)],
 	);
 }
@@ -1358,18 +1368,17 @@ async function mcpAdd(
 				...(probe.scope ? { scope: probe.scope } : {}),
 			});
 			if (started.ok && started.url && started.attemptId) {
+				const buttons: DiscordButton[] = [];
+				if (started.url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", started.url));
+				buttons.push(actionButton("I've finished", CID.mcpAuthCheck(started.attemptId), 3));
 				await answer.reply(
 					[
 						`**${name}** needs you to sign in before Eryn can use it.`,
+						...(started.url.length > MAX_LINK_URL ? ["", started.url] : []),
 						"",
 						"Open the link, approve the access, then press **I've finished**. The sign-in finishes in your browser, so this message can stay here.",
 					].join("\n"),
-					[
-						buttonRow([
-							linkButton("Sign in", started.url),
-							actionButton("I've finished", CID.mcpAuthCheck(started.attemptId), 3),
-						]),
-					],
+					[buttonRow(buttons)],
 				);
 				return;
 			}
