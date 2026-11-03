@@ -1,11 +1,9 @@
 # Copy to .dev.vars and fill in. `pnpm dev` reads this file.
 #
 # Discord: create an application at https://discord.com/developers/applications,
-# add a bot, and enable the Message Content Intent. The same token powers the
-# Discord tools and the gateway's events socket.
+# add a bot, and enable the Message Content Intent. The token powers the socket,
+# slash commands, threads, and the install announcement.
 DISCORD_BOT_TOKEN=
-DISCORD_CLIENT_ID=1561290858668494959
-DISCORD_CLIENT_SECRET=
 
 # Generate with:
 #   echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
@@ -13,22 +11,7 @@ DISCORD_CLIENT_SECRET=
 ENCRYPTION_KEY=
 SESSION_SECRET=
 
-# Optional. The OAuth App used to connect GitHub accounts. A personal access
-# token works without it.
-GITHUB_OAUTH_CLIENT_ID=
-GITHUB_OAUTH_CLIENT_SECRET=
-
-# Optional. Enables connecting Google Calendar accounts.
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-
 PUBLIC_ORIGIN=https://eryn.otbeaumont.me
-
-# Optional. An empty token disables analytics and the /ingest proxy.
-POSTHOG_KEY=phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2
-POSTHOG_INGEST_HOST=https://us.i.posthog.com
-POSTHOG_ASSETS_HOST=https://us-assets.i.posthog.com
-POSTHOG_UI_HOST=https://us.posthog.com
 
 DISCORD_KEEPALIVE_SECONDS=840
 DISCORD_TURN_TIMEOUT_SECONDS=900

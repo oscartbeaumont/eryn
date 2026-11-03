@@ -6,8 +6,8 @@
  * linked MCP tokens all live in storage that no other guild can be routed to.
  *
  * It is a thin shell: it composes layers over its own storage and delegates to
- * `GuildStore` and `GuildAgent`. It exposes the internal routes the gateway
- * calls (`CONTRACT.md` §3), and holds no Discord socket and no timer of its own.
+ * `GuildStore` and `GuildAgent`. It exposes the internal routes the bot calls
+ * (`CONTRACT.md` §3), and holds no Discord socket and no timer of its own.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -584,8 +584,8 @@ export class BotSessionV5 extends DurableObject<Env> {
 				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
 				return yield* attempt(async () => {
 					const stored = await loadConfig();
-					// The session owns the guild's config; the gateway's copy, when it
-					// sends one, is an override used for exactly this turn.
+					// The session owns the guild's config; the bot's copy, when it sends
+					// one, is an override used for exactly this turn.
 					const config: HostConfig = body.config
 						? { connections: body.config.connections, model: body.config.model, links: stored.links }
 						: stored;

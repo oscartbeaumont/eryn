@@ -1,80 +1,170 @@
 /**
- * The root Worker: the one file that knows all three packages exist.
+ * Eryn's Cloudflare Worker entrypoint.
  *
- * `@oscartbeaumont/eryn-gateway` handles the MCP server and the console's API,
- * `@oscartbeaumont/eryn-bot` handles the Discord bot, and
- * `@oscartbeaumont/eryn-console` is served as static assets by the runtime. The
- * packages never import one another; each returns `undefined` for a request it
- * does not own, and the next one is tried.
+ * The Worker is the Discord bot and nothing else. It answers the external MCP
+ * sign-in callback and the models.dev catalogue a guild's embedded OpenCode host
+ * asks for, exposes the two Durable Objects the bot is made of, and wakes the
+ * singleton bot object from `/health` and the cron trigger.
  */
 
 import { env } from "cloudflare:workers";
-import * as bot from "@oscartbeaumont/eryn-bot";
-import * as gateway from "@oscartbeaumont/eryn-gateway";
 
-export { GatewayDiscordV5, GatewayUserV5 } from "@oscartbeaumont/eryn-gateway";
-export { BotGatewayV5, BotSessionV5 } from "@oscartbeaumont/eryn-bot";
+import { SessionClient } from "./bot/client";
+import { BotGatewayV5 } from "./bot/do";
+import { catalogueResponse, isCatalogueRequest } from "./catalogue";
+import { log } from "./config";
+import { verify } from "./crypto";
+import { withDeploy } from "./deploy";
+import { MCP_CALLBACK_PATH } from "./mcp/links";
+import { BotSessionV5 } from "./session/do";
 
-const POSTHOG_DEFAULT_INGEST = "https://us.i.posthog.com";
-const POSTHOG_DEFAULT_ASSETS = "https://us-assets.i.posthog.com";
+export { BotGatewayV5, BotSessionV5 };
 
 /**
- * Reverse-proxy PostHog ingestion through this origin.
+ * Poke the singleton bot object so it connects and arms its alarm.
  *
- * Pointing the console's `api_host` at `/ingest` makes analytics requests
- * first-party, which keeps them out of ad blockers' blocklists. `/ingest/static/*`
- * goes to the asset host that serves session replay; everything else to the
- * ingestion host. An empty `POSTHOG_KEY` disables analytics and this proxy.
+ * A deploy can make the object reset into its new code, and a reset object has
+ * no socket. When the wake says a restart is pending, poke it again once the
+ * restart has had a moment: that brings the socket back immediately instead of
+ * leaving the bot offline until the next cron tick.
  */
-async function proxyPostHog(request: Request, env: Env): Promise<Response | undefined> {
-	if (!new URL(request.url).pathname.startsWith("/ingest/")) return undefined;
-	if (!env.POSTHOG_KEY?.trim()) return new Response("Not found", { status: 404 });
+export async function wake(
+	env: Env,
+): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> {
+	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
+	const call = async (): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> => {
+		const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
+		if (!response.ok) return undefined;
+		return (await response.json().catch(() => undefined)) as
+			| { connected?: boolean; deploy?: string | null; restart?: boolean }
+			| undefined;
+	};
 
+	let state = await call().catch(() => undefined);
+	// A pending restart means the object resets into the new deploy a second from
+	// now, and the replacement starts with no socket. Keep poking for a few
+	// seconds: the call that lands after the reset is what makes it connect. The
+	// reset can be delayed, so one extra poke is not enough to rely on. The first
+	// call can also be the one the reset kills, which leaves no state to read —
+	// that is a reason to poke again, not to give up.
+	for (let attempt = 0; attempt < 10 && (!state || state.restart || !state.connected); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		state = (await call().catch(() => undefined)) ?? state;
+	}
+	if (!state) return undefined;
+	return { connected: state.connected, deploy: state.deploy ?? null, restart: state.restart === true };
+}
+
+/**
+ * Handle the Worker's own routes.
+ *
+ * The external MCP sign-in callback returns `undefined` for everything else, so
+ * the Worker can fall through to the bot's health check or a 404.
+ */
+export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
-	const path = `${url.pathname.slice("/ingest".length)}${url.search}`;
-	const ingest = env.POSTHOG_INGEST_HOST?.trim() || POSTHOG_DEFAULT_INGEST;
-	const assets = env.POSTHOG_ASSETS_HOST?.trim() || POSTHOG_DEFAULT_ASSETS;
-	const upstream = new URL(path, path.startsWith("/static/") ? assets : ingest);
+	// The filtered models.dev catalogue an embedded host points at, so it does
+	// not decode the bundled one in a Durable Object.
+	if (isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
 
-	// Never forward our own cookies or credentials to a third party.
-	const headers = new Headers(request.headers);
-	headers.delete("cookie");
-	headers.delete("authorization");
-	headers.delete("host");
+	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
+	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
 
-	const init: RequestInit = { method: request.method, headers, redirect: "manual" };
-	if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
+	const secret = env.SESSION_SECRET?.trim();
+	const state = url.searchParams.get("state") ?? "";
+	const pointer = secret ? await verify<{ guildId?: unknown; attemptId?: unknown }>(state, secret) : undefined;
+	const guildId = typeof pointer?.guildId === "string" ? pointer.guildId : undefined;
+	const attemptId = typeof pointer?.attemptId === "string" ? pointer.attemptId : undefined;
+	if (!guildId || !attemptId) {
+		return page(
+			"Sign-in link not valid",
+			"This link is not valid any more. Start the sign-in again from Discord.",
+			400,
+		);
+	}
 
-	const response = await fetch(upstream, init);
-	// The runtime hands back a decoded body, so a forwarded content-encoding or
-	// content-length would describe bytes that no longer match.
-	const out = new Headers(response.headers);
-	out.delete("content-encoding");
-	out.delete("content-length");
-	out.delete("transfer-encoding");
-	out.delete("set-cookie");
-	return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
+	const error = url.searchParams.get("error") ?? undefined;
+	const code = url.searchParams.get("code") ?? undefined;
+	if (error) log("callback", `an MCP authorization server returned ${error}`);
+
+	try {
+		const result = await new SessionClient(env, guildId).mcpAuthComplete(attemptId, code, error);
+		if (result.ok && result.link) {
+			return page(
+				"Connected",
+				`<strong>${escapeHtml(result.link.name)}</strong> is connected to your Discord server. You can close this tab and return to Discord.`,
+			);
+		}
+		return page(
+			"Sign-in did not complete",
+			`${escapeHtml(result.message ?? "The server did not accept the sign-in.")} You can close this tab and try again from Discord.`,
+			400,
+		);
+	} catch (failure) {
+		log("callback", `the MCP sign-in callback failed: ${String(failure)}`);
+		return page(
+			"Sign-in did not complete",
+			"Eryn could not finish the sign-in. You can close this tab and try again from Discord.",
+			500,
+		);
+	}
+}
+
+function escapeHtml(value: string): string {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;");
+}
+
+/** A small standalone page: the browser has left Discord and wants an answer. */
+function page(title: string, message: string, status = 200): Response {
+	// `message` may contain markup this module built; every value interpolated
+	// into it is escaped by the caller.
+	return new Response(
+		`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>${escapeHtml(title)} · Eryn</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b0c; color: #ededed;
+       font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 34rem; padding: 2rem 1.5rem; }
+h1 { margin: 0 0 0.75rem; font-size: 1.35rem; letter-spacing: -0.02em; }
+p { margin: 0; color: #a1a1aa; }
+strong { color: #ededed; }
+</style>
+</head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${message}</p></main></body>
+</html>`,
+		{
+			status,
+			headers: {
+				"content-type": "text/html; charset=utf-8",
+				"cache-control": "no-store",
+				"referrer-policy": "no-referrer",
+				"x-content-type-options": "nosniff",
+			},
+		},
+	);
 }
 
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		const proxied = await proxyPostHog(request, env).catch(() => undefined);
-		if (proxied) return proxied;
-
-		// The MCP endpoint is authenticated and routed before anything else, and it
-		// belongs to the gateway.
-		const fromGateway = await gateway.handle(request).catch(() => undefined);
-		if (fromGateway) return fromGateway;
-
-		const fromBot = await bot.handle(request).catch(() => undefined);
-		if (fromBot) return fromBot;
+	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+		const handled = await handle(request).catch(() => undefined);
+		if (handled) return handled;
 
 		if (new URL(request.url).pathname === "/health") {
 			// Wake the bot and report whether its gateway socket is up, so a deploy
 			// that leaves it offline is visible from one request. The deploy id says
 			// which code is actually serving: a Durable Object keeps the code it
 			// started with until it restarts.
-			const botState = await bot.wake(env).catch(() => undefined);
+			const botState = await wake(env).catch(() => undefined);
 			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
 		}
 
@@ -82,6 +172,6 @@ export default {
 	},
 
 	scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-		ctx.waitUntil(bot.wake(env).catch(() => undefined));
+		ctx.waitUntil(wake(env).catch(() => undefined));
 	},
 } satisfies ExportedHandler<Env>;

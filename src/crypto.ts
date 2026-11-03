@@ -2,9 +2,8 @@
  * Credential sealing for the bot.
  *
  * A guild's provider keys and MCP tokens are sealed with AES-GCM under the
- * worker's `ENCRYPTION_KEY`, so storage alone never yields a secret. This is a
- * deliberate duplicate of the gateway's copy: the contract forbids one package
- * importing another, and the shared surface is a dozen lines.
+ * worker's `ENCRYPTION_KEY`, so storage alone never yields a secret. It is kept
+ * here as the one shared sealing primitive the bot needs.
  */
 
 const encoder = new TextEncoder();

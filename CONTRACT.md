@@ -1,59 +1,44 @@
 # Eryn implementation contract
 
-The authoritative interface between the three packages and the root Worker. Read
-this before touching a package. The narrative design is `~/design/eryn/REDESIGN.md`.
+The authoritative interface inside the single `eryn` Worker. The narrative
+design is `~/design/eryn/REDESIGN.md`.
 
 ## 1. Composition
 
-The root `src/index.ts` is the only file that imports more than one package. Each
-package exposes:
+`src/index.ts` is the Worker entrypoint. It exports the two Durable Object
+classes, answers `/health`, the models.dev catalogue, and the external MCP
+sign-in callback, and returns `404` for everything else.
 
-```ts
-// packages/<pkg>/src/index.ts
-export function handle(request: Request): Promise<Response | undefined>; // undefined = not mine
-export class <Durable> extends DurableObject<Env> {}
+```
+src/
+├─ index.ts       Worker entrypoint and public routes
+├─ bot/           BotGatewayV5, slash commands, install flow, session client
+├─ session/       BotSessionV5, the OpenCode host, storage, models
+├─ discord/       REST, socket, components, stream helpers
+├─ mcp/           external MCP client, links, OAuth
+├─ opencode/      embedded host storage, shell, workspace
+├─ plugins/       the bundled MCP-events plugin
+├─ catalogue.ts   filtered models.dev catalogue
+├─ config.ts      constants, bindings helpers, logging
+├─ crypto.ts      sealing and signing
+├─ deploy.ts      deploy-id header and restart plumbing
+└─ errors.ts      tagged errors
 ```
 
-- `@oscartbeaumont/eryn-gateway` exports `handle`, `GatewayUser`, `GatewayDiscord`.
-- `@oscartbeaumont/eryn-bot` exports `handle` (the external MCP sign-in
-  callback), `wake(env)`, `BotGateway`, `BotSession`.
-- `@oscartbeaumont/eryn-console` is a client-only Solid SPA. It is not imported
-  by the Worker; `index.html` loads it and `cf` serves its build.
-
-**No package imports another package.** They meet only over HTTP/DO routes and the
-generated ambient `Env`. Small shared utilities (`crypto`) are duplicated, not
-shared.
+There is no console package and no MCP gateway package. All UI is Discord.
 
 ## 2. Bindings (generated from `cloudflare.config.ts`)
 
-`env.GATEWAY_USER`, `env.GATEWAY_DISCORD`, `env.BOT_GATEWAY`, `env.BOT_SESSION`
-(DO namespaces), plus `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`,
-`DISCORD_CLIENT_SECRET`, `ENCRYPTION_KEY`, `SESSION_SECRET`,
-`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`,
-`GITHUB_OAUTH_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
-`PUBLIC_ORIGIN`, `POSTHOG_*`, `DISCORD_KEEPALIVE_SECONDS`,
-`DISCORD_TURN_TIMEOUT_SECONDS`.
+`env.BOT_GATEWAY` and `env.BOT_SESSION` (DO namespaces), plus
+`DISCORD_BOT_TOKEN`, `ENCRYPTION_KEY`, `SESSION_SECRET`, `PUBLIC_ORIGIN`,
+`DISCORD_KEEPALIVE_SECONDS`, `DISCORD_TURN_TIMEOUT_SECONDS`, and `CF_VERSION`.
 
 ## 3. Durable Objects
 
-| Class | Package | Name | Serves |
-| --- | --- | --- | --- |
-| `GatewayUser` | gateway | Eryn user id | MCP endpoint (`/mcp/:name`), the console API, and internal routes the bot calls |
-| `GatewayDiscord` | gateway | `"hub"` | the lazily-opened Discord socket + MCP event subscriptions/streams |
-| `BotGateway` | bot | `"bot"` | the Discord socket, slash commands, threads, the install DM |
-| `BotSession` | bot | guild id | OpenCode host, per-guild provider keys, guild MCP links |
-
-### Internal routes (bot → gateway)
-
-The bot holds no credential that impersonates a user: it asks the gateway, over
-the `GATEWAY_USER` binding, for a guild-scoped token on explicit admin consent.
-
-```
-POST https://gateway.internal/grant      { userId, guildId, mcpServerId, tools }  -> { ok, url, token }
-POST https://gateway.internal/grants     { userId }                               -> { grants: Grant[] }
-POST https://gateway.internal/revoke     { userId, guildId, mcpServerId }         -> { ok }
-POST https://gateway.internal/servers    { userId }                               -> { servers: ServerSummary[] }
-```
+| Class | Name | Serves |
+| --- | --- | --- |
+| `BotGatewayV5` | `"bot"` | the Discord socket, slash commands, threads, the install DM |
+| `BotSessionV5` | guild id | OpenCode host, per-guild provider keys, guild MCP links |
 
 ### Internal routes (bot DO ↔ bot DO)
 
@@ -62,6 +47,7 @@ POST https://gateway.internal/servers    { userId }                             
 ```
 POST https://bot.internal/config        { guildId }                       -> { ready, model, providers, links }
 POST https://bot.internal/providers     { guildId }                       -> { integrations: IntegrationOption[] }
+POST https://bot.internal/models        { guildId }                       -> { models: ModelOption[] }
 POST https://bot.internal/provider/connect  { guildId, integrationID, key?, methodID?, ... } -> { ok } | { url } | { status }
 POST https://bot.internal/model         { guildId, model }                -> { ok }
 POST https://bot.internal/links         { guildId }                       -> { links: McpLink[] }
@@ -81,82 +67,37 @@ POST https://bot.internal/interrupt     { threadId, gone? }               -> { s
 
 ## 4. Route ownership
 
-| Path | Owner |
+| Path | Serves |
 | --- | --- |
-| `/mcp`, `/mcp/*` | gateway |
-| `/oauth/*`, `/.well-known/*` | gateway |
-| `/auth/*`, `/github/*`, `/google/*` | gateway |
-| `/api/**` except `/api/bot/**` | gateway |
-| `/api/bot/**` | bot (the external MCP sign-in callback at `/api/bot/mcp/callback`) |
-| `/health` | root |
-| everything else | console SPA (static assets) |
+| `/api/bot/models-catalogue` | the filtered models.dev catalogue for an embedded host |
+| `/api/bot/mcp/callback` | an external MCP authorization server returning to the bot |
+| `/health` | Worker and bot socket status |
+| everything else | `404` |
 
-## 5. Gateway HTTP API (the console's contract)
-
-Discord sign-in sets the `eryn_session` cookie.
-
-```
-GET  /api/config                     -> { posthog: { key, uiHost } | null }
-GET  /api/session                    -> { signedIn, account?: { id, name, avatarUrl } }
-GET  /auth/discord | /auth/callback | /auth/logout
-GET  /api/accounts                   -> { signedIn, accounts: AccountSummary[], providers: ProviderSummary[] }
-POST /api/accounts                   { action, ... }
-GET  /github/callback | /google/callback
-GET  /api/mcp/upstream/callback    (an upstream MCP sign-in returning)
-GET  /api/tools                      -> { groups: ToolGroup[] }
-GET  /api/servers                    -> { signedIn, servers: ServerSummary[] }
-POST /api/servers                    { action, ... }
-GET  /api/mcp/authorize              -> consent describe
-POST /api/mcp/authorize              -> consent decide
-```
-
-`POST /api/accounts` actions: `add-discord`, `start-github-oauth`,
-`add-github-pat { token }`, `start-google-oauth`, `unlink { id }`,
-`label { id, label }`.
-
-`POST /api/servers` actions: `create { name, title? }`, `update { id, name?, title?, enabled? }`,
-`delete { id }`, `accounts { id, accountIds[] }`, `tools { id, tools }`,
-`tools-list { id }`, `revoke-grant { id, guildId }`, `connection-add { id, url, name?, title?, auth: "none"|"headers"|"oauth", headers?, loopback? }`,
-`connection-refresh { id, connectionId }`, `connection-signin { id, connectionId }`,
-`connection-complete { id, connectionId, callback }` (a pasted loopback redirect),
-`connection-update { id, connectionId, title?, enabled? }`, `connection-remove { id, connectionId }`.
-
-## 6. Models (all parsed with Effect `Schema`)
+## 5. Models (all parsed with Effect `Schema`)
 
 ```ts
-AccountSummary  { id, provider: "discord"|"github"|"google", label,
-                  profile: { id, username, name?, avatarUrl?, url? }, createdAt }
-ProviderSummary { id, name, connect: ("oauth"|"pat")[], configured }
-ToolAccess      { groups: Record<string, "none"|"read"|"write"|"all">,
-                  tools?: { include?: string[]; exclude?: string[];
-                            access?: Record<string, "read"|"write"> } }
-ToolGroup       { id, name, tools: { name, title, description, group, access: "read"|"write" }[] }
-ServerSummary   { id, name, title?, enabled, accounts: { id, provider, label }[],
-                  tools: ToolAccess, connections: ConnectionSummary[], endpoint,
-                  grants: { guildId }[] }
-ConnectionSummary { id, name, title?, url, enabled, auth: "none"|"headers"|"oauth",
-                  headerNames: string[], authenticated, pending, loopback,
-                  tools: { name, exposedName, title?, description?, access }[] }
-Grant           { guildId, mcpServerId, toolNames: string[], tools?: ToolAccess, createdAt }
-McpLink         { id, kind: "eryn"|"external", name, url, mcpServerId?, oauth?: McpOAuth, tools: ToolAccess, createdAt }
+McpLink         { id, name, url, token?, oauth?: McpOAuth, tools: ToolAccess, createdAt }
 McpOAuth        { refreshToken?, clientId, clientSecret?, tokenEndpoint, expiresAt, scope?, resource? }
 McpToolSummary  { name, title?, description? }
 PendingMcpAuth  { attemptId, name, url, channelId?, state, clientId, clientSecret?, tokenEndpoint,
                   resource?, scope?, codeVerifier, redirectUri, status, message?, linkId?, createdAt }
+ToolAccess      { groups: Record<string, "none"|"read"|"write"|"all">,
+                  tools?: { include?: string[]; exclude?: string[];
+                            access?: Record<string, "read"|"write"> } }
 ```
 
-Accounts, provider keys, upstream headers and upstream OAuth tokens, and MCP tokens
-are sealed (AES-GCM, `ENCRYPTION_KEY`).
+Provider keys, MCP bearer tokens, and external MCP OAuth tokens are sealed
+(AES-GCM, `ENCRYPTION_KEY`).
 
-## 7. Conventions
+## 6. Conventions
 
 - Idiomatic Effect: `Context.Service` + `Layer` for I/O subsystems, `Schema` for
-  every parse (HTTP bodies, storage records, tool inputs, upstream responses),
-  `effect/http`'s `HttpRouter` for HTTP, `effect/ai`'s `McpServer` for the MCP
-  endpoint. Errors are tagged values.
+  every parse (HTTP bodies, storage records, tool inputs, upstream responses).
+  Errors are tagged values.
 - A Durable Object is a thin shell: it composes layers over its own storage and
   delegates. Business logic lives in services that can be tested without a Worker.
-- Log prefix: `[eryn:gateway:…]` / `[eryn:bot:…]`.
-- Storage records are versioned by key prefix, e.g. `account:`, `server:`,
-  `grant:`, `session:`, `guild:`, `link:`, `mcp:auth:`.
+- Log prefix: `[eryn:bot:…]`.
+- Storage records are versioned by key prefix, e.g. `provider:`, `session:`,
+  `guild:`, `link:`, `mcp:auth:`.
 - No `any` in public signatures; no throwing strings.

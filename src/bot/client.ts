@@ -1,10 +1,8 @@
 /**
- * The bot gateway's typed clients.
+ * The bot's typed client for the guild session.
  *
- * Two narrow interfaces meet here: the guild session's internal routes (bot DO
- * to bot DO), and the gateway user's internal routes (bot to gateway), over the
- * `GATEWAY_USER` binding. Nothing in this file holds a database or a socket; it
- * is plumbing for the two objects that do.
+ * It is one narrow interface over the session object's internal routes. Nothing
+ * here holds a database or a socket; it is plumbing for the object that does.
  */
 
 import { Option, Schema } from "effect";
@@ -18,7 +16,6 @@ import {
 	McpLinkSchema,
 	McpProbeResponseSchema,
 	ModelOptionSchema,
-	ToolAccessSchema,
 	type GuildStatus,
 	type IntegrationOption,
 	type McpAuthCompleteResponse,
@@ -30,28 +27,8 @@ import {
 	type ProviderConnectRequest,
 	type ProviderConnectResponse,
 	type PublicLink,
-	type ToolAccess,
 } from "../session/models";
 
-/** A hosted MCP server as the gateway describes it to the bot. */
-export interface HostedServer {
-	id: string;
-	name: string;
-	title?: string;
-	enabled: boolean;
-	tools: ToolAccess;
-}
-
-const HostedServerSchema = Schema.Struct({
-	id: Schema.String,
-	name: Schema.String,
-	title: Schema.optional(Schema.String),
-	enabled: Schema.Boolean,
-	tools: ToolAccessSchema,
-});
-
-const ServerListSchema = Schema.Struct({ servers: Schema.Array(HostedServerSchema) });
-const GrantSchema = Schema.Struct({ ok: Schema.optional(Schema.Boolean), url: Schema.String, token: Schema.String });
 const LinkListSchema = Schema.Struct({ links: Schema.Array(McpLinkSchema) });
 const ConfigSchema = Schema.Struct({
 	ready: Schema.Boolean,
@@ -233,51 +210,5 @@ export class SessionClient {
 	}
 }
 
-/** A caller's Eryn-hosted MCP servers, and the grants the bot holds on them. */
-export class GatewayClient {
-	constructor(private readonly env: Env) {}
-
-	private stub(userId: string): DurableObjectStub {
-		return this.env.GATEWAY_USER.get(this.env.GATEWAY_USER.idFromName(userId));
-	}
-
-	private async post(path: string, body: unknown): Promise<unknown> {
-		const userId = (body as { userId: string }).userId;
-		const response = await this.stub(userId).fetch(
-			`https://gateway.internal${path}`,
-			withDeploy(this.env, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(body),
-			}),
-		);
-		const payload = (await response.json().catch(() => undefined)) as unknown;
-		if (!response.ok) throw botError(`the gateway returned HTTP ${response.status} for ${path}`);
-		return payload;
-	}
-
-	async servers(userId: string): Promise<HostedServer[]> {
-		const parsed = decode(ServerListSchema, await this.post("/servers", { userId }), "the gateway");
-		return [...parsed.servers];
-	}
-
-	async grant(
-		userId: string,
-		guildId: string,
-		mcpServerId: string,
-		tools: ToolAccess,
-	): Promise<{ url: string; token: string }> {
-		const parsed = decode(
-			GrantSchema,
-			await this.post("/grant", { userId, guildId, mcpServerId, tools }),
-			"the gateway",
-		);
-		return { url: parsed.url, token: parsed.token };
-	}
-
-	async revoke(userId: string, guildId: string, mcpServerId: string): Promise<void> {
-		await this.post("/revoke", { userId, guildId, mcpServerId });
-	}
-}
 
 export { describeError };

@@ -14,10 +14,7 @@ import { DiscordContextSchema } from "../discord/context";
 export const AccessLevelSchema = Schema.Literals(["none", "read", "write", "all"]);
 export type AccessLevel = typeof AccessLevelSchema.Type;
 
-/**
- * What a hosted MCP server exposes, and again (as a narrowing subset) what a
- * guild link is allowed to reach.
- */
+/** What tools a guild link is allowed to reach on an external MCP server. */
 export const ToolAccessSchema = Schema.Struct({
 	groups: Schema.Record(Schema.String, AccessLevelSchema),
 	tools: Schema.optional(
@@ -49,18 +46,22 @@ export const McpOAuthSchema = Schema.Struct({
 export type McpOAuth = typeof McpOAuthSchema.Type;
 
 /**
- * One MCP server a guild has linked: Eryn-hosted or external.
+ * One external MCP server a guild has linked.
  *
  * `token` is the bearer the agent presents and `oauth` is what keeps it alive.
- * Both are sealed at rest and never leave the guild object; the contract's
- * public `McpLink` is the same record without them.
+ * Both are sealed at rest and never leave the guild object; the public
+ * `McpLink` is the same record without them.
  */
 export const McpLinkSchema = Schema.Struct({
 	id: Schema.String,
-	kind: Schema.Literals(["eryn", "external"]),
 	name: Schema.String,
 	url: Schema.String,
-	mcpServerId: Schema.optional(Schema.String),
+	/**
+	 * Legacy marker from when Eryn hosted MCP servers itself. Such links point
+	 * at an endpoint that no longer exists and are ignored on read; new links
+	 * never set it.
+	 */
+	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
 	token: Schema.optional(Schema.String),
 	oauth: Schema.optional(McpOAuthSchema),
 	tools: ToolAccessSchema,
@@ -68,7 +69,7 @@ export const McpLinkSchema = Schema.Struct({
 });
 export type McpLink = typeof McpLinkSchema.Type;
 
-/** A link as the gateway may see it: no secret. */
+/** A link as a caller may see it: no secret. */
 export type PublicLink = Omit<McpLink, "token" | "oauth">;
 
 /** One tool an MCP server advertises, as a connection test reports it. */
@@ -322,7 +323,7 @@ export const McpAuthCompleteRequestSchema = Schema.Struct({
 	error: Schema.optional(Schema.String),
 });
 
-/** A guild's configuration, as the gateway hands it to a turn. */
+/** A guild's configuration, as the bot hands it to a turn. */
 export const GuildConfigSchema = Schema.Struct({
 	connections: Schema.Array(ProviderConnectionSchema),
 	model: Schema.String,
@@ -360,7 +361,7 @@ export const InterruptRequestSchema = Schema.Struct({
 });
 export type InterruptRequest = typeof InterruptRequestSchema.Type;
 
-/** The status the gateway reports for a guild without exposing any secret. */
+/** The status the bot reports for a guild without exposing any secret. */
 export interface GuildStatus {
 	ready: boolean;
 	model: string;

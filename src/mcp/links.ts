@@ -1,11 +1,9 @@
 /**
  * Linking MCP servers to a guild, including the sign-in half.
  *
- * A link is stored in the guild's object either way: Eryn-hosted servers get an
- * internally minted grant token (no browser involved), and external servers get
- * a bearer — supplied by an admin, or obtained through the server's own OAuth
- * flow. Keeping both behind the same record is what lets the agent, the test
- * command, and the host config treat every link the same.
+ * A link carries a bearer — supplied by an admin, or obtained through the
+ * server's own OAuth flow. Keeping both behind the same record is what lets the
+ * agent, the test command, and the host config treat every link the same.
  *
  * This module owns the rules around that record; the session object owns its
  * storage and its routes.
@@ -177,7 +175,6 @@ export async function finishAuthorization(
 	const scope = tokens.scope ?? pending.scope;
 	const link: McpLink = {
 		id: crypto.randomUUID(),
-		kind: "external",
 		name: pending.name,
 		url: pending.url,
 		token: tokens.accessToken,

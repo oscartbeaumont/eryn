@@ -15,12 +15,5 @@
       "@opencode/sdk/internal/host": ["./node_modules/@opencode/sdk/dist/internal/host.d.ts"]
     }
   },
-  "include": [
-    "src",
-    "packages/gateway/src",
-    "packages/bot/src",
-    "cloudflare.config.ts",
-    ".cloudflare/types"
-  ],
-  "exclude": ["packages/console"]
+  "include": ["src", "cloudflare.config.ts", ".cloudflare/types"]
 }

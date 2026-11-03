@@ -115,15 +115,19 @@ class GuildStoreImpl implements GuildStoreShape {
 		const links: McpLink[] = [];
 		for (const [key, sealed] of entries) {
 			const link = await this.open(sealed, McpLinkSchema);
-			if (link) links.push(link);
-			else log("session", `could not read link ${key}, ignoring it`);
+			if (!link) log("session", `could not read link ${key}, ignoring it`);
+			// A hosted link pointed at the MCP gateway, which is gone. Drop it from
+			// the view so the agent stops trying a URL that can never answer.
+			else if (link.kind === "eryn") continue;
+			else links.push(link);
 		}
 		return links.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
 	async getLink(id: string): Promise<McpLink | undefined> {
 		const sealed = await this.storage.get<Sealed>(KEYS.link + id);
-		return await this.open(sealed, McpLinkSchema);
+		const link = await this.open(sealed, McpLinkSchema);
+		return link?.kind === "eryn" ? undefined : link;
 	}
 
 	async putLink(link: McpLink): Promise<void> {
