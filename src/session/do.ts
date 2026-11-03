@@ -94,7 +94,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 		const layer = Layer.mergeAll(
 			GuildStore.layer(state.storage, env.ENCRYPTION_KEY),
 			base,
-			GuildAgent.layer(env, state.storage).pipe(Layer.provide(base)),
+			GuildAgent.layer(env, state.storage, this.guildId).pipe(Layer.provide(base)),
 		);
 		this.runtime = ManagedRuntime.make(layer);
 		log("session", `guild ${this.guildId} object created`);

@@ -38,11 +38,23 @@ export interface DiscordUser {
 export interface DiscordChannelRef {
 	id: string;
 	type: number;
+	guild_id?: string;
 	parent_id?: string;
 	name?: string;
 	topic?: string;
 	position?: number;
 	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
+}
+
+/** A message as a tool needs to see it. */
+export interface DiscordMessageView {
+	id: string;
+	channel_id: string;
+	content?: string;
+	timestamp?: string;
+	author?: { id?: string; username?: string; global_name?: string; bot?: boolean };
+	attachments?: { filename?: string; url?: string; content_type?: string; size?: number }[];
+	referenced_message?: { id?: string } | null;
 }
 
 /** The subset of a role this bot reads. Managed bot roles carry `tags.bot_id`. */
@@ -141,6 +153,24 @@ export interface InteractionMessageOptions {
 	components?: readonly DiscordComponent[];
 }
 
+function channelRef(value: unknown): DiscordChannelRef | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const result = value as Record<string, unknown>;
+	if (typeof result.id !== "string" || typeof result.type !== "number") return undefined;
+	return {
+		id: result.id,
+		type: result.type,
+		...(typeof result.guild_id === "string" ? { guild_id: result.guild_id } : {}),
+		...(typeof result.parent_id === "string" ? { parent_id: result.parent_id } : {}),
+		...(typeof result.name === "string" ? { name: result.name } : {}),
+		...(typeof result.topic === "string" ? { topic: result.topic } : {}),
+		...(typeof result.position === "number" ? { position: result.position } : {}),
+		...(result.thread_metadata && typeof result.thread_metadata === "object"
+			? { thread_metadata: result.thread_metadata as { archived?: boolean; auto_archive_duration?: number } }
+			: {}),
+	};
+}
+
 /**
  * A minimal Discord REST client. Responses are never echoed back in errors and
  * rate limits are retried a few times.
@@ -190,19 +220,32 @@ export function discordRest(token: string) {
 
 		/** A channel or thread, or undefined when the id does not exist. */
 		async channel(channelId: string): Promise<DiscordChannelRef | undefined> {
-			const result = await request<Record<string, unknown>>("GET", `/channels/${channelId}`);
-			if (!result || typeof result.id !== "string" || typeof result.type !== "number") return undefined;
-			return {
-				id: result.id,
-				type: result.type,
-				...(typeof result.parent_id === "string" ? { parent_id: result.parent_id } : {}),
-				...(typeof result.name === "string" ? { name: result.name } : {}),
-				...(typeof result.topic === "string" ? { topic: result.topic } : {}),
-				...(typeof result.position === "number" ? { position: result.position } : {}),
-				...(result.thread_metadata && typeof result.thread_metadata === "object"
-					? { thread_metadata: result.thread_metadata as { archived?: boolean } }
-					: {}),
-			};
+			return channelRef(await request<unknown>("GET", `/channels/${channelId}`));
+		},
+
+		/** Every channel the bot can see in a guild, excluding threads. */
+		async guildChannels(guildId: string): Promise<DiscordChannelRef[]> {
+			const result = await request<unknown[]>("GET", `/guilds/${guildId}/channels`);
+			return Array.isArray(result) ? result.map(channelRef).filter((value): value is DiscordChannelRef => value !== undefined) : [];
+		},
+
+		/** Active threads in a guild, which Discord lists separately from channels. */
+		async activeThreads(guildId: string): Promise<DiscordChannelRef[]> {
+			const result = await request<{ threads?: unknown[] }>("GET", `/guilds/${guildId}/threads/active`);
+			return Array.isArray(result?.threads)
+				? result.threads.map(channelRef).filter((value): value is DiscordChannelRef => value !== undefined)
+				: [];
+		},
+
+		/** Recent messages in a channel or thread, newest first. */
+		async channelMessages(
+			channelId: string,
+			options: { limit?: number; before?: string } = {},
+		): Promise<DiscordMessageView[]> {
+			const query = new URLSearchParams({ limit: String(Math.min(Math.max(options.limit ?? 20, 1), 100)) });
+			if (options.before) query.set("before", options.before);
+			const result = await request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
+			return Array.isArray(result) ? result : [];
 		},
 
 		async sendMessage(
@@ -242,6 +285,51 @@ export function discordRest(token: string) {
 			);
 			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
 			return { id: result.id };
+		},
+
+		/** Start a public thread in a channel, not attached to a message. */
+		async startThread(channelId: string, name: string): Promise<{ id: string }> {
+			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/threads`, {
+				name,
+				auto_archive_duration: 1_440,
+			});
+			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
+			return { id: result.id };
+		},
+
+		/** Archive or unarchive a thread. */
+		async setThreadArchived(threadId: string, archived: boolean, locked = false): Promise<void> {
+			await request<void>("PATCH", `/channels/${threadId}`, { archived, locked });
+		},
+
+		/** Follow a thread, so its messages stay available to the bot. */
+		async joinThread(threadId: string): Promise<void> {
+			await request<void>("PUT", `/channels/${threadId}/thread-members/@me`);
+		},
+
+		/** Stop following a thread. */
+		async leaveThread(threadId: string): Promise<void> {
+			await request<void>("DELETE", `/channels/${threadId}/thread-members/@me`);
+		},
+
+		async deleteMessage(channelId: string, messageId: string): Promise<void> {
+			await request<void>("DELETE", `/channels/${channelId}/messages/${messageId}`);
+		},
+
+		async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+			await request<void>("PUT", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
+		},
+
+		async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+			await request<void>("DELETE", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
+		},
+
+		async pinMessage(channelId: string, messageId: string): Promise<void> {
+			await request<void>("PUT", `/channels/${channelId}/pins/${messageId}`);
+		},
+
+		async unpinMessage(channelId: string, messageId: string): Promise<void> {
+			await request<void>("DELETE", `/channels/${channelId}/pins/${messageId}`);
 		},
 
 		async triggerTyping(channelId: string): Promise<void> {

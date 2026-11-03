@@ -26,6 +26,7 @@ import { workspacePlugin } from "../opencode/workspace";
 import { bytesToBase64 } from "../opencode/bytes";
 import { discordPlugin } from "../opencode/discord";
 import { agentInstructionsPlugin } from "../opencode/instructions";
+import { discordToolsPlugin } from "../opencode/discord-tools";
 import { mcpGuidancePlugin } from "../opencode/guidance";
 import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
@@ -451,6 +452,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		private readonly files: FileStore,
 		private readonly rest: DiscordRest,
 		private readonly turnTimeoutMs: number,
+		private readonly guildId: string,
 	) {}
 
 	// --- Host -----------------------------------------------------------------
@@ -504,6 +506,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				agentInstructionsPlugin(),
 				workspacePlugin(this.files),
 				discordPlugin(),
+				discordToolsPlugin(this.rest, this.guildId),
 				mcpeventsPlugin,
 			];
 			const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
@@ -1307,13 +1310,17 @@ class GuildAgentImpl implements GuildAgentShape {
 
 /** The guild's agent as a service. */
 export class GuildAgent extends Context.Service<GuildAgent, GuildAgentShape>()("eryn/bot/GuildAgent") {
-	static layer(env: Env, storage: DurableObjectStorage): Layer.Layer<GuildAgent, never, Workspace | DiscordApi> {
+	static layer(
+		env: Env,
+		storage: DurableObjectStorage,
+		guildId: string,
+	): Layer.Layer<GuildAgent, never, Workspace | DiscordApi> {
 		return Layer.effect(
 			this,
 			Effect.gen(function* () {
 				const workspace = yield* Workspace;
 				const rest = yield* DiscordApi;
-				return new GuildAgentImpl(env, storage, workspace, rest, TURN_TIMEOUT_MS);
+				return new GuildAgentImpl(env, storage, workspace, rest, TURN_TIMEOUT_MS, guildId);
 			}),
 		);
 	}
