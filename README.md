@@ -27,7 +27,8 @@ There is no web dashboard; setup happens in Discord.
 2. The person who added it gets a DM with a setup button. If that does not
    arrive, run `/eryn setup` in the server.
 3. Choose **Connect provider**, connect the provider, then pick a model from the
-   list Eryn shows next.
+   list Eryn shows next. OpenCode Go is available through the **OpenCode
+   Console** connection; it is not a separate provider.
 4. Mention `@eryn` in a channel to start a thread.
 
 Everything is a slash command:

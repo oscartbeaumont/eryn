@@ -466,6 +466,9 @@ async function setupProvider(
 			...(providers.length > shown.length
 				? [`Showing ${shown.length} of ${providers.length} in the list; use Search all providers for the rest.`]
 				: []),
+			...(providers.some((provider) => provider.id === "opencode")
+				? ["OpenCode Go models are included with the OpenCode Console connection."]
+				: []),
 		].join("\n"),
 		components,
 	);
@@ -1203,20 +1206,26 @@ async function searchProviders(
 	const answer = responder(ctx, interaction);
 	await answer.defer();
 	const needle = query.trim().toLowerCase();
+	const goQuery = /^(oc|opencode)\s*go$/.test(needle) || needle === "ocgo";
 	const providers = (await session.providers()).filter(
 		(provider) => provider.methods.some((method) => method.supported) || provider.connected,
 	);
 	const matches = providers
-		.filter(
-			(provider) =>
-				!needle ||
-				provider.id.toLowerCase().includes(needle) ||
-				provider.name.toLowerCase().includes(needle),
+		.filter((provider) =>
+			goQuery
+				? provider.id === "opencode"
+				: !needle ||
+					provider.id.toLowerCase().includes(needle) ||
+					provider.name.toLowerCase().includes(needle),
 		)
 		.sort((a, b) => providerRank(a) - providerRank(b) || a.name.localeCompare(b.name))
 		.slice(0, MAX_SELECT_OPTIONS);
 	if (!matches.length) {
-		await answer.reply(`No provider matches “${query.trim()}”. Try a shorter search.`);
+		await answer.reply(
+			`No provider matches “${query.trim()}”. Try a shorter search.${
+				goQuery ? " OpenCode Go is included with OpenCode Console, not a separate provider." : ""
+			}`,
+		);
 		return;
 	}
 	const options: DiscordSelectOption[] = matches.map((provider) => ({
@@ -1225,9 +1234,11 @@ async function searchProviders(
 		description: (provider.connected ? "connected" : provider.methods.map((method) => method.label).join(", ")).slice(0, 100),
 	}));
 	await answer.reply(
-		matches.length === MAX_SELECT_OPTIONS
-			? `Providers matching “${query.trim()}” (showing the first ${MAX_SELECT_OPTIONS})`
-			: `Providers matching “${query.trim()}”`,
+		goQuery
+			? "OpenCode Go is included with **OpenCode Console**. Pick that connection below."
+			: matches.length === MAX_SELECT_OPTIONS
+				? `Providers matching “${query.trim()}” (showing the first ${MAX_SELECT_OPTIONS})`
+				: `Providers matching “${query.trim()}”`,
 		[selectRow({ type: 3, custom_id: providerSelectId(dmGuildId), placeholder: "Pick a provider", options })],
 	);
 }

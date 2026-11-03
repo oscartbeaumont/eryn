@@ -605,13 +605,17 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async resolveModel(config: HostConfig): Promise<string> {
 		const provider = config.model.split("/")[0] ?? "";
-		const connected = config.connections.some((connection) => connection.integrationID === provider);
+		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
+		const free = /-free$/i.test(config.model);
 		// A `-free` model is the host's fallback rather than a choice worth
 		// keeping: it is the one that tends to return nothing, and the provider
 		// the guild connected has real models.
-		if (connected && !/-free$/i.test(config.model)) return config.model;
+		if (directlyConnected && !free) return config.model;
 
 		const models = await this.listModels(config).catch(() => [] as ModelOption[]);
+		// An integration can supply providers beyond its own id, such as
+		// OpenCode Console supplying OpenCode Go.
+		if (!free && models.some((entry) => entry.id === config.model && entry.connected)) return config.model;
 		const candidates = models.filter((entry) => entry.connected && entry.enabled);
 		const preferred = PREFERRED_MODELS.map((name) => candidates.find((entry) => entry.id.endsWith(`/${name}`))).find(
 			(entry) => entry !== undefined,
@@ -667,10 +671,33 @@ class GuildAgentImpl implements GuildAgentShape {
 		return this.modelCache;
 	}
 
-	/** The integrations that currently hold a credential. */
+	/**
+	 * The providers that are actually available.
+	 *
+	 * An integration connection can supply more than the provider it is named
+	 * after: OpenCode Console supplies both `opencode` and `opencode-go`. The
+	 * provider registry marks those as enabled and records the integration that
+	 * supplied them, which is the signal the model picker needs. A provider that
+	 * only has public free access is not counted until its integration is
+	 * connected.
+	 */
 	private async connectedProviders(host: OpenCodeWorkerd.Interface): Promise<Set<string>> {
-		const listed = await host.integration.list({ location: { directory: LOCATION } });
-		return new Set(listed.data.filter((entry) => entry.connections.length > 0).map((entry) => String(entry.id)));
+		const integrations = await host.integration
+			.list({ location: { directory: LOCATION } })
+			.catch(() => undefined);
+		const connected = new Set(
+			(integrations?.data ?? [])
+				.filter((entry) => entry.connections.length > 0)
+				.map((entry) => String(entry.id)),
+		);
+		const providers = await host.provider.list({ location: { directory: LOCATION } }).catch(() => undefined);
+		for (const provider of providers?.data ?? []) {
+			const suppliedBy = provider.integrationID;
+			if (provider.activation === "enabled" && suppliedBy && connected.has(String(suppliedBy))) {
+				connected.add(String(provider.id));
+			}
+		}
+		return connected;
 	}
 
 	// --- Provider sign-in -----------------------------------------------------
