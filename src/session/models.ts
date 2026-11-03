@@ -97,6 +97,8 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	/** Where to confirm completion, so the browser callback can say so. */
 	channelId: Schema.optional(Schema.String),
 	state: Schema.String,
+	/** The full authorization URL, for the short browser redirect. */
+	authorizationUrl: Schema.optional(Schema.String),
 	clientId: Schema.String,
 	clientSecret: Schema.optional(Schema.String),
 	tokenEndpoint: Schema.String,
@@ -118,6 +120,9 @@ export const McpAuthStatusSchema = Schema.Struct({
 	link: Schema.optional(PublicLinkSchema),
 });
 export type McpAuthStatus = typeof McpAuthStatusSchema.Type;
+
+export const McpAuthUrlResponseSchema = Schema.Struct({ url: Schema.String });
+export type McpAuthUrlResponse = typeof McpAuthUrlResponseSchema.Type;
 
 export const McpAuthStartResponseSchema = Schema.Struct({
 	ok: Schema.optional(Schema.Boolean),

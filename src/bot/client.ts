@@ -13,6 +13,7 @@ import {
 	McpAuthCompleteResponseSchema,
 	McpAuthStartResponseSchema,
 	McpAuthStatusSchema,
+	McpAuthUrlResponseSchema,
 	PublicLinkSchema,
 	McpProbeResponseSchema,
 	ModelOptionSchema,
@@ -180,6 +181,14 @@ export class SessionClient {
 			await this.post("/link/oauth/status", { guildId: this.guildId, attemptId }),
 			"the guild session",
 		);
+	}
+
+	async mcpAuthUrl(attemptId: string): Promise<string> {
+		return decode(
+			McpAuthUrlResponseSchema,
+			await this.post("/link/oauth/url", { guildId: this.guildId, attemptId }),
+			"the guild session",
+		).url;
 	}
 
 	/** Finish a sign-in from the browser callback or the "I've finished" button. */

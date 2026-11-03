@@ -530,6 +530,27 @@ export class BotSessionV5 extends DurableObject<Env> {
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ status: "failed", message: error.message }))));
 			}
 
+			/** Resolve a started sign-in to its full authorization URL. */
+			if (request.method === "POST" && url.pathname === "/link/oauth/url") {
+				const body = yield* readBody(McpAuthAttemptRequestSchema, request);
+				if (body instanceof Response) return body;
+				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
+				return yield* attempt(async () => {
+					const attemptRecord = await store.getAuthAttempt(body.attemptId);
+					if (!attemptRecord || !attemptRecord.authorizationUrl) {
+						return json({ error: "That sign-in is no longer available." }, 404);
+					}
+					if (attemptRecord.status !== "pending") {
+						return json({ error: "That sign-in is no longer pending." }, 404);
+					}
+					if (Date.now() - attemptRecord.createdAt > AUTH_TTL_MS) {
+						await store.putAuthAttempt({ ...attemptRecord, status: "failed", message: "That sign-in expired." });
+						return json({ error: "That sign-in expired." }, 404);
+					}
+					return json({ url: attemptRecord.authorizationUrl });
+				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 500))));
+			}
+
 			/**
 			 * Finish a sign-in with the code the browser brought back.
 			 *

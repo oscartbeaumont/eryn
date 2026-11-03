@@ -7,6 +7,8 @@
  * guild's session object, which this file only calls.
  */
 
+import { publicOrigin } from "../config";
+import { sign } from "../crypto";
 import { describeError } from "../errors";
 import type { DiscordCommand, DiscordCommandOption } from "../discord/api";
 import {
@@ -21,7 +23,7 @@ import {
 } from "../discord/components";
 import type { DiscordInteraction } from "../discord/socket";
 import { modalValues } from "../discord/socket";
-import { describeTools } from "../mcp/links";
+import { describeTools, MCP_START_PATH } from "../mcp/links";
 import type { IntegrationOption, McpLink, PublicLink } from "../session/models";
 import { SessionClient } from "./client";
 
@@ -1325,7 +1327,7 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 		);
 	}
 	if (customId === CID.mcpAddModal) {
-		return await guarded(ctx, interaction, "reply", async () => mcpAdd(ctx, interaction, session, values));
+		return await guarded(ctx, interaction, "reply", async () => mcpAdd(ctx, interaction, session, values, guildId));
 	}
 }
 
@@ -1334,6 +1336,7 @@ async function mcpAdd(
 	interaction: DiscordInteraction,
 	session: SessionClient,
 	values: Record<string, string>,
+	guildId: string,
 ): Promise<void> {
 	const answer = responder(ctx, interaction);
 	const url = values.url?.trim();
@@ -1368,17 +1371,23 @@ async function mcpAdd(
 				...(probe.scope ? { scope: probe.scope } : {}),
 			});
 			if (started.ok && started.url && started.attemptId) {
-				const buttons: DiscordButton[] = [];
-				if (started.url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", started.url));
-				buttons.push(actionButton("I've finished", CID.mcpAuthCheck(started.attemptId), 3));
+				const secret = ctx.env.SESSION_SECRET?.trim();
+				const token = secret ? await sign({ guildId, attemptId: started.attemptId }, secret) : undefined;
+				const signInUrl = token
+					? `${publicOrigin(ctx.env)}${MCP_START_PATH}/${token}`
+					: started.url;
 				await answer.reply(
 					[
 						`**${name}** needs you to sign in before Eryn can use it.`,
-						...(started.url.length > MAX_LINK_URL ? ["", started.url] : []),
 						"",
 						"Open the link, approve the access, then press **I've finished**. The sign-in finishes in your browser, so this message can stay here.",
 					].join("\n"),
-					[buttonRow(buttons)],
+					[
+						buttonRow([
+							linkButton("Sign in", signInUrl),
+							actionButton("I've finished", CID.mcpAuthCheck(started.attemptId), 3),
+						]),
+					],
 				);
 				return;
 			}

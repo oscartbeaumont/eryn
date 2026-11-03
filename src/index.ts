@@ -17,7 +17,7 @@ import { landingPage } from "./landing";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
-import { MCP_CALLBACK_PATH } from "./mcp/links";
+import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/links";
 import { BotSessionV5 } from "./session/do";
 
 export { BotGatewayV5, BotSessionV5 };
@@ -79,6 +79,32 @@ export async function handle(request: Request): Promise<Response | undefined> {
 	// not decode the bundled one in a Durable Object.
 	if ((request.method === "GET" || request.method === "HEAD") && isCatalogueRequest(url.pathname)) {
 		return await catalogueResponse(request);
+	}
+
+	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) {
+		if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
+		const secret = env.SESSION_SECRET?.trim();
+		const token = url.pathname.slice(MCP_START_PATH.length + 1);
+		const pointer = secret ? await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret) : undefined;
+		const guildId = typeof pointer?.guildId === "string" ? pointer.guildId : undefined;
+		const attemptId = typeof pointer?.attemptId === "string" ? pointer.attemptId : undefined;
+		if (!guildId || !attemptId) {
+			return page(
+				"Sign-in link not valid",
+				"This link is not valid any more. Start the sign-in again from Discord.",
+				400,
+			);
+		}
+		try {
+			const target = await new SessionClient(env, guildId).mcpAuthUrl(attemptId);
+			return Response.redirect(target, 302);
+		} catch {
+			return page(
+				"Sign-in link expired",
+				"This sign-in is no longer available. Start it again from Discord.",
+				400,
+			);
+		}
 	}
 
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;

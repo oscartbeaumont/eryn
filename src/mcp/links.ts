@@ -27,6 +27,8 @@ import {
 
 /** Where an authorization server sends the browser back to. */
 export const MCP_CALLBACK_PATH = "/api/bot/mcp/callback";
+/** Short browser hop that forwards to a long authorization URL. */
+export const MCP_START_PATH = "/api/bot/mcp/start";
 
 /** A started sign-in is valid for this long, which is how long a browser tab has. */
 export const AUTH_TTL_MS = 15 * 60_000;
@@ -96,6 +98,7 @@ export async function beginAuthorization(
 		url: input.url,
 		...(input.channelId ? { channelId: input.channelId } : {}),
 		state,
+		authorizationUrl: url,
 		clientId: client.clientId,
 		...(client.clientSecret ? { clientSecret: client.clientSecret } : {}),
 		tokenEndpoint: discovery.tokenEndpoint,
