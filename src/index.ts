@@ -13,6 +13,7 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
 import { log } from "./config";
+import { landingPage } from "./landing";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
 import { MCP_CALLBACK_PATH } from "./mcp/links";
@@ -63,6 +64,11 @@ export async function wake(
  */
 export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
+	// The public origin is a landing page, since the bot's whole UI is Discord.
+	if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
+		return landingPage();
+	}
+
 	// The filtered models.dev catalogue an embedded host points at, so it does
 	// not decode the bundled one in a Durable Object.
 	if (isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
