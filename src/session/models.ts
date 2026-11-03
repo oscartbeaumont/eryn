@@ -335,7 +335,7 @@ export const PromptRequestSchema = Schema.Struct({
 	threadId: Schema.String,
 	title: Schema.optional(Schema.String),
 	text: Schema.String,
-	/** The name the speaker goes by, so the agent knows who it is answering. */
+	/** The speaker label: name, handle, and Discord id, so the agent knows who is talking. */
 	author: Schema.optional(Schema.String),
 	/** Where the request came from in Discord, recorded on the session. */
 	discord: Schema.optional(DiscordContextSchema),
