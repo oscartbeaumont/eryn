@@ -25,17 +25,16 @@ There is no web dashboard; setup happens in Discord.
 
 1. Add Eryn to a server from the hosted instance.
 2. The person who added it gets a DM with a setup button. If that does not
-   arrive, run `/eryn setup provider` in the server.
-3. Connect a provider, then choose a model with `/eryn setup model`.
+   arrive, run `/eryn setup` in the server.
+3. Choose **Connect provider**, connect the provider, then pick a model from the
+   list Eryn shows next.
 4. Mention `@eryn` in a channel to start a thread.
 
 Everything is a slash command:
 
 | Command | Purpose |
 | --- | --- |
-| `/eryn setup provider` | Connect an inference provider with a key or OAuth |
-| `/eryn setup model` | Choose the model for this server |
-| `/eryn setup status` | Show what this server has configured |
+| `/eryn setup` | Setup menu: provider, model, MCP servers, and current status |
 | `/eryn mcp add` | Add and test an external MCP server |
 | `/eryn mcp list` | List linked MCP servers |
 | `/eryn mcp test` | Check that linked servers still respond |
@@ -48,9 +47,10 @@ available to everyone.
 
 ## MCP servers
 
-`/eryn mcp add` accepts an external MCP server's streamable HTTP URL. Eryn tests
-it before saving it: it calls `initialize` and `tools/list`, reports the tools it
-found, and lets you repeat the test later.
+Open the setup menu with `/eryn setup` and choose **MCP servers**, or use
+`/eryn mcp add` directly. Both accept an external MCP server's streamable HTTP
+URL. Eryn tests it before saving it: it calls `initialize` and `tools/list`,
+reports the tools it found, and lets you repeat the test later.
 
 If the server asks for OAuth, Eryn handles the sign-in and stores the access and
 refresh tokens with the link. A server that wants a static bearer token can be

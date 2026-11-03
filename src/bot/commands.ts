@@ -67,6 +67,13 @@ function providerRank(provider: { id: string; connected: boolean }): number {
 
 /** The custom_id codec for every component and modal this flow raises. */
 export const CID = {
+	setupMenu: "setup:menu",
+	setupProviderButton: "setup:menu:provider",
+	setupModelButton: "setup:menu:model",
+	setupMcpButton: "setup:menu:mcp",
+	mcpMenuAdd: "setup:mcp:add",
+	mcpMenuTest: "setup:mcp:test",
+	mcpMenuRemove: "setup:mcp:remove",
 	providerSelect: "setup:provider",
 	providerSearch: "setup:search",
 	method: (integrationID: string, methodID: string) => clip(`setup:method:${integrationID}:${methodID}`),
@@ -121,6 +128,24 @@ function oauthCheckId(guildId: string | undefined, integrationID: string, attemp
 		: CID.oauthCheck(integrationID, attemptID);
 }
 
+/** The setup menu and the buttons that open each part of it. */
+function setupActionId(action: "provider" | "model" | "mcp", guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:menu:${action}`) : `${CID.setupMenu}:${action}`;
+}
+
+/** Model components carry the install DM's guild id the same way. */
+function modelSelectId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model`) : CID.modelSelect;
+}
+
+function modelManualId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model:manual`) : CID.modelManual;
+}
+
+function modelModalId(guildId?: string): string {
+	return guildId ? clip(`${INSTALL_PREFIX}${guildId}:model:modal`) : CID.modelModal;
+}
+
 /** The world the command handlers read from. */
 export interface CommandContext {
 	readonly env: Env;
@@ -151,13 +176,8 @@ export function erynCommand(): DiscordCommand {
 		options: [
 			{
 				name: "setup",
-				description: "Connect a provider or choose the model Eryn runs",
-				type: 2,
-				options: [
-					{ name: "provider", description: "Connect an inference provider for this server", type: 1 },
-					{ name: "model", description: "Choose the model Eryn runs", type: 1 },
-					{ name: "status", description: "Show this server's Eryn setup", type: 1 },
-				],
+				description: "Open Eryn's setup menu",
+				type: 1,
 			},
 			{
 				name: "mcp",
@@ -336,27 +356,14 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 	const session = ctx.session(guildId);
 
 	switch (path) {
+		case "setup":
+		case "setup:status":
+			return await guarded(ctx, interaction, "reply", () => setupMenu(ctx, interaction, session));
+		// Old clients may still send the pre-menu subcommands.
 		case "setup:provider":
 			return await guarded(ctx, interaction, "reply", () => setupProvider(ctx, interaction, session));
 		case "setup:model":
 			return await guarded(ctx, interaction, "reply", () => setupModel(ctx, interaction, session));
-		case "setup:status":
-			return await guarded(ctx, interaction, "reply", async () => {
-				await answer.defer();
-				const status = await session.config();
-				const providers = status.providers.length
-					? status.providers.map((provider) => `• ${provider.integrationID}`).join("\n")
-					: "none";
-				const links = status.links.length ? status.links.map((link) => `• ${link.name}`).join("\n") : "none";
-				await answer.reply(
-					[
-						status.ready ? "**Eryn is ready here.**" : "**Eryn is not set up here yet.** Connect a provider with `/eryn setup provider`.",
-						`Model: \`${status.model}\``,
-						`Providers:\n${providers}`,
-						`MCP servers:\n${links}`,
-					].join("\n"),
-				);
-			});
 		case "mcp:add": {
 			const first = sub && "options" in sub ? sub.options?.[0] : undefined;
 			const url = typeof first?.value === "string" ? first.value : undefined;
@@ -375,18 +382,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		case "mcp:test":
 			return await guarded(ctx, interaction, "reply", () => testAllLinks(ctx, interaction, session));
 		case "mcp:remove":
-			return await guarded(ctx, interaction, "reply", async () => {
-				await answer.defer();
-				const links = await session.links();
-				if (!links.length) {
-					await answer.reply("No MCP servers are linked to this server.");
-					return;
-				}
-				await answer.reply(
-					"Which linked MCP server should I remove?",
-					[selectRow({ type: 3, custom_id: CID.mcpRemoveSelect, placeholder: "Pick a server", options: linkOptions(links) })],
-				);
-			});
+			return await guarded(ctx, interaction, "reply", () => promptRemoveMcp(ctx, interaction, session));
 		case "stop":
 			return await guarded(ctx, interaction, "reply", async () => {
 				const channelId = interaction.channel_id;
@@ -437,7 +433,64 @@ async function setupProvider(
 	);
 }
 
-async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, session: SessionClient): Promise<void> {
+async function setupMenu(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	dmGuildId?: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const status = await session.config().catch(() => undefined);
+	const providers = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";
+	const links = status?.links.length ?? 0;
+	const lines = status?.ready
+		? [
+				"**Eryn is ready here.**",
+				`Model: \`${status.model}\``,
+				`Providers: ${providers}`,
+				`MCP servers: ${links ? `${links} linked` : "none"}`,
+			]
+		: [
+				"**Eryn is not set up here yet.**",
+				"Connect an inference provider to get started.",
+				...(links ? [`MCP servers: ${links} linked`] : []),
+			];
+	const buttons: DiscordButton[] = [
+		actionButton(
+			status?.ready ? "Change provider" : "Connect provider",
+			setupActionId("provider", dmGuildId),
+			status?.ready ? 2 : 1,
+		),
+	];
+	if (status?.ready) {
+		buttons.push(actionButton("Choose model", setupActionId("model", dmGuildId), 2));
+	}
+	if (!dmGuildId) {
+		buttons.push(actionButton("MCP servers", setupActionId("mcp", dmGuildId), 2));
+	}
+	await answer.reply(lines.join("\n"), [buttonRow(buttons)]);
+}
+
+async function setupMcp(ctx: CommandContext, interaction: DiscordInteraction, session: SessionClient): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const links = await session.links();
+	const buttons: DiscordButton[] = [actionButton("Link a server", CID.mcpMenuAdd, 1)];
+	if (links.length) {
+		buttons.push(actionButton("Test all", CID.mcpMenuTest, 2));
+		buttons.push(actionButton("Remove", CID.mcpMenuRemove, 3));
+	}
+	buttons.push(actionButton("Back", CID.setupMenu, 2));
+	await answer.reply(formatLinks(links), [buttonRow(buttons)]);
+}
+
+async function setupModel(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	dmGuildId?: string,
+): Promise<void> {
 	const answer = responder(ctx, interaction);
 	await answer.defer();
 	// Only models from a connected provider can run; offering the rest is how a
@@ -447,7 +500,7 @@ async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, 
 		const status = await session.config().catch(() => undefined);
 		const connected = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";
 		await answer.reply(
-			`I could not read a model catalogue yet. Connected providers: **${connected}**. If that looks right, try again in a moment; otherwise reconnect the provider with \`/eryn setup provider\`.`,
+			`I could not read a model catalogue yet. Connected providers: **${connected}**. If that looks right, try again in a moment; otherwise reconnect the provider with \`/eryn setup\`.`,
 		);
 		return;
 	}
@@ -457,8 +510,41 @@ async function setupModel(ctx: CommandContext, interaction: DiscordInteraction, 
 		description: `${model.provider} · ${model.status}`.slice(0, 100),
 	}));
 	await answer.reply("Which model should Eryn run here?", [
-		selectRow({ type: 3, custom_id: CID.modelSelect, placeholder: "Pick a model", options }),
-		buttonRow([actionButton("Enter a model reference", CID.modelManual)]),
+		selectRow({ type: 3, custom_id: modelSelectId(dmGuildId), placeholder: "Pick a model", options }),
+		buttonRow([actionButton("Enter a model reference", modelManualId(dmGuildId))]),
+	]);
+}
+
+async function selectModel(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	model: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	if (!model) {
+		await answer.reply("No model was selected.");
+		return;
+	}
+	await session.setModel(model);
+	await answer.reply(`Model set to \`${model}\`. Mention @eryn in a channel to start.`);
+}
+
+async function promptRemoveMcp(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const links = await session.links();
+	if (!links.length) {
+		await answer.reply("No MCP servers are linked to this server.");
+		return;
+	}
+	await answer.reply("Which linked MCP server should I remove?", [
+		selectRow({ type: 3, custom_id: CID.mcpRemoveSelect, placeholder: "Pick a server", options: linkOptions(links) }),
 	]);
 }
 
@@ -513,9 +599,9 @@ function mcpAddModal(url?: string): DiscordModal {
 	};
 }
 
-function modelModal(): DiscordModal {
+function modelModal(dmGuildId?: string): DiscordModal {
 	return {
-		custom_id: CID.modelModal,
+		custom_id: modelModalId(dmGuildId),
 		title: "Choose a model",
 		components: [
 			{
@@ -618,8 +704,27 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 		const dmGuildId = parts.shift() ?? "";
 		const rest = parts.join(":");
 		const session = ctx.session(dmGuildId);
-		if (!rest) {
-			return await guarded(ctx, interaction, "reply", () => setupProvider(ctx, interaction, session, dmGuildId));
+		if (!rest || rest === "menu") {
+			return await guarded(ctx, interaction, "update", () => setupMenu(ctx, interaction, session, dmGuildId));
+		}
+		if (rest === "menu:provider") {
+			return await guarded(ctx, interaction, "update", () => setupProvider(ctx, interaction, session, dmGuildId));
+		}
+		if (rest === "menu:model") {
+			return await guarded(ctx, interaction, "update", () => setupModel(ctx, interaction, session, dmGuildId));
+		}
+		if (rest === "menu:mcp") {
+			await responder(ctx, interaction).update("Manage MCP servers from the server with `/eryn setup`.");
+			return;
+		}
+		if (rest === "model") {
+			return await guarded(ctx, interaction, "update", () =>
+				selectModel(ctx, interaction, session, interaction.data?.values?.[0] ?? ""),
+			);
+		}
+		if (rest === "model:manual") {
+			await responder(ctx, interaction).modal(modelModal(dmGuildId));
+			return;
 		}
 		if (rest === "provider") {
 			return await guarded(ctx, interaction, "update", () =>
@@ -655,11 +760,11 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 					action: "status",
 				});
 				const status = result.status?.status ?? "pending";
-				await answer.update(
-					status === "complete"
-						? `**${integrationID} is connected.** Eryn will use it on the next turn.`
-						: `Sign-in status: **${status}**`,
-				);
+				if (status === "complete") {
+					await setupModel(ctx, interaction, session, dmGuildId);
+				} else {
+					await answer.update(`Sign-in status: **${status}**`);
+				}
 			});
 		}
 		return;
@@ -671,6 +776,28 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 	const session = ctx.session(guildId);
 	const values = interaction.data?.values ?? [];
 
+	if (customId === CID.setupMenu) {
+		return await guarded(ctx, interaction, "update", () => setupMenu(ctx, interaction, session));
+	}
+	if (customId === CID.setupProviderButton) {
+		return await guarded(ctx, interaction, "update", () => setupProvider(ctx, interaction, session));
+	}
+	if (customId === CID.setupModelButton) {
+		return await guarded(ctx, interaction, "update", () => setupModel(ctx, interaction, session));
+	}
+	if (customId === CID.setupMcpButton) {
+		return await guarded(ctx, interaction, "update", () => setupMcp(ctx, interaction, session));
+	}
+	if (customId === CID.mcpMenuAdd) {
+		await responder(ctx, interaction).modal(mcpAddModal());
+		return;
+	}
+	if (customId === CID.mcpMenuTest) {
+		return await guarded(ctx, interaction, "update", () => testAllLinks(ctx, interaction, session));
+	}
+	if (customId === CID.mcpMenuRemove) {
+		return await guarded(ctx, interaction, "update", () => promptRemoveMcp(ctx, interaction, session));
+	}
 	if (customId === CID.providerSelect) {
 		return await guarded(ctx, interaction, "update", () =>
 			pickProviderMethod(ctx, interaction, session, values[0] ?? ""),
@@ -706,20 +833,19 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 				action: "status",
 			});
 			const status = result.status?.status ?? "pending";
-			await answer.update(
-				status === "complete"
-					? `**${integrationID} is connected.** Eryn will use it on the next turn.`
-					: `Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}`,
-			);
+			if (status === "complete") {
+				await setupModel(ctx, interaction, session);
+			} else {
+				await answer.update(
+					`Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}`,
+				);
+			}
 		});
 	}
 	if (customId === CID.modelSelect) {
-		const model = values[0] ?? "";
-		return await guarded(ctx, interaction, "update", async () => {
-			await responder(ctx, interaction).defer();
-			await session.setModel(model);
-			await responder(ctx, interaction).update(`Model set to \`${model}\`.`);
-		});
+		return await guarded(ctx, interaction, "update", () =>
+			selectModel(ctx, interaction, session, values[0] ?? ""),
+		);
 	}
 	if (customId === CID.modelManual) {
 		await responder(ctx, interaction).modal(modelModal());
@@ -910,11 +1036,11 @@ async function completeCode(
 		action: "complete",
 		code: trimmed,
 	});
-	await answer.reply(
-		result.error
-			? `Could not finish **${integrationID}**: ${result.error}`
-			: `**${integrationID} is connected.** Eryn will use it on the next turn.`,
-	);
+	if (result.error) {
+		await answer.reply(`Could not finish **${integrationID}**: ${result.error}`);
+		return;
+	}
+	await setupModel(ctx, interaction, session, dmGuildId);
 }
 
 async function handleModal(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
@@ -940,6 +1066,11 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 				completeCode(ctx, interaction, session, rest.slice("code:".length), values.code ?? "", dmGuildId),
 			);
 		}
+		if (rest === "model:modal") {
+			return await guarded(ctx, interaction, "reply", () =>
+				selectModel(ctx, interaction, session, values.model?.trim() ?? ""),
+			);
+		}
 		if (!rest.startsWith("key:")) return;
 		const integrationID = rest.slice("key:".length);
 		return await guarded(ctx, interaction, "reply", async () => {
@@ -949,11 +1080,11 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 				return;
 			}
 			const result = await session.providerConnect({ guildId: dmGuildId, integrationID, key, methodID: "key" });
-			await responder(ctx, interaction).reply(
-				result.error
-					? `Could not connect **${integrationID}**: ${result.error}`
-					: `**${integrationID} is connected.** Eryn will use it on the next turn.`,
-			);
+			if (result.error) {
+				await responder(ctx, interaction).reply(`Could not connect **${integrationID}**: ${result.error}`);
+				return;
+			}
+			await setupModel(ctx, interaction, session, dmGuildId);
 		});
 	}
 
@@ -972,9 +1103,11 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 				return;
 			}
 			const result = await session.providerConnect({ guildId, integrationID, key, methodID: "key" });
-			await responder(ctx, interaction).reply(
-				result.error ? `Could not connect **${integrationID}**: ${result.error}` : `**${integrationID} is connected.** Eryn will use it on the next turn.`,
-			);
+			if (result.error) {
+				await responder(ctx, interaction).reply(`Could not connect **${integrationID}**: ${result.error}`);
+				return;
+			}
+			await setupModel(ctx, interaction, session);
 		});
 	}
 	if (customId === CID.providerSearch) {
@@ -988,15 +1121,9 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 		);
 	}
 	if (customId === CID.modelModal) {
-		const model = values.model?.trim();
-		return await guarded(ctx, interaction, "reply", async () => {
-			if (!model) {
-				await responder(ctx, interaction).reply("No model was provided.");
-				return;
-			}
-			await session.setModel(model);
-			await responder(ctx, interaction).reply(`Model set to \`${model}\`.`);
-		});
+		return await guarded(ctx, interaction, "reply", () =>
+			selectModel(ctx, interaction, session, values.model?.trim() ?? ""),
+		);
 	}
 	if (customId === CID.mcpAddModal) {
 		return await guarded(ctx, interaction, "reply", async () => mcpAdd(ctx, interaction, session, values));
@@ -1213,11 +1340,8 @@ function hostOf(url: string): string {
 function helpText(): string {
 	return [
 		"**Eryn setup**",
-		"• `/eryn setup provider` — connect an inference provider for this server",
-		"• `/eryn setup model` — choose which model Eryn runs",
-		"• `/eryn setup status` — what this server has configured",
-		"• `/eryn mcp add` — add and test an external MCP server",
-		"• `/eryn mcp test` / `list` / `remove` — manage linked MCP servers",
+		"• `/eryn setup` — providers, models, MCP servers, and current status",
+		"• `/eryn mcp` — shortcuts for linked MCP servers",
 		"• `/eryn stop` — stop the run in this thread",
 	].join("\n");
 }
