@@ -45,6 +45,14 @@ import {
 const LOCATION = "/eryn";
 const TURN_TIMEOUT_MS = 900_000;
 
+/**
+ * Integrations that supply provider ids other than their own. The catalogue
+ * filter has to keep those providers' models, or the host never sees them.
+ */
+const INTEGRATION_PROVIDERS: Record<string, readonly string[]> = {
+	opencode: ["opencode-go"],
+};
+
 /** A Discord attachment larger than this is skipped rather than decoded in the isolate. */
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 /** Image types the providers accept as prompt files. */
@@ -478,6 +486,12 @@ class GuildAgentImpl implements GuildAgentShape {
 				mcpeventsPlugin,
 			];
 
+			const catalogueProviders = new Set(config.connections.map((connection) => connection.integrationID));
+			for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
+				if (!catalogueProviders.has(integrationID)) continue;
+				for (const providerID of providerIDs) catalogueProviders.add(providerID);
+			}
+
 			const promise = createHost({
 				storage: this.storage,
 				// `experimental.schedules` gives Sessions a durable schedule table.
@@ -490,9 +504,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				models: {
 					snapshot: false,
 					fetch: true,
-					url: `${publicOrigin(this.env)}${CATALOGUE_PATH}/${[
-						...new Set(config.connections.map((connection) => connection.integrationID)),
-					].join(",")}`,
+					url: `${publicOrigin(this.env)}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
 				},
 				config: {
 					model: config.model,
