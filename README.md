@@ -63,8 +63,8 @@ eryn/
 
 | Durable Object | Name | Holds |
 | --- | --- | --- |
-| `BotGateway` | `bot` | the one Discord socket, slash commands, threads, the install DM |
-| `BotSession` | guild id | OpenCode host, provider keys, MCP links, the virtual filesystem |
+| `BotGatewayV5` | `bot` | the one Discord socket, slash commands, threads, the install DM |
+| `BotSessionV5` | guild id | OpenCode host, provider keys, MCP links, the virtual filesystem |
 
 One Worker composes both objects. Nothing else is required.
 
@@ -105,7 +105,7 @@ That makes a deploy take effect within a second or two, with no renames:
 ```sh
 pnpm run deploy
 curl -s https://eryn.otbeaumont.me/health
-# {"ok":true,"deploy":"<worker deploy>","bot":{"connected":true,"deploy":"<bot object deploy>"}}
+# {"ok":true,"service":"eryn","deploy":"<worker deploy>","bot":{"connected":true,"deploy":"<bot object deploy>","restart":false}}
 ```
 
 `deploy` and `bot.deploy` matching means the objects are running the code you
@@ -122,8 +122,8 @@ DISCORD_KEEPALIVE_SECONDS     the bot socket's keepalive alarm interval
 DISCORD_TURN_TIMEOUT_SECONDS  how long one turn may run
 ```
 
-Credentials are sealed with AES-GCM under `ENCRYPTION_KEY`; only a key's first
-characters are ever in the clear.
+Credentials are sealed with AES-GCM under `ENCRYPTION_KEY`; a key is never
+sent back out of the guild object.
 
 ## Known limits
 

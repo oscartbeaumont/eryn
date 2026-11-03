@@ -42,9 +42,6 @@ export interface GuildStoreShape {
 	getAuthAttempt(id: string): Promise<PendingMcpAuth | undefined>;
 	putAuthAttempt(attempt: PendingMcpAuth): Promise<void>;
 	removeAuthAttempt(id: string): Promise<void>;
-	sessionFor(threadId: string): Promise<string | undefined>;
-	putSession(threadId: string, sessionID: string): Promise<void>;
-	clearSession(threadId: string): Promise<void>;
 	putPendingOAuth(pending: PendingOAuth): Promise<void>;
 	pendingOAuth(): Promise<PendingOAuth | undefined>;
 	clearPendingOAuth(): Promise<void>;
@@ -115,11 +112,17 @@ class GuildStoreImpl implements GuildStoreShape {
 		const links: McpLink[] = [];
 		for (const [key, sealed] of entries) {
 			const link = await this.open(sealed, McpLinkSchema);
-			if (!link) log("session", `could not read link ${key}, ignoring it`);
-			// A hosted link pointed at the MCP gateway, which is gone. Drop it from
-			// the view so the agent stops trying a URL that can never answer.
-			else if (link.kind === "eryn") continue;
-			else links.push(link);
+			if (!link) {
+				log("session", `could not read link ${key}, ignoring it`);
+				continue;
+			}
+			// A hosted link pointed at the MCP gateway, which is gone. Delete it once
+			// instead of carrying it forever.
+			if (link.kind === "eryn") {
+				await this.storage.delete(key);
+				continue;
+			}
+			links.push(link);
 		}
 		return links.sort((a, b) => a.createdAt - b.createdAt);
 	}
@@ -127,7 +130,11 @@ class GuildStoreImpl implements GuildStoreShape {
 	async getLink(id: string): Promise<McpLink | undefined> {
 		const sealed = await this.storage.get<Sealed>(KEYS.link + id);
 		const link = await this.open(sealed, McpLinkSchema);
-		return link?.kind === "eryn" ? undefined : link;
+		if (link?.kind === "eryn") {
+			await this.storage.delete(KEYS.link + id);
+			return undefined;
+		}
+		return link;
 	}
 
 	async putLink(link: McpLink): Promise<void> {
@@ -159,19 +166,6 @@ class GuildStoreImpl implements GuildStoreShape {
 
 	async removeAuthAttempt(id: string): Promise<void> {
 		await this.storage.delete(KEYS.mcpAuth + id);
-	}
-
-	async sessionFor(threadId: string): Promise<string | undefined> {
-		const stored = await this.storage.get<unknown>(KEYS.session + threadId);
-		return typeof stored === "string" ? stored : undefined;
-	}
-
-	async putSession(threadId: string, sessionID: string): Promise<void> {
-		await this.storage.put(KEYS.session + threadId, sessionID);
-	}
-
-	async clearSession(threadId: string): Promise<void> {
-		await this.storage.delete(KEYS.session + threadId);
 	}
 
 	async putPendingOAuth(pending: PendingOAuth): Promise<void> {

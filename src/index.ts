@@ -43,12 +43,10 @@ export async function wake(
 
 	let state = await call().catch(() => undefined);
 	// A pending restart means the object resets into the new deploy a second from
-	// now, and the replacement starts with no socket. Keep poking for a few
-	// seconds: the call that lands after the reset is what makes it connect. The
-	// reset can be delayed, so one extra poke is not enough to rely on. The first
-	// call can also be the one the reset kills, which leaves no state to read —
-	// that is a reason to poke again, not to give up.
-	for (let attempt = 0; attempt < 10 && (!state || state.restart || !state.connected); attempt++) {
+	// now. Keep poking briefly so the replacement is woken, but do not multiply
+	// every anonymous /health request into a ten-second stream of DO calls when
+	// the bot is simply disconnected.
+	for (let attempt = 0; attempt < 3 && (!state || state.restart); attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		state = (await call().catch(() => undefined)) ?? state;
 	}
@@ -59,8 +57,8 @@ export async function wake(
 /**
  * Handle the Worker's own routes.
  *
- * The external MCP sign-in callback returns `undefined` for everything else, so
- * the Worker can fall through to the bot's health check or a 404.
+ * The external MCP sign-in callback and catalogue return `undefined` for
+ * everything else, so the Worker can fall through to the health check or a 404.
  */
 export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
@@ -71,7 +69,9 @@ export async function handle(request: Request): Promise<Response | undefined> {
 
 	// The filtered models.dev catalogue an embedded host points at, so it does
 	// not decode the bundled one in a Durable Object.
-	if (isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
+	if ((request.method === "GET" || request.method === "HEAD") && isCatalogueRequest(url.pathname)) {
+		return await catalogueResponse(request);
+	}
 
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
 	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);

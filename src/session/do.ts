@@ -13,7 +13,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 
-import { DEFAULT_MODEL, isValidModel, log } from "../config";
+import { isValidModel, log } from "../config";
 import { DEPLOY_HEADER, currentDeploy } from "../deploy";
 import { BotError, ParseError, describeError } from "../errors";
 import { DiscordApi, type DiscordRest } from "../discord/api";
@@ -136,7 +136,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 		// The signal is in memory: an abort discards storage writes, so a
 		// persisted marker would survive the restart and loop.
 		if (this.restartPending) {
-			if (this.inFlight > 0) {
+			if (this.inFlight > 0 || this.scheduleBusy()) {
 				// A turn is still running. Restarting now would drop the reply, so wait
 				// for it to finish and check again.
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);
@@ -233,10 +233,11 @@ export class BotSessionV5 extends DurableObject<Env> {
 			const url = new URL(request.url);
 
 			/** Everything the host needs, read once from this guild's own storage. */
-			const loadConfig = async (): Promise<HostConfig> => {
+			const loadConfig = async (refresh = false): Promise<HostConfig> => {
 				const settings = await store.settings();
 				const connections = await store.providers();
-				const links = await refreshLinks(store, await store.links());
+				const stored = await store.links();
+				const links = refresh ? await refreshLinks(store, stored) : stored;
 				return { connections, model: settings.model, links };
 			};
 
@@ -278,7 +279,6 @@ export class BotSessionV5 extends DurableObject<Env> {
 						providers: connections.map((connection) => ({
 							integrationID: connection.integrationID,
 							method: connection.method,
-							...(connection.key ? { prefix: connection.key.slice(0, 8) } : {}),
 						})),
 						links: links.map(publicLink),
 					});
@@ -567,7 +567,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 			 */
 			if (request.method === "POST" && url.pathname === "/schedules/tick") {
 				return yield* attempt(async () => {
-					const stored = await loadConfig();
+					const stored = await loadConfig(true);
 					if (stored.connections.length === 0) return json({ ok: true });
 					await agent.ensureHost(stored);
 					// The runner ticks on its own fiber as soon as the host is up. Give
@@ -583,12 +583,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 				if (body instanceof Response) return body;
 				if (guildId && body.guildId !== guildId) return json({ error: "guild mismatch" }, 403);
 				return yield* attempt(async () => {
-					const stored = await loadConfig();
-					// The session owns the guild's config; the bot's copy, when it sends
-					// one, is an override used for exactly this turn.
-					const config: HostConfig = body.config
-						? { connections: body.config.connections, model: body.config.model, links: stored.links }
-						: stored;
+					const config = await loadConfig(true);
 					if (config.connections.length === 0) {
 						return json({ ok: false, error: "no provider is connected" }, 400);
 					}
@@ -605,10 +600,6 @@ export class BotSessionV5 extends DurableObject<Env> {
 				return yield* attempt(async () => json({ stopped: await agent.interrupt(body.threadId, body.gone === true) })).pipe(
 					Effect.catch((error) => Effect.succeed(json({ error: error.message }, 500))),
 				);
-			}
-
-			if (request.method === "GET" && url.pathname === "/status") {
-				return json({ guildId, model: DEFAULT_MODEL });
 			}
 
 			return json({ error: "not found" }, 404);

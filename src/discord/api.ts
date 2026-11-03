@@ -11,7 +11,6 @@
  */
 
 import { Context, Layer, Option, Schema } from "effect";
-import { describeError } from "../errors";
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -46,43 +45,12 @@ export interface DiscordChannelRef {
 	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
 }
 
-/** The subset of a guild channel this bot reads. */
-export interface DiscordGuildChannel {
-	id: string;
-	type: number;
-	name?: string;
-	parent_id?: string;
-	topic?: string;
-	position?: number;
-	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
-}
-
-/** The subset of a message this bot reads. */
-export interface DiscordMessageView {
-	id: string;
-	channel_id: string;
-	content?: string;
-	timestamp?: string;
-	author?: { id?: string; username?: string; global_name?: string; bot?: boolean };
-	attachments?: { filename?: string; url?: string }[];
-	embeds?: unknown[];
-	referenced_message?: { id?: string } | null;
-}
-
 /** The subset of a role this bot reads. Managed bot roles carry `tags.bot_id`. */
 export interface DiscordRole {
 	id: string;
 	name: string;
 	managed: boolean;
 	tags?: { bot_id?: string };
-}
-
-/** The subset of a guild this bot reads. */
-export interface DiscordGuild {
-	id: string;
-	name?: string;
-	owner_id?: string;
-	system_channel_id?: string;
 }
 
 /** One entry of a guild's audit log, as far as the bot reads it. */
@@ -276,20 +244,6 @@ export function discordRest(token: string) {
 			return { id: result.id };
 		},
 
-		/** Start a thread in a channel, not attached to any message. */
-		async startThread(
-			channelId: string,
-			name: string,
-			options: { autoArchiveDuration?: number } = {},
-		): Promise<{ id: string }> {
-			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/threads`, {
-				name,
-				auto_archive_duration: options.autoArchiveDuration ?? 1_440,
-			});
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
-			return { id: result.id };
-		},
-
 		async triggerTyping(channelId: string): Promise<void> {
 			await request<void>("POST", `/channels/${channelId}/typing`);
 		},
@@ -298,60 +252,6 @@ export function discordRest(token: string) {
 		async guildRoles(guildId: string): Promise<DiscordRole[]> {
 			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
 			return Array.isArray(result) ? result : [];
-		},
-
-		/** A guild's channels, including categories and threads the bot can see. */
-		async guildChannels(guildId: string): Promise<DiscordGuildChannel[]> {
-			const result = await request<DiscordGuildChannel[]>("GET", `/guilds/${guildId}/channels`);
-			return Array.isArray(result) ? result : [];
-		},
-
-		/**
-		 * A channel's messages, newest first.
-		 *
-		 * Discord pages by message id: `before` walks backwards through history and
-		 * `after` forwards from an id, so a caller that has one message can read
-		 * either side of it.
-		 */
-		async channelMessages(
-			channelId: string,
-			options: { limit?: number; before?: string; after?: string } = {},
-		): Promise<DiscordMessageView[]> {
-			const query = new URLSearchParams();
-			query.set("limit", String(Math.min(Math.max(options.limit ?? 50, 1), 100)));
-			if (options.before) query.set("before", options.before);
-			if (options.after) query.set("after", options.after);
-			const result = await request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
-			return Array.isArray(result) ? result : [];
-		},
-
-		/** One message, so a caller can read what it is about to reply to. */
-		async message(channelId: string, messageId: string): Promise<DiscordMessageView | undefined> {
-			return await request<DiscordMessageView>("GET", `/channels/${channelId}/messages/${messageId}`);
-		},
-
-		/** A guild's active threads, which is the only place Discord lists them. */
-		async activeThreads(guildId: string): Promise<DiscordGuildChannel[]> {
-			const result = await request<{ threads?: DiscordGuildChannel[] }>("GET", `/guilds/${guildId}/threads/active`);
-			return Array.isArray(result?.threads) ? result.threads : [];
-		},
-
-		/** A guild, for its name, owner, and system channel. */
-		async guild(guildId: string): Promise<DiscordGuild | undefined> {
-			const result = await request<Record<string, unknown>>("GET", `/guilds/${guildId}`);
-			if (!result || typeof result.id !== "string") return undefined;
-			return {
-				id: result.id,
-				...(typeof result.name === "string" ? { name: result.name } : {}),
-				...(typeof result.owner_id === "string" ? { owner_id: result.owner_id } : {}),
-				...(typeof result.system_channel_id === "string" ? { system_channel_id: result.system_channel_id } : {}),
-			};
-		},
-
-		/** A guild's owner, whose setup decisions seed the guild. */
-		async guildOwner(guildId: string): Promise<string | undefined> {
-			const result = await request<{ owner_id?: unknown }>("GET", `/guilds/${guildId}`);
-			return typeof result?.owner_id === "string" ? result.owner_id : undefined;
 		},
 
 		/** The guilds the bot is a member of. */
@@ -474,5 +374,3 @@ export class DiscordApi extends Context.Service<DiscordApi, DiscordRest>()("eryn
 	}
 }
 
-/** Re-exported for callers that only need the formatter. */
-export { describeError };

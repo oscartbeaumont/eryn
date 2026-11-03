@@ -15,8 +15,6 @@ import { actionButton, buttonRow } from "../discord/components";
 import type { DiscordRest } from "../discord/api";
 import { log } from "../config";
 
-/** The audit-log action type for a bot being added to a guild. */
-const ACTION_BOT_ADD = 28;
 /** Only a very recent install is announced; a READY replay of old guilds is not. */
 const RECENT_MS = 10 * 60_000;
 
@@ -54,7 +52,7 @@ export async function maybeAnnounceInstall(
 
 	// Reads require the View Audit Log permission; a failure just means no DM.
 	const entry = await rest.botAddEntry(guild.id).catch(() => undefined);
-	if (!entry || entry.action_type !== ACTION_BOT_ADD) return;
+	if (!entry) return;
 	if (entry.target_id && botUserId && entry.target_id !== botUserId) return;
 
 	// The audit log has been read, so remember the guild: an old install should

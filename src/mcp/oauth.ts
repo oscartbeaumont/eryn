@@ -131,6 +131,7 @@ export async function registerClient(input: {
 		...(input.scope ? { scope: input.scope } : {}),
 	};
 	const response = await fetch(requireTransport(input.registrationEndpoint, "client registration"), {
+		redirect: "error",
 		method: "POST",
 		headers: { "content-type": "application/json", accept: "application/json" },
 		body: JSON.stringify(body),
@@ -234,6 +235,7 @@ async function tokenRequest(
 	}
 
 	const response = await fetch(requireTransport(endpoint, "the token endpoint"), {
+		redirect: "error",
 		method: "POST",
 		headers,
 		body,
@@ -325,7 +327,7 @@ async function fetchJson(url: string, label: string | undefined, optional = fals
 	try {
 		const response = await fetch(parsed, {
 			headers: { accept: "application/json" },
-			redirect: "follow",
+			redirect: "error",
 			signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
 		});
 		if (!response.ok) {

@@ -7,13 +7,13 @@
 
 import { Option, Schema } from "effect";
 import { withDeploy } from "../deploy";
-import { botError, describeError } from "../errors";
+import { botError } from "../errors";
 import {
 	IntegrationOptionSchema,
 	McpAuthCompleteResponseSchema,
 	McpAuthStartResponseSchema,
 	McpAuthStatusSchema,
-	McpLinkSchema,
+	PublicLinkSchema,
 	McpProbeResponseSchema,
 	ModelOptionSchema,
 	type GuildStatus,
@@ -29,7 +29,7 @@ import {
 	type PublicLink,
 } from "../session/models";
 
-const LinkListSchema = Schema.Struct({ links: Schema.Array(McpLinkSchema) });
+const LinkListSchema = Schema.Struct({ links: Schema.Array(PublicLinkSchema) });
 const ConfigSchema = Schema.Struct({
 	ready: Schema.Boolean,
 	model: Schema.String,
@@ -37,10 +37,9 @@ const ConfigSchema = Schema.Struct({
 		Schema.Struct({
 			integrationID: Schema.String,
 			method: Schema.String,
-			prefix: Schema.optional(Schema.String),
 		}),
 	),
-	links: Schema.Array(McpLinkSchema),
+	links: Schema.Array(PublicLinkSchema),
 });
 const ProviderListSchema = Schema.Struct({ integrations: Schema.Array(IntegrationOptionSchema) });
 const ModelListSchema = Schema.Struct({ models: Schema.Array(ModelOptionSchema) });
@@ -101,11 +100,7 @@ export class SessionClient {
 		return {
 			ready: parsed.ready,
 			model: parsed.model,
-			providers: parsed.providers.map((provider) => ({
-				integrationID: provider.integrationID,
-				method: provider.method,
-				...(provider.prefix ? { prefix: provider.prefix } : {}),
-			})),
+			providers: [...parsed.providers],
 			links: [...parsed.links],
 		};
 	}
@@ -131,10 +126,7 @@ export class SessionClient {
 
 	async links(): Promise<PublicLink[]> {
 		const parsed = decode(LinkListSchema, await this.post("/links", { guildId: this.guildId }), "the guild session");
-		return parsed.links.map((link) => {
-			const { token: _token, oauth: _oauth, ...rest } = link;
-			return rest;
-		});
+		return [...parsed.links];
 	}
 
 	async addLink(link: McpLink): Promise<void> {
@@ -211,4 +203,3 @@ export class SessionClient {
 }
 
 
-export { describeError };

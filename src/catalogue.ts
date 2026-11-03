@@ -161,7 +161,12 @@ export function filterCatalogue(text: string, keep: readonly string[]): string {
 	return `{${entries.join(",")}}`;
 }
 
-/** Fetch the upstream catalogue, rewriting it for `keep`, with a short edge cache. */
+/**
+ * Fetch the upstream catalogue once, then rewrite it for `keep`.
+ *
+ * The cache key is the upstream URL, not the caller's provider set: otherwise
+ * every distinct keep-list is a multi-megabyte fetch.
+ */
 async function loadCatalogue(keep: readonly string[]): Promise<string> {
 	let cache: Cache | undefined;
 	try {
@@ -169,14 +174,13 @@ async function loadCatalogue(keep: readonly string[]): Promise<string> {
 	} catch {
 		// Durable Objects have no Cache API; a direct call still works.
 	}
-	const key = new Request(`${CATALOGUE_URL}&keep=${[...keep].sort().join(",")}`);
+	const key = new Request(CATALOGUE_URL);
 	const hit = await cache?.match(key);
-	if (hit) return await hit.text();
+	if (hit) return filterCatalogue(await hit.text(), keep);
 
 	const response = await fetch(CATALOGUE_URL, { headers: { accept: "application/json" } });
 	if (!response.ok) throw new Error(`models.dev returned HTTP ${response.status}`);
-	const text = filterCatalogue(await response.text(), keep);
-
+	const text = await response.text();
 	try {
 		await cache?.put(
 			key,
@@ -190,7 +194,7 @@ async function loadCatalogue(keep: readonly string[]): Promise<string> {
 	} catch {
 		// A cache miss costs one upstream request; it must not fail the host.
 	}
-	return text;
+	return filterCatalogue(text, keep);
 }
 
 /**

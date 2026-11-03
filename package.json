@@ -10,7 +10,8 @@
     "dev": "cf dev",
     "build": "cf build",
     "deploy": "cf deploy",
-    "typecheck": "cf workers types && tsc"
+    "typecheck": "cf workers types && tsc",
+    "check": "pnpm typecheck && pnpm build"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
@@ -24,12 +25,16 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",
+    "@types/node": "^26.6.5",
     "cf": "^1.0.0-beta.18",
     "typescript": "^7.0.2",
     "vite": "^8.3.5"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "workerd"],
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ],
     "ignoredBuiltDependencies": [
       "@parcel/watcher",
       "tree-sitter-bash",

@@ -17,7 +17,7 @@ export const DEFAULT_PUBLIC_ORIGIN = "https://eryn.otbeaumont.me";
 /** Prefix on every log line this package emits. */
 export const LOG_PREFIX = "eryn:bot";
 
-/** Storage key prefixes, versioned as the contract requires. */
+/** Storage key prefixes. A shipped prefix is stable; new shapes get a new one. */
 export const KEYS = {
 	/** The guild's model and bookkeeping, no secrets. */
 	guild: "config:guild",

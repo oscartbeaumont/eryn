@@ -12,7 +12,8 @@
  */
 
 import { log } from "../config";
-import { describeError, splitMessage, type DiscordRest } from "./api";
+import { describeError } from "../errors";
+import { splitMessage, type DiscordRest } from "./api";
 
 /** Minimum gap between edits of the same message. */
 const EDIT_INTERVAL_MS = 1_500;

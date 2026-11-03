@@ -13,7 +13,6 @@
 
 import { describeError } from "../errors";
 import type { DiscordUser } from "./api";
-import type { DiscordComponent } from "./components";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 /**
@@ -106,7 +105,7 @@ export interface DiscordInteraction {
 			options?: readonly { name?: string; type?: number; value?: unknown }[];
 		}[];
 	};
-	member?: { user?: DiscordUser; nick?: string };
+	member?: { user?: DiscordUser; nick?: string; permissions?: string };
 	user?: DiscordUser;
 	/** The message a component interaction came from. */
 	message?: { id: string };
@@ -393,5 +392,3 @@ export function modalValues(interaction: DiscordInteraction): Record<string, str
 	return values;
 }
 
-/** Unused type re-export kept so consumers can name component payloads. */
-export type { DiscordComponent };

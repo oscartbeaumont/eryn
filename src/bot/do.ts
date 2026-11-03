@@ -15,7 +15,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { intFromEnv, log as botLog } from "../config";
+import { CLIENT_ID, intFromEnv, log as botLog } from "../config";
 import { DEPLOY_HEADER, currentDeploy } from "../deploy";
 import { describeError } from "../errors";
 import {
@@ -93,9 +93,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
 		});
 		// A fresh instance — after a deploy reset or an eviction — has no socket.
-		// Connect before the first request so the bot comes back on its own, rather
-		// than staying offline until something happens to call /wake.
-		state.blockConcurrencyWhile(() => this.ensure());
+		// Connect and arm the keepalive alarm before the first request, so the bot
+		// comes back on its own and is not evicted before the next cron wake.
+		state.blockConcurrencyWhile(() => this.keepAlive());
 	}
 
 	/** Run one socket handler, counting it so a restart can wait for it. */
@@ -231,7 +231,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (message.webhook_id !== undefined) return;
 		if (message.author?.bot || message.author?.id === this.botUserId) return;
 
-		const channel = await this.rest.channel(message.channel_id);
+		const channel = await this.channelRef(message.channel_id);
 		if (!channel) return;
 
 		// Discord also creates a managed role named after the bot, and its `@`
@@ -313,6 +313,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		const ctx: CommandContext = {
 			env: this.env,
 			log: (message) => log(message),
+			applicationId: this.botUserId ?? CLIENT_ID,
 			session: (guildId) => new SessionClient(this.env, guildId),
 			ownsThread: (threadId) => this.ownsThread(threadId),
 			rest: this.rest,
@@ -488,7 +489,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		const cached = this.channels.get(channelId);
 		if (cached) return cached;
 		const channel = await this.rest.channel(channelId).catch(() => undefined);
-		if (channel) this.channels.set(channelId, channel);
+		if (channel) {
+			// A long-lived guild object should not remember every channel forever.
+			if (this.channels.size > 500) this.channels.clear();
+			this.channels.set(channelId, channel);
+		}
 		return channel;
 	}
 

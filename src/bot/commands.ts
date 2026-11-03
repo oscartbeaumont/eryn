@@ -7,7 +7,6 @@
  * guild's session object, which this file only calls.
  */
 
-import { CLIENT_ID } from "../config";
 import { describeError } from "../errors";
 import type { DiscordCommand, DiscordCommandOption } from "../discord/api";
 import {
@@ -23,7 +22,7 @@ import {
 import type { DiscordInteraction } from "../discord/socket";
 import { modalValues } from "../discord/socket";
 import { describeTools } from "../mcp/links";
-import type { McpLink } from "../session/models";
+import type { McpLink, PublicLink } from "../session/models";
 import { SessionClient } from "./client";
 
 const MAX_SELECT_OPTIONS = 25;
@@ -126,6 +125,7 @@ function oauthCheckId(guildId: string | undefined, integrationID: string, attemp
 export interface CommandContext {
 	readonly env: Env;
 	readonly log: (message: string) => void;
+	readonly applicationId: string;
 	readonly session: (guildId: string) => SessionClient;
 	readonly ownsThread: (threadId: string) => Promise<boolean>;
 	readonly rest: {
@@ -221,6 +221,29 @@ function optionShape(option: DiscordCommandOption): unknown {
  */
 const acknowledged = new WeakSet<DiscordInteraction>();
 
+/** Discord's MANAGE_GUILD bit; configuration is an admin action. */
+const MANAGE_GUILD = 1n << 5n;
+
+function canManage(interaction: DiscordInteraction): boolean {
+	// The install DM has no guild context; it is only delivered to the installer.
+	if (!interaction.guild_id) return true;
+	const raw = interaction.member?.permissions;
+	if (typeof raw !== "string") return false;
+	try {
+		return (BigInt(raw) & MANAGE_GUILD) !== 0n;
+	} catch {
+		return false;
+	}
+}
+
+async function denyConfiguration(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
+	await ctx.rest
+		.interactionReply(interaction.id, interaction.token, "Only someone with Manage Server can change Eryn's setup.", {
+			ephemeral: true,
+		})
+		.catch(() => undefined);
+}
+
 function responder(ctx: CommandContext, interaction: DiscordInteraction) {
 	/**
 	 * An edit replaces the whole message, so its components default to none.
@@ -229,7 +252,7 @@ function responder(ctx: CommandContext, interaction: DiscordInteraction) {
 	 * that still want buttons pass them for the next step.
 	 */
 	const edit = (content: string, components?: readonly DiscordComponent[]) =>
-		ctx.rest.interactionEditOriginal(CLIENT_ID, interaction.token, content, {
+		ctx.rest.interactionEditOriginal(ctx.applicationId, interaction.token, content, {
 			components: components ?? [],
 		});
 	return {
@@ -306,6 +329,9 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 	if (!guildId) {
 		await answer.reply("Run `/eryn` inside a server, so I know which setup to change.");
 		return;
+	}
+	if (path !== "stop" && path !== "help" && !canManage(interaction)) {
+		return await denyConfiguration(ctx, interaction);
 	}
 	const session = ctx.session(guildId);
 
@@ -583,6 +609,7 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 	const customId = interaction.data?.custom_id;
 	const guildId = interaction.guild_id;
 	if (!customId) return;
+	if (!canManage(interaction)) return await denyConfiguration(ctx, interaction);
 	// The install DM's "Start setup" button carries the guild id, because a DM
 	// has no guild context of its own. Every id raised from that flow carries it
 	// too, so the conversation works entirely inside the DM.
@@ -689,6 +716,7 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 	if (customId === CID.modelSelect) {
 		const model = values[0] ?? "";
 		return await guarded(ctx, interaction, "update", async () => {
+			await responder(ctx, interaction).defer();
 			await session.setModel(model);
 			await responder(ctx, interaction).update(`Model set to \`${model}\`.`);
 		});
@@ -711,6 +739,7 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 	if (customId === CID.mcpRemoveSelect) {
 		const linkId = values[0] ?? "";
 		return await guarded(ctx, interaction, "update", async () => {
+			await responder(ctx, interaction).defer();
 			const links = await session.links();
 			const link = links.find((candidate) => candidate.id === linkId);
 			await session.removeLink(linkId);
@@ -727,28 +756,29 @@ async function pickProviderMethod(
 	dmGuildId?: string,
 ): Promise<void> {
 	const answer = responder(ctx, interaction);
+	// The provider list can build the host, so ack after the one branch that
+	// needs to open a modal as the initial interaction response.
 	const providers = await session.providers();
 	const provider = providers.find((candidate) => candidate.id === integrationID);
 	if (!provider) {
-		await answer.update("That provider is no longer available.");
+		await answer.reply("That provider is no longer available.");
 		return;
 	}
 	const methods = provider.methods.filter((method) => method.supported);
 	if (!methods.length) {
-		await answer.update(`**${provider.name}** has no way to be connected in this deployment.`);
+		await answer.reply(`**${provider.name}** has no way to be connected in this deployment.`);
 		return;
 	}
 	if (methods.length === 1) {
-		await startMethod(
-			ctx,
-			interaction,
-			session,
-			integrationID,
-			methods[0]!.type === "key" ? "key" : (methods[0]!.id ?? "key"),
-			dmGuildId,
-		);
+		const method = methods[0]!;
+		if (method.type === "key") {
+			await answer.modal(keyModal(integrationID, dmGuildId));
+			return;
+		}
+		await startMethod(ctx, interaction, session, integrationID, method.id ?? "key", dmGuildId);
 		return;
 	}
+	await answer.defer();
 	await answer.update(
 		`How should **${provider.name}** be connected?`,
 		[
@@ -891,6 +921,7 @@ async function handleModal(ctx: CommandContext, interaction: DiscordInteraction)
 	const customId = interaction.data?.custom_id;
 	const guildId = interaction.guild_id;
 	if (!customId) return;
+	if (!canManage(interaction)) return await denyConfiguration(ctx, interaction);
 	const values = modalValues(interaction);
 
 	// A modal raised by the install DM carries its guild id.
@@ -1046,7 +1077,6 @@ async function mcpAdd(
 		id: crypto.randomUUID(),
 		name,
 		url,
-		tools: { groups: {} },
 		createdAt: Date.now(),
 		...(token ? { token } : {}),
 	};
@@ -1155,7 +1185,7 @@ function clamp(value: string, limit: number): string {
 
 // --- Helpers -------------------------------------------------------------------
 
-function linkOptions(links: readonly McpLink[]): DiscordSelectOption[] {
+function linkOptions(links: readonly PublicLink[]): DiscordSelectOption[] {
 	return links.slice(0, MAX_SELECT_OPTIONS).map((link) => ({
 		label: link.name.slice(0, 100),
 		value: link.id,
@@ -1163,7 +1193,7 @@ function linkOptions(links: readonly McpLink[]): DiscordSelectOption[] {
 	}));
 }
 
-function formatLinks(links: readonly McpLink[]): string {
+function formatLinks(links: readonly PublicLink[]): string {
 	if (!links.length) return "No MCP servers are linked to this server.";
 	const shown = links.slice(0, 15);
 	const lines = shown.map((link) => `• **${link.name}** — ${hostOf(link.url)}`);

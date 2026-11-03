@@ -10,22 +10,6 @@ import { Schema } from "effect";
 
 import { DiscordContextSchema } from "../discord/context";
 
-/** A group's access level: `none` hides it, `all` is read plus write. */
-export const AccessLevelSchema = Schema.Literals(["none", "read", "write", "all"]);
-export type AccessLevel = typeof AccessLevelSchema.Type;
-
-/** What tools a guild link is allowed to reach on an external MCP server. */
-export const ToolAccessSchema = Schema.Struct({
-	groups: Schema.Record(Schema.String, AccessLevelSchema),
-	tools: Schema.optional(
-		Schema.Struct({
-			include: Schema.optional(Schema.Array(Schema.String)),
-			exclude: Schema.optional(Schema.Array(Schema.String)),
-		}),
-	),
-});
-export type ToolAccess = typeof ToolAccessSchema.Type;
-
 /**
  * What is needed to keep an OAuth link's bearer alive.
  *
@@ -49,8 +33,8 @@ export type McpOAuth = typeof McpOAuthSchema.Type;
  * One external MCP server a guild has linked.
  *
  * `token` is the bearer the agent presents and `oauth` is what keeps it alive.
- * Both are sealed at rest and never leave the guild object; the public
- * `McpLink` is the same record without them.
+ * Both are sealed at rest and never leave the guild object; `PublicLink` is the
+ * same record without them.
  */
 export const McpLinkSchema = Schema.Struct({
 	id: Schema.String,
@@ -64,13 +48,19 @@ export const McpLinkSchema = Schema.Struct({
 	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
 	token: Schema.optional(Schema.String),
 	oauth: Schema.optional(McpOAuthSchema),
-	tools: ToolAccessSchema,
 	createdAt: Schema.Number,
 });
 export type McpLink = typeof McpLinkSchema.Type;
 
 /** A link as a caller may see it: no secret. */
-export type PublicLink = Omit<McpLink, "token" | "oauth">;
+export const PublicLinkSchema = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	url: Schema.String,
+	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
+	createdAt: Schema.Number,
+});
+export type PublicLink = typeof PublicLinkSchema.Type;
 
 /** One tool an MCP server advertises, as a connection test reports it. */
 export const McpToolSummarySchema = Schema.Struct({
@@ -125,7 +115,7 @@ export type PendingMcpAuth = typeof PendingMcpAuthSchema.Type;
 export const McpAuthStatusSchema = Schema.Struct({
 	status: Schema.Literals(["pending", "complete", "failed", "missing"]),
 	message: Schema.optional(Schema.String),
-	link: Schema.optional(McpLinkSchema),
+	link: Schema.optional(PublicLinkSchema),
 });
 export type McpAuthStatus = typeof McpAuthStatusSchema.Type;
 
@@ -141,7 +131,7 @@ export const McpAuthCompleteResponseSchema = Schema.Struct({
 	ok: Schema.optional(Schema.Boolean),
 	status: Schema.optional(Schema.Literals(["complete", "failed"])),
 	message: Schema.optional(Schema.String),
-	link: Schema.optional(McpLinkSchema),
+	link: Schema.optional(PublicLinkSchema),
 	tools: Schema.optional(Schema.Array(McpToolSummarySchema)),
 });
 export type McpAuthCompleteResponse = typeof McpAuthCompleteResponseSchema.Type;
@@ -168,8 +158,6 @@ export type GuildSettings = typeof GuildSettingsSchema.Type;
 export interface ConnectionSummary {
 	integrationID: string;
 	method: string;
-	/** The start of the key, for display only. */
-	prefix?: string;
 }
 
 // --- Provider catalogue --------------------------------------------------------
@@ -323,13 +311,6 @@ export const McpAuthCompleteRequestSchema = Schema.Struct({
 	error: Schema.optional(Schema.String),
 });
 
-/** A guild's configuration, as the bot hands it to a turn. */
-export const GuildConfigSchema = Schema.Struct({
-	connections: Schema.Array(ProviderConnectionSchema),
-	model: Schema.String,
-});
-export type GuildConfig = typeof GuildConfigSchema.Type;
-
 /** One file a Discord message carried, as the session needs it. */
 export const PromptAttachmentSchema = Schema.Struct({
 	url: Schema.String,
@@ -350,8 +331,6 @@ export const PromptRequestSchema = Schema.Struct({
 	discord: Schema.optional(DiscordContextSchema),
 	/** Files attached to the message, for the model to read. */
 	attachments: Schema.optional(Schema.Array(PromptAttachmentSchema)),
-	/** Optional override; the session falls back to its own stored config. */
-	config: Schema.optional(GuildConfigSchema),
 });
 export type PromptRequest = typeof PromptRequestSchema.Type;
 
@@ -366,5 +345,5 @@ export interface GuildStatus {
 	ready: boolean;
 	model: string;
 	providers: ConnectionSummary[];
-	links: McpLink[];
+	links: PublicLink[];
 }

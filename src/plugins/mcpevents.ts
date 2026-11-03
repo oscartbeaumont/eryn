@@ -129,6 +129,7 @@ interface Target {
 
 interface ActiveSubscription {
 	id: string;
+	sessionID: string;
 	name: string;
 	args: Record<string, unknown>;
 	cursor: string | null;
@@ -225,6 +226,7 @@ async function readEventStream(
 	onCursor: (cursor: string) => void,
 ): Promise<void> {
 	const response = await fetch(new URL(url), {
+		redirect: "error",
 		method: "POST",
 		signal,
 		headers: {
@@ -292,9 +294,6 @@ export default Plugin.define({
 		const subscriptions = new Map<string, ActiveSubscription>();
 		const listens = new Map<string, ActiveListen>();
 		let mcpEditor: { get(name: string): { type?: string; url?: string; headers?: Record<string, string> } | undefined } | undefined;
-		// The session a tool call belongs to; the tool context is not available in
-		// the background loops, so the most recent call's session is used.
-		let currentSessionID: string | undefined;
 
 		await ctx.mcp.transform((editor) => {
 			mcpEditor = editor as unknown as typeof mcpEditor;
@@ -315,7 +314,7 @@ export default Plugin.define({
 			if (event.eventId && subscription.seen.has(event.eventId)) return;
 			await ctx.session
 				.synthetic({
-					sessionID: currentSessionID as never,
+					sessionID: subscription.sessionID,
 					text: occurrenceMessage(event),
 					description: `MCP event ${event.name}`,
 					delivery: "queue",
@@ -337,7 +336,7 @@ export default Plugin.define({
 
 		// The session a tool call belongs to is captured by the tool handlers above.
 
-		const subscribe = async (rawInput: unknown) => {
+		const subscribe = async (rawInput: unknown, sessionID: string) => {
 			const input = (rawInput ?? {}) as Record<string, unknown>;
 			const name = typeof input.name === "string" ? input.name : "";
 			if (!name) return { content: "An event `name` is required." };
@@ -374,6 +373,7 @@ export default Plugin.define({
 			const id = crypto.randomUUID();
 			const subscription: ActiveSubscription = {
 				id,
+				sessionID,
 				name,
 				args: (input.arguments as Record<string, unknown>) ?? {},
 				cursor: null,
@@ -468,7 +468,7 @@ export default Plugin.define({
 			return { content: `Unsubscribed from ${subscription.name} (${id}).` };
 		};
 
-		const listen = async (rawInput: unknown) => {
+		const listen = async (rawInput: unknown, sessionID: string) => {
 			const input = (rawInput ?? {}) as Record<string, unknown>;
 			const filter: SubscriptionFilter = {
 				...(typeof input.toolsListChanged === "boolean" ? { toolsListChanged: input.toolsListChanged } : {}),
@@ -503,7 +503,7 @@ export default Plugin.define({
 			const notify = (text: string, method: string, uri?: string) => {
 				void ctx.session
 					.synthetic({
-						sessionID: currentSessionID as never,
+						sessionID,
 						text,
 						description: "MCP subscription notification",
 						delivery: "queue",
@@ -534,9 +534,8 @@ export default Plugin.define({
 					"Subscribe this session to an MCP event. Identify the server with `server` (the name of a server configured in OpenCode, whose url and headers are reused) or with an explicit `url` plus `headers`. Push delivery (events/stream) is used by default and the tool stays active in the background, adding each event as a synthetic session message; pass delivery: \"poll\" to use events/poll instead. The MCP server must support protocol 2026-07-28 and the MCP Events extension.",
 				input: SubscribeInput,
 				execute: async (rawInput, context) => {
-					currentSessionID = context.sessionID;
 					try {
-						return await subscribe(rawInput);
+						return await subscribe(rawInput, context.sessionID);
 					} catch (error) {
 						return { content: `Error: ${error instanceof Error ? error.message : String(error)}` };
 					}
@@ -560,9 +559,8 @@ export default Plugin.define({
 					"Open a native MCP protocol 2026-07-28 subscriptions/listen stream. Identify the server with `server` or with an explicit `url` plus `headers`. Each change notification is added as a synthetic session message. Use this for resource watching; use mcpevents_subscribe for the MCP Events extension.",
 				input: ListenInput,
 				execute: async (rawInput, context) => {
-					currentSessionID = context.sessionID;
 					try {
-						return await listen(rawInput);
+						return await listen(rawInput, context.sessionID);
 					} catch (error) {
 						return { content: `Error: ${error instanceof Error ? error.message : String(error)}` };
 					}

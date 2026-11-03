@@ -213,6 +213,7 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 			// The session is not reused, so end it rather than leave the server
 			// holding state for a test that is already over.
 			await fetch(endpoint, {
+				redirect: "error",
 				method: "DELETE",
 				headers: headers(options.token, sessionId),
 				signal: AbortSignal.timeout(2_000),
@@ -255,6 +256,7 @@ async function rpc(
 ): Promise<RpcResult> {
 	const response = await fetch(endpoint, {
 		method: "POST",
+		redirect: "error",
 		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(timeoutMs),
@@ -284,6 +286,7 @@ async function notify(
 ): Promise<void> {
 	const response = await fetch(endpoint, {
 		method: "POST",
+		redirect: "error",
 		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
 		body: JSON.stringify({ jsonrpc: "2.0", method }),
 		signal: AbortSignal.timeout(timeoutMs),

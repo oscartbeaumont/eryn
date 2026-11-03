@@ -14,8 +14,8 @@ import type { Configuration } from "@opencode/sdk/workerd";
 import type { Plugin as PromisePlugin } from "@opencode/plugin";
 
 import { CATALOGUE_PATH } from "../catalogue";
-import { DEFAULT_MODEL, intFromEnv, log, publicOrigin } from "../config";
-import { botError, describeError } from "../errors";
+import { KEYS, intFromEnv, log, publicOrigin } from "../config";
+import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
 import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
 import { DiscordStream } from "../discord/stream";
@@ -28,7 +28,6 @@ import mcpeventsPlugin from "../plugins/mcpevents";
 import type { FileStore } from "../opencode/store";
 import { createHost } from "./host";
 import {
-	type GuildConfig,
 	type IntegrationMethodOption,
 	type IntegrationOption,
 	type McpLink,
@@ -78,7 +77,6 @@ interface Host {
 	promise: Promise<OpenCodeWorkerd.Interface>;
 	/** Signature of the provider set, so a changed or rotated credential rebuilds the host. */
 	connections: string;
-	model: string;
 	/** Signature of the linked MCP servers, so adding one rebuilds the host. */
 	mcp: string;
 }
@@ -365,6 +363,32 @@ export interface GuildAgentShape {
 	ensureHost(config: HostConfig): Promise<void>;
 }
 
+/** Read at most `limit` bytes; `undefined` means the body exceeded it. */
+async function readCapped(response: Response, limit: number): Promise<Uint8Array | undefined> {
+	const reader = response.body?.getReader();
+	if (!reader) return new Uint8Array(0);
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value) continue;
+		total += value.byteLength;
+		if (total > limit) {
+			await reader.cancel().catch(() => undefined);
+			return undefined;
+		}
+		chunks.push(value);
+	}
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return bytes;
+}
+
 class GuildAgentImpl implements GuildAgentShape {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
@@ -420,7 +444,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * The embedded OpenCode host for this guild, built on first use and rebuilt
 	 * when the provider set, the model, or the linked MCP servers change.
 	 */
-	private async hostFor(config: HostConfig): Promise<OpenCodeWorkerd.Interface> {
+	private async hostFor(config: HostConfig, excludeThreadId?: string): Promise<OpenCodeWorkerd.Interface> {
 		const signature = config.connections
 			.map((connection) => `${connection.integrationID}:${connection.method}:${connection.key}`)
 			.sort()
@@ -431,12 +455,15 @@ class GuildAgentImpl implements GuildAgentShape {
 			.sort()
 			.join("|");
 
-		if (
-			!this.host ||
-			this.host.connections !== signature ||
-			this.host.model !== config.model ||
-			this.host.mcp !== mcpSignature
-		) {
+		const changed =
+			this.host !== undefined &&
+			(this.host.connections !== signature || this.host.mcp !== mcpSignature);
+		// A config change must not tear down a host that has another thread's turn
+		// streaming on it. The turn being started is allowed through.
+		const busy = [...this.runs].some(
+			([threadId, run]) => threadId !== excludeThreadId && run.turn !== undefined,
+		);
+		if (!this.host || (changed && !busy)) {
 			const previous = this.host?.promise;
 			this.abort?.abort();
 			this.abort = new AbortController();
@@ -513,9 +540,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				}
 				return host;
 			});
-			this.host = { promise, connections: signature, model: config.model, mcp: mcpSignature };
+			this.host = { promise, connections: signature, mcp: mcpSignature };
 			this.consuming = undefined;
-			// A different provider set or model means a different catalogue.
+			// A different provider set means a different catalogue.
 			this.modelCache = undefined;
 			void promise
 				.then((host) => this.startConsuming(host))
@@ -732,7 +759,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			await stream.start();
 			stopTyping = this.startTyping(request.threadId);
 
-			const host = await this.hostFor(config);
+			const host = await this.hostFor(config, request.threadId);
 			// The reply and the completion signal both arrive as events, so a stream
 			// that died since the last turn has to be replaced before this one starts.
 			this.startConsuming(host);
@@ -783,6 +810,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				current.stream = undefined;
 				this.runs.delete(request.threadId);
 			}
+			if (turn.gone) await this.discardThread(request.threadId);
 		}
 	}
 
@@ -822,7 +850,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				continue;
 			}
 			try {
-				const response = await fetch(url, { headers: { accept: "image/*" } });
+				const response = await fetch(url, { headers: { accept: "image/*" }, redirect: "error" });
 				if (!response.ok) {
 					notes.push(`${name}: download failed (HTTP ${response.status})`);
 					continue;
@@ -833,8 +861,14 @@ class GuildAgentImpl implements GuildAgentShape {
 					notes.push(`${name}: unsupported type ${served ?? declared ?? "unknown"}`);
 					continue;
 				}
-				const bytes = new Uint8Array(await response.arrayBuffer());
-				if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+				const declaredLength = Number(response.headers.get("content-length") ?? "");
+				if (Number.isFinite(declaredLength) && declaredLength > MAX_ATTACHMENT_BYTES) {
+					await response.body?.cancel().catch(() => undefined);
+					notes.push(`${name}: larger than 5 MB`);
+					continue;
+				}
+				const bytes = await readCapped(response, MAX_ATTACHMENT_BYTES);
+				if (!bytes) {
 					notes.push(`${name}: larger than 5 MB`);
 					continue;
 				}
@@ -902,11 +936,26 @@ class GuildAgentImpl implements GuildAgentShape {
 	async interrupt(threadId: string | undefined, gone: boolean): Promise<boolean> {
 		const run = threadId ? this.runs.get(threadId) : undefined;
 		const sessionID = threadId ? await this.sessionFor(threadId) : undefined;
-		if (!run?.turn || !this.host || !sessionID) return false;
-		if (gone) run.turn.gone = true;
-		const host = await this.host.promise;
-		await host.sessions.interrupt({ sessionID });
-		return true;
+		const active = Boolean(run?.turn && this.host && sessionID);
+		if (active) {
+			if (gone && run?.turn) run.turn.gone = true;
+			const host = await this.host!.promise;
+			await host.sessions.interrupt({ sessionID: sessionID! });
+		}
+		// With no turn in flight there is no completion event left to wait for, so
+		// a deleted thread can be discarded now. A live turn discards itself in
+		// `prompt`'s finally, once it has actually settled.
+		if (gone && threadId && !active) await this.discardThread(threadId);
+		return active;
+	}
+
+	/** Forget everything about a thread whose Discord thread is gone. */
+	private async discardThread(threadId: string): Promise<void> {
+		this.forget(threadId);
+		this.runs.delete(threadId);
+		this.appliedModels.delete(threadId);
+		this.appliedContext.delete(threadId);
+		await this.storage.delete(KEYS.session + threadId).catch(() => undefined);
 	}
 
 	private async wait(turn: Turn): Promise<boolean> {
@@ -933,7 +982,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async sessionFor(threadId: string): Promise<string | undefined> {
 		const cached = this.sessionByThread.get(threadId);
 		if (cached) return cached;
-		const stored = await this.storage.get<unknown>(`session:${threadId}`);
+		const stored = await this.storage.get<unknown>(KEYS.session + threadId);
 		if (typeof stored === "string") this.remember(threadId, stored);
 		return typeof stored === "string" ? stored : undefined;
 	}
@@ -966,7 +1015,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		const session = await host.sessions.create({ title, location: { directory: LOCATION } });
 		this.remember(threadId, session.id);
-		await this.storage.put(`session:${threadId}`, session.id);
+		await this.storage.put(KEYS.session + threadId, session.id);
 		return session.id;
 	}
 
@@ -1069,6 +1118,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			}
 			case "session.execution.failed": {
 				turn.failed = true;
+				turn.error ??= errorDetail(data.error);
 				completeTurn(turn);
 				return;
 			}
@@ -1213,13 +1263,3 @@ export class GuildAgent extends Context.Service<GuildAgent, GuildAgentShape>()("
 	}
 }
 
-// Keep the model default reachable for the session object's status route.
-export { DEFAULT_MODEL };
-
-/** Convenience: the guild's configuration for a turn. */
-export function toHostConfig(config: GuildConfig, links: readonly McpLink[]): HostConfig {
-	return { connections: config.connections, model: config.model, links };
-}
-
-/** A tagged failure for a session operation that cannot proceed. */
-export const sessionError = (message: string): Error => botError(message);

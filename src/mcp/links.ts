@@ -187,7 +187,6 @@ export async function finishAuthorization(
 			...(scope ? { scope } : {}),
 			...(pending.resource ? { resource: pending.resource } : {}),
 		},
-		tools: { groups: {} },
 		createdAt: Date.now(),
 	};
 	await store.putLink(link);
@@ -209,6 +208,9 @@ async function fail(
 	return { status: "failed", message };
 }
 
+/** One refresh per link, so two routes cannot rotate the same refresh token. */
+const refreshes = new Map<string, Promise<McpLink>>();
+
 /**
  * Keep a link's bearer usable.
  *
@@ -217,6 +219,14 @@ async function fail(
  * rejection, which is more useful than hiding the link.
  */
 export async function refreshLink(store: GuildStoreShape, link: McpLink): Promise<McpLink> {
+	const running = refreshes.get(link.id);
+	if (running) return await running;
+	const refresh = refreshLinkOnce(store, link).finally(() => refreshes.delete(link.id));
+	refreshes.set(link.id, refresh);
+	return await refresh;
+}
+
+async function refreshLinkOnce(store: GuildStoreShape, link: McpLink): Promise<McpLink> {
 	const oauth = link.oauth;
 	if (!oauth || !oauth.refreshToken) return link;
 	if (oauth.expiresAt - Date.now() > REFRESH_SKEW_MS) return link;
@@ -238,6 +248,9 @@ export async function refreshLink(store: GuildStoreShape, link: McpLink): Promis
 				...(tokens.scope ? { scope: tokens.scope } : {}),
 			},
 		};
+		// The admin may have removed the link while the token endpoint was busy.
+		// Writing the refreshed record back would resurrect it.
+		if (!(await store.getLink(link.id))) return link;
 		await store.putLink(next);
 		return next;
 	} catch (error) {
