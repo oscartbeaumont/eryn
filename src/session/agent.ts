@@ -782,7 +782,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 			if (turn.gone) {
 				// The thread was deleted mid-turn: there is nowhere to put the reply
-				// and no one left to read it, so the spinner is stopped silently.
+				// and no one left to read it, so nothing is written.
 				stream.abandon();
 				log("session", `thread ${request.threadId} was deleted, so the reply was dropped`);
 			} else {
@@ -798,7 +798,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		} catch (error) {
 			log("session", `prompt failed: ${describeError(error)}`);
 			// Always say something: a silent failure is indistinguishable from a
-			// hung turn, which is exactly how a stuck "Thinking…" reads.
+			// hung turn.
 			await stream.finish(`I hit an error before I could finish: ${describeError(error)}`);
 		} finally {
 			stopTyping();
