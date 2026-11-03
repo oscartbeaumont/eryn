@@ -15,6 +15,7 @@
 import { Option, Schema } from "effect";
 
 import { describeError } from "../errors";
+import { fetchWithRedirects } from "../http";
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
 
 /** The protocol revision this client asks for. A server may negotiate another. */
@@ -212,9 +213,8 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		if (sessionId) {
 			// The session is not reused, so end it rather than leave the server
 			// holding state for a test that is already over.
-			await fetch(endpoint, {
-				redirect: "error",
-				method: "DELETE",
+			await fetchWithRedirects(endpoint, {
+						method: "DELETE",
 				headers: headers(options.token, sessionId),
 				signal: AbortSignal.timeout(2_000),
 			}).catch(() => undefined);
@@ -254,9 +254,8 @@ async function rpc(
 	timeoutMs: number,
 	protocolVersion?: string,
 ): Promise<RpcResult> {
-	const response = await fetch(endpoint, {
+	const response = await fetchWithRedirects(endpoint, {
 		method: "POST",
-		redirect: "error",
 		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(timeoutMs),
@@ -284,9 +283,8 @@ async function notify(
 	protocolVersion: string,
 	timeoutMs: number,
 ): Promise<void> {
-	const response = await fetch(endpoint, {
+	const response = await fetchWithRedirects(endpoint, {
 		method: "POST",
-		redirect: "error",
 		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
 		body: JSON.stringify({ jsonrpc: "2.0", method }),
 		signal: AbortSignal.timeout(timeoutMs),

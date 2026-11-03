@@ -17,6 +17,7 @@ import { Client, StreamableHTTPClientTransport, type McpSubscription, type Subsc
 import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
 import { log as botLog } from "../config";
+import { fetchWithRedirects } from "../http";
 
 const POLL_FLOOR_MS = 1_000;
 const POLL_MAX_EVENTS = 50;
@@ -225,8 +226,7 @@ async function readEventStream(
 	onEvent: (event: Event) => void,
 	onCursor: (cursor: string) => void,
 ): Promise<void> {
-	const response = await fetch(new URL(url), {
-		redirect: "error",
+	const response = await fetchWithRedirects(new URL(url), {
 		method: "POST",
 		signal,
 		headers: {

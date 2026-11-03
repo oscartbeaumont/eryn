@@ -17,6 +17,7 @@ import { Option, Schema } from "effect";
 
 import { base64url, randomToken } from "../crypto";
 import { describeError } from "../errors";
+import { fetchWithRedirects } from "../http";
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
@@ -130,8 +131,7 @@ export async function registerClient(input: {
 		token_endpoint_auth_method: "none",
 		...(input.scope ? { scope: input.scope } : {}),
 	};
-	const response = await fetch(requireTransport(input.registrationEndpoint, "client registration"), {
-		redirect: "error",
+	const response = await fetchWithRedirects(requireTransport(input.registrationEndpoint, "client registration"), {
 		method: "POST",
 		headers: { "content-type": "application/json", accept: "application/json" },
 		body: JSON.stringify(body),
@@ -234,8 +234,7 @@ async function tokenRequest(
 		body.set("client_id", client.clientId);
 	}
 
-	const response = await fetch(requireTransport(endpoint, "the token endpoint"), {
-		redirect: "error",
+	const response = await fetchWithRedirects(requireTransport(endpoint, "the token endpoint"), {
 		method: "POST",
 		headers,
 		body,
@@ -325,9 +324,8 @@ async function fetchJson(url: string, label: string | undefined, optional = fals
 		throw new McpOAuthError(`The ${label ?? "metadata"} URL must use https.`);
 	}
 	try {
-		const response = await fetch(parsed, {
+		const response = await fetchWithRedirects(parsed, {
 			headers: { accept: "application/json" },
-			redirect: "error",
 			signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
 		});
 		if (!response.ok) {

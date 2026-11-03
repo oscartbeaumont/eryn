@@ -19,6 +19,7 @@ import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
 import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
 import { DiscordStream } from "../discord/stream";
+import { fetchWithRedirects } from "../http";
 import { DiscordApi } from "../discord/api";
 import { Workspace } from "../opencode/store";
 import { workspacePlugin } from "../opencode/workspace";
@@ -849,7 +850,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				continue;
 			}
 			try {
-				const response = await fetch(url, { headers: { accept: "image/*" }, redirect: "error" });
+				const response = await fetchWithRedirects(url, { headers: { accept: "image/*" } });
 				if (!response.ok) {
 					notes.push(`${name}: download failed (HTTP ${response.status})`);
 					continue;
