@@ -74,6 +74,9 @@ export const CID = {
 	mcpMenuAdd: "setup:mcp:add",
 	mcpMenuTest: "setup:mcp:test",
 	mcpMenuRemove: "setup:mcp:remove",
+	removeProvider: "setup:provider:remove",
+	removeProviderSelect: "setup:provider:remove:select",
+	removeProviderConfirm: (integrationID: string) => clip(`setup:provider:remove:confirm:${integrationID}`),
 	providerSelect: "setup:provider",
 	providerSearch: "setup:search",
 	method: (integrationID: string, methodID: string) => clip(`setup:method:${integrationID}:${methodID}`),
@@ -465,6 +468,7 @@ async function setupMenu(
 	];
 	if (status?.ready) {
 		buttons.push(actionButton("Choose model", setupActionId("model", dmGuildId), 2));
+		if (!dmGuildId) buttons.push(actionButton("Remove provider", CID.removeProvider, 4));
 	}
 	if (!dmGuildId) {
 		buttons.push(actionButton("MCP servers", setupActionId("mcp", dmGuildId), 2));
@@ -546,6 +550,77 @@ async function promptRemoveMcp(
 	await answer.reply("Which linked MCP server should I remove?", [
 		selectRow({ type: 3, custom_id: CID.mcpRemoveSelect, placeholder: "Pick a server", options: linkOptions(links) }),
 	]);
+}
+
+async function promptRemoveProvider(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	const status = await session.config().catch(() => undefined);
+	const providers = status?.providers ?? [];
+	if (!providers.length) {
+		await answer.reply("No providers are connected to this server.");
+		return;
+	}
+	if (providers.length === 1) {
+		await promptProviderRemovalConfirm(ctx, interaction, providers[0]!.integrationID);
+		return;
+	}
+	await answer.reply("Which provider should I remove?", [
+		selectRow({
+			type: 3,
+			custom_id: CID.removeProviderSelect,
+			placeholder: "Pick a provider",
+			options: providers.slice(0, MAX_SELECT_OPTIONS).map((provider) => ({
+				label: provider.integrationID.slice(0, 100),
+				value: provider.integrationID,
+				description: provider.method.slice(0, 100),
+			})),
+		}),
+	]);
+}
+
+async function promptProviderRemovalConfirm(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	integrationID: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	if (!integrationID) {
+		await answer.reply("No provider was selected.");
+		return;
+	}
+	await answer.reply(`Remove **${integrationID}** from this server?`, [
+		buttonRow([
+			actionButton("Remove", CID.removeProviderConfirm(integrationID), 4),
+			actionButton("Cancel", CID.setupMenu, 2),
+		]),
+	]);
+}
+
+async function removeProvider(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	session: SessionClient,
+	integrationID: string,
+): Promise<void> {
+	const answer = responder(ctx, interaction);
+	await answer.defer();
+	try {
+		await session.disconnectProvider(integrationID);
+	} catch (error) {
+		await answer.reply(`Could not remove **${integrationID}**: ${describeError(error)}`);
+		return;
+	}
+	const status = await session.config().catch(() => undefined);
+	await answer.reply(
+		`Removed **${integrationID}**.${status?.ready ? "" : " Connect a provider before Eryn can run."}`,
+		[buttonRow([actionButton("Back to setup", CID.setupMenu, 1)])],
+	);
 }
 
 function mcpAddModal(url?: string): DiscordModal {
@@ -797,6 +872,18 @@ async function handleComponent(ctx: CommandContext, interaction: DiscordInteract
 	}
 	if (customId === CID.mcpMenuRemove) {
 		return await guarded(ctx, interaction, "update", () => promptRemoveMcp(ctx, interaction, session));
+	}
+	if (customId === CID.removeProvider) {
+		return await guarded(ctx, interaction, "update", () => promptRemoveProvider(ctx, interaction, session));
+	}
+	if (customId === CID.removeProviderSelect) {
+		return await guarded(ctx, interaction, "update", () =>
+			promptProviderRemovalConfirm(ctx, interaction, values[0] ?? ""),
+		);
+	}
+	if (customId.startsWith("setup:provider:remove:confirm:")) {
+		const integrationID = customId.slice("setup:provider:remove:confirm:".length);
+		return await guarded(ctx, interaction, "update", () => removeProvider(ctx, interaction, session, integrationID));
 	}
 	if (customId === CID.providerSelect) {
 		return await guarded(ctx, interaction, "update", () =>

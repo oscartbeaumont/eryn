@@ -377,6 +377,9 @@ export class BotSessionV5 extends DurableObject<Env> {
 				return yield* attempt(async () => {
 					await agent.disconnect(await loadConfig(), body.integrationID);
 					await store.removeProvider(body.integrationID);
+					// If another provider is still connected, move the guild off a
+					// model whose provider was just removed.
+					if ((await store.providers()).length > 0) await reconcileModel(await loadConfig());
 					return json({ ok: true });
 				}).pipe(Effect.catch((error) => Effect.succeed(json({ error: error.message }, 502))));
 			}

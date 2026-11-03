@@ -34,7 +34,7 @@ Everything is a slash command:
 
 | Command | Purpose |
 | --- | --- |
-| `/eryn setup` | Setup menu: provider, model, MCP servers, and current status |
+| `/eryn setup` | Setup menu: connect or remove a provider, choose a model, manage MCP servers, and see status |
 | `/eryn mcp add` | Add and test an external MCP server |
 | `/eryn mcp list` | List linked MCP servers |
 | `/eryn mcp test` | Check that linked servers still respond |

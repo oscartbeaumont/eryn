@@ -120,6 +120,10 @@ export class SessionClient {
 		return parsed;
 	}
 
+	async disconnectProvider(integrationID: string): Promise<void> {
+		await this.post("/disconnect", { guildId: this.guildId, integrationID });
+	}
+
 	async setModel(model: string): Promise<void> {
 		await this.post("/model", { guildId: this.guildId, model });
 	}
