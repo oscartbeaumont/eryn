@@ -756,7 +756,6 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		let stopTyping: () => void = () => undefined;
 		try {
-			await stream.start();
 			stopTyping = this.startTyping(request.threadId);
 
 			const host = await this.hostFor(config, request.threadId);
@@ -1104,10 +1103,6 @@ class GuildAgentImpl implements GuildAgentShape {
 				if (typeof data.assistantMessageID === "string") turn.main.add(data.assistantMessageID);
 				return;
 			}
-			case "session.tool.called": {
-				this.runs.get(threadId)?.stream?.setStatus("Working…");
-				return;
-			}
 			case "session.text.delta": {
 				this.appendText(threadId, turn, data, typeof data.delta === "string" ? data.delta : "");
 				return;
@@ -1177,7 +1172,6 @@ class GuildAgentImpl implements GuildAgentShape {
 
 				let stopTyping: () => void = () => undefined;
 				try {
-					await stream.start();
 					stopTyping = this.startTyping(threadId);
 					if (!(await this.wait(turn))) {
 						turn.interrupted = true;
