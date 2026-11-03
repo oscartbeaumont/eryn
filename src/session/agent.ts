@@ -14,7 +14,7 @@ import type { Configuration } from "@opencode/sdk/workerd";
 import type { Plugin as PromisePlugin } from "@opencode/plugin";
 
 import { CATALOGUE_PATH } from "../catalogue";
-import { KEYS, intFromEnv, log, publicOrigin } from "../config";
+import { KEYS, log, publicOrigin } from "../config";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
 import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
@@ -43,7 +43,7 @@ import {
 
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
-const DEFAULT_TURN_TIMEOUT_SECONDS = 900;
+const TURN_TIMEOUT_MS = 900_000;
 
 /** A Discord attachment larger than this is skipped rather than decoded in the isolate. */
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -1272,14 +1272,12 @@ class GuildAgentImpl implements GuildAgentShape {
 /** The guild's agent as a service. */
 export class GuildAgent extends Context.Service<GuildAgent, GuildAgentShape>()("eryn/bot/GuildAgent") {
 	static layer(env: Env, storage: DurableObjectStorage): Layer.Layer<GuildAgent, never, Workspace | DiscordApi> {
-		const timeout =
-			intFromEnv(env.DISCORD_TURN_TIMEOUT_SECONDS, DEFAULT_TURN_TIMEOUT_SECONDS, 30, 3_600) * 1_000;
 		return Layer.effect(
 			this,
 			Effect.gen(function* () {
 				const workspace = yield* Workspace;
 				const rest = yield* DiscordApi;
-				return new GuildAgentImpl(env, storage, workspace, rest, timeout);
+				return new GuildAgentImpl(env, storage, workspace, rest, TURN_TIMEOUT_MS);
 			}),
 		);
 	}

@@ -48,13 +48,6 @@ export function isValidModel(value: string): boolean {
 	return MODEL_PATTERN.test(value);
 }
 
-/** Read an integer from a text binding, clamped to a sane range. */
-export function intFromEnv(raw: string | undefined, fallback: number, min: number, max: number): number {
-	const value = Number.parseInt(raw ?? "", 10);
-	if (!Number.isFinite(value)) return fallback;
-	return Math.min(max, Math.max(min, value));
-}
-
 /** The public origin to build links with, normalised without a trailing slash. */
 export function publicOrigin(env: Env): string {
 	return env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") || DEFAULT_PUBLIC_ORIGIN;

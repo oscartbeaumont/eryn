@@ -125,5 +125,3 @@ curl -s https://eryn.otbeaumont.me/health
 | `ENCRYPTION_KEY` | Base64url 32-byte key for sealing stored credentials |
 | `SESSION_SECRET` | Signs MCP sign-in state and callback links |
 | `PUBLIC_ORIGIN` | Origin used in links and OAuth callbacks |
-| `DISCORD_KEEPALIVE_SECONDS` | Interval for the socket keepalive alarm |
-| `DISCORD_TURN_TIMEOUT_SECONDS` | Maximum length of one agent turn |

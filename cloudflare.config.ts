@@ -43,12 +43,6 @@ export default defineConfig({
 			// Public origin used in links and OAuth callbacks.
 			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
 
-			// How often the bot gateway's keepalive alarm fires; a long interval is
-			// both safe and cheap because a session resume loses no messages.
-			DISCORD_KEEPALIVE_SECONDS: bindings.text("840"),
-			// Seconds a single agent turn may run before it is interrupted.
-			DISCORD_TURN_TIMEOUT_SECONDS: bindings.text("900"),
-
 			// The deploy this Worker is serving. A deploy does not restart a live
 			// object, and an object's own copy of this binding is pinned to the
 			// deploy it started on, so the Worker sends this to each object on

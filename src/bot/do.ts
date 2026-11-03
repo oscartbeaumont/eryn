@@ -15,7 +15,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { CLIENT_ID, intFromEnv, log as botLog } from "../config";
+import { CLIENT_ID, log as botLog } from "../config";
 import { DEPLOY_HEADER, currentDeploy } from "../deploy";
 import { describeError } from "../errors";
 import {
@@ -35,7 +35,7 @@ import { maybeAnnounceInstall } from "./install";
 const WAKE_PATH = "/wake";
 const THREAD_PREFIX = "thread:";
 const MAX_THREAD_NAME = 100;
-const DEFAULT_KEEPALIVE_SECONDS = 840;
+const KEEPALIVE_MS = 840_000;
 /** Text that interrupts the running turn when sent in an owned thread. */
 const STOP_TEXT = new Set(["stop", "cancel", "!stop", "!cancel", "/stop", "/cancel"]);
 
@@ -51,7 +51,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	private readonly socket: DiscordSocket;
-	private readonly keepAliveMs: number;
+	private readonly keepAliveMs = KEEPALIVE_MS;
 	private readonly locks = new Map<string, Promise<void>>();
 	/** Bot managed-role id per guild, resolved lazily. */
 	private readonly roleCache = new Map<string, string>();
@@ -83,7 +83,6 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		super(state, env);
 		this.token = env.DISCORD_BOT_TOKEN?.trim() ?? "";
 		this.rest = discordRest(this.token);
-		this.keepAliveMs = intFromEnv(env.DISCORD_KEEPALIVE_SECONDS, DEFAULT_KEEPALIVE_SECONDS, 60, 3_600) * 1_000;
 		this.socket = new DiscordSocket(this.token, log, {
 			onMessage: (message) => this.track(() => this.onMessage(message), "message handling failed"),
 			onInteraction: (interaction) =>
