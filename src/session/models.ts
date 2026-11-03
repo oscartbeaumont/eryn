@@ -330,13 +330,14 @@ export const PromptAttachmentSchema = Schema.Struct({
 });
 export type PromptAttachment = typeof PromptAttachmentSchema.Type;
 
-/** The person who sent the message the agent is answering. */
-export const PromptAuthorSchema = Schema.Struct({
+/** A Discord account the model may need to identify in a message. */
+export const PromptUserSchema = Schema.Struct({
 	name: Schema.String,
 	username: Schema.optional(Schema.String),
 	id: Schema.optional(Schema.String),
+	bot: Schema.optional(Schema.Boolean),
 });
-export type PromptAuthor = typeof PromptAuthorSchema.Type;
+export type PromptUser = typeof PromptUserSchema.Type;
 
 export const PromptRequestSchema = Schema.Struct({
 	guildId: Schema.String,
@@ -344,7 +345,9 @@ export const PromptRequestSchema = Schema.Struct({
 	title: Schema.optional(Schema.String),
 	text: Schema.String,
 	/** The speaker's name, handle, and Discord id, so the agent knows who is talking. */
-	author: Schema.optional(PromptAuthorSchema),
+	author: Schema.optional(PromptUserSchema),
+	/** Other users or bots mentioned in the message. */
+	mentions: Schema.optional(Schema.Array(PromptUserSchema)),
 	/** Where the request came from in Discord, recorded on the session. */
 	discord: Schema.optional(DiscordContextSchema),
 	/** Files attached to the message, for the model to read. */

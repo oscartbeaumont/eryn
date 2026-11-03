@@ -38,6 +38,7 @@ import {
 	type OAuthStatus,
 	type PromptAttachment,
 	type PromptRequest,
+	type PromptUser,
 	type ProviderConnection,
 	type ProviderField,
 } from "./models";
@@ -169,21 +170,29 @@ function failureNote(error: string): string {
  * who spoke: without this the agent cannot tell whether it is answering the
  * person who opened the thread or someone else who just joined it.
  */
+function userTag(user: PromptUser): string {
+	const attributes: [string, string][] = [
+		["name", user.name],
+		...(user.username ? [["username", user.username] as [string, string]] : []),
+		...(user.id ? [["id", user.id] as [string, string]] : []),
+		...(user.bot ? [["bot", "true"] as [string, string]] : []),
+	];
+	return `<user ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
+}
+
 function userMessage(request: PromptRequest): string {
 	// A message can be only files; say so rather than handing the model an empty
 	// line that reads like a mistake.
 	const text = request.text.trim() || "(attached files)";
-	const author = request.author;
-	if (!author) return text;
-	const attributes: [string, string][] = [
-		["name", author.name],
-		...(author.username ? [["username", author.username] as [string, string]] : []),
-		...(author.id ? [["userId", author.id] as [string, string]] : []),
-	];
-	// Keep the speaker metadata separate from the user's text. A single
-	// self-closing element matches the Discord context block and cannot be
-	// confused with a mention or a line of the request.
-	return `<speaker ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />\n\n${text}`;
+	const blocks: string[] = [];
+	if (request.author) blocks.push(userTag(request.author));
+	const mentions = request.mentions ?? [];
+	if (mentions.length > 0) {
+		blocks.push(`<mentions>\n${mentions.map((user) => `  ${userTag(user)}`).join("\n")}\n</mentions>`);
+	}
+	// Keep account metadata separate from the user's text. Inline <@id> mentions
+	// stay in the text and resolve through the <user> references above.
+	return blocks.length > 0 ? `${blocks.join("\n")}\n\n${text}` : text;
 }
 
 /** Render the streamed text so far, preferring messages that belong to a step. */

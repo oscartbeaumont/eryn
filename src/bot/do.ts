@@ -400,6 +400,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 					title,
 					text,
 					author: this.authorInfo(message),
+					mentions: this.mentionInfo(message),
 					discord,
 					attachments: this.attachmentsOf(message),
 				});
@@ -469,6 +470,37 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			...(username ? { username } : {}),
 			...(message.author?.id ? { id: message.author.id } : {}),
 		};
+	}
+
+	/**
+	 * Other accounts pinged by the message, so inline <@id> references are not
+	 * opaque. The author is already the speaker and is left out here.
+	 */
+	private mentionInfo(message: DiscordMessage): {
+		name: string;
+		username?: string;
+		id?: string;
+		bot?: boolean;
+	}[] {
+		const seen = new Set<string>();
+		const mentions: {
+			name: string;
+			username?: string;
+			id?: string;
+			bot?: boolean;
+		}[] = [];
+		for (const user of message.mentions ?? []) {
+			if (!user.id || user.id === message.author?.id || seen.has(user.id)) continue;
+			seen.add(user.id);
+			const username = user.username?.trim();
+			mentions.push({
+				name: user.global_name?.trim() || username || user.id,
+				...(username ? { username } : {}),
+				id: user.id,
+				...(user.bot ? { bot: true } : {}),
+			});
+		}
+		return mentions;
 	}
 
 	/**
