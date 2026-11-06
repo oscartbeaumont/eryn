@@ -9,7 +9,7 @@
 import { Schema } from "effect";
 
 /**
- * Where a thread's conversation lives, in Discord terms.
+ * Where a conversation lives, in Discord terms.
  *
  * The gateway writes this into a session's metadata so the Discord plugin can
  * tell the agent where it is. It lives here because it is a stored record: the
@@ -25,8 +25,13 @@ export const DiscordContextSchema = Schema.Struct({
 	guild: DiscordRefSchema,
 	/** The channel the bot was invoked in — the thread's parent, when there is one. */
 	channel: DiscordRefSchema,
-	/** The thread the conversation happens in, and where replies are posted. */
+	/**
+	 * Where replies are posted: the thread for a threaded conversation, or the
+	 * channel itself for a subscribed channel.
+	 */
 	thread: DiscordRefSchema,
+	/** Whether replies land in a thread or directly in a subscribed channel. */
+	kind: Schema.optional(Schema.Literals(["thread", "channel"])),
 });
 export type DiscordContext = typeof DiscordContextSchema.Type;
 

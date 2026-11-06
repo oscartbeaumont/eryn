@@ -1,5 +1,6 @@
 /**
- * Streams an assistant reply into a Discord thread.
+ * Streams an assistant reply into a Discord conversation, which is a thread or
+ * a subscribed channel.
  *
  * Nothing is posted until there is text to show. While the agent is thinking,
  * the caller's typing indicator is the only progress signal. The first text

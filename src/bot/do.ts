@@ -30,6 +30,7 @@ import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mention
 const WAKE_PATH = "/wake";
 const SUBSCRIPTION_PATH = "/subscription";
 const THREAD_PREFIX = "thread:";
+const CHANNEL_PREFIX = "channel:";
 const KEEPALIVE_MS = 840_000;
 
 function log(message: string): void {
@@ -132,13 +133,18 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
 			const body = (await request.json().catch(() => undefined)) as
-				| { guildId?: unknown; threadId?: unknown; subscribed?: unknown }
+				| { guildId?: unknown; kind?: unknown; id?: unknown; subscribed?: unknown }
 				| undefined;
-			if (typeof body?.threadId !== "string" || typeof body?.subscribed !== "boolean") {
+			if (
+				(body?.kind !== "thread" && body?.kind !== "channel") ||
+				typeof body.id !== "string" ||
+				typeof body.subscribed !== "boolean"
+			) {
 				return json({ error: "bad request" }, 400);
 			}
-			if (body.subscribed) await this.ctx.storage.put(THREAD_PREFIX + body.threadId, true);
-			else await this.ctx.storage.delete(THREAD_PREFIX + body.threadId);
+			const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
+			if (body.subscribed) await this.ctx.storage.put(key, true);
+			else await this.ctx.storage.delete(key);
 			return json({ ok: true });
 		}
 		if (pathname === WAKE_PATH) {
@@ -258,6 +264,30 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			return;
 		}
 
+		// A message in a subscribed channel is a request too, even without a
+		// mention; the reply lands in the channel rather than in a new thread.
+		if (await this.ownsChannel(channel.id)) {
+			const text = stripMention(message.content ?? "", this.botUserId, roleId);
+			if (!text && attachmentsOf(message).length === 0) return;
+			if (isStopText(text)) {
+				await this.stopThread(guildId, channel.id);
+				return;
+			}
+			if (!(await this.guildReady(guildId))) {
+				await this.requireSetup(channel.id);
+				return;
+			}
+			await this.forward(
+				guildId,
+				channel.id,
+				threadName(text),
+				text,
+				message,
+				await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel"),
+			);
+			return;
+		}
+
 		// Otherwise require an explicit mention and open a thread for the request.
 		if (!isMention(message, this.botUserId, roleId)) return;
 
@@ -307,26 +337,28 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			log: (message) => log(message),
 			applicationId: this.botUserId ?? CLIENT_ID,
 			session: (guildId) => this.session(guildId),
-			ownsThread: (threadId) => this.ownsThread(threadId),
+			ownsConversation: async (channelId) =>
+				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);
 	}
 
 	/**
-	 * A deleted thread can never receive the reply, so a turn still running in it
-	 * is cancelled rather than left to finish into nothing, and the record that
-	 * says we own the thread goes with it.
+	 * A deleted thread or channel can never receive the reply, so a turn still
+	 * running in it is cancelled rather than left to finish into nothing, and
+	 * the record that says we own the conversation goes with it.
 	 */
 	private async onChannelDelete(channel: DiscordChannel): Promise<void> {
-		if (!THREAD_TYPES.has(channel.type ?? 0)) return;
 		const guildId = channel.guild_id;
 		if (guildId === undefined) return;
-		if (!(await this.ownsThread(channel.id))) return;
+		const isThread = THREAD_TYPES.has(channel.type ?? 0);
+		const owned = isThread ? await this.ownsThread(channel.id) : await this.ownsChannel(channel.id);
+		if (!owned) return;
 		await this.stopThread(guildId, channel.id, true).catch((error) =>
-			log(`could not stop the turn in deleted thread ${channel.id}: ${describeError(error)}`),
+			log(`could not stop the turn in deleted ${isThread ? "thread" : "channel"} ${channel.id}: ${describeError(error)}`),
 		);
-		await this.ctx.storage.delete(THREAD_PREFIX + channel.id);
+		await this.ctx.storage.delete((isThread ? THREAD_PREFIX : CHANNEL_PREFIX) + channel.id);
 	}
 
 	// --- Session object plumbing ------------------------------------------------
@@ -405,6 +437,10 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	private ownsThread(threadId: string): Promise<boolean> {
 		return this.ctx.storage.get<boolean>(THREAD_PREFIX + threadId).then((value) => value === true);
+	}
+
+	private ownsChannel(channelId: string): Promise<boolean> {
+		return this.ctx.storage.get<boolean>(CHANNEL_PREFIX + channelId).then((value) => value === true);
 	}
 
 	/** Serialise work that shares a session so messages keep their order. */

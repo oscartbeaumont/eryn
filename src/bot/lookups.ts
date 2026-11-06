@@ -63,18 +63,23 @@ export class DiscordLookups {
 	/**
 	 * Describe where the agent was invoked, for the session to store and the
 	 * `eryn.discord` plugin to put in front of the model.
+	 *
+	 * `conversation` is where replies go. It is usually a thread, but a
+	 * subscribed channel is its own conversation, so `kind` says which.
 	 */
 	async context(
 		guildId: string,
 		invocation: DiscordChannelRef | undefined,
-		thread: { id: string; name?: string },
+		conversation: { id: string; name?: string },
+		kind: "thread" | "channel" = "thread",
 	): Promise<DiscordContext> {
-		const channel = invocation ?? thread;
+		const channel = invocation ?? conversation;
 		const guildName = await this.guildName(guildId);
 		return {
 			guild: guildName ? { id: guildId, name: guildName } : { id: guildId },
 			channel: channel.name ? { id: channel.id, name: channel.name } : { id: channel.id },
-			thread: thread.name ? { id: thread.id, name: thread.name } : { id: thread.id },
+			thread: conversation.name ? { id: conversation.id, name: conversation.name } : { id: conversation.id },
+			kind,
 		};
 	}
 }

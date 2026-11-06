@@ -18,7 +18,6 @@ import { describeError } from "../errors";
 import {
 	agentInstructionsPlugin,
 	discordPlugin,
-	discordToolsPlugin,
 	mcpGuidancePlugin,
 	workspacePlugin,
 } from "../plugins";
@@ -58,11 +57,12 @@ type RemoteMcpServer = {
 	oauth: false;
 };
 
-/** Add or remove the bot gateway's marker for a subscribed thread. */
-async function setThreadSubscription(
+/** Add or remove the bot gateway's marker for a subscribed conversation. */
+async function setSubscription(
 	env: Env,
 	guildId: string,
-	threadId: string,
+	kind: "thread" | "channel",
+	id: string,
 	subscribed: boolean,
 ): Promise<void> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
@@ -71,7 +71,7 @@ async function setThreadSubscription(
 		withDeploy(env, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ guildId, threadId, subscribed }),
+			body: JSON.stringify({ guildId, kind, id, subscribed }),
 		}),
 	);
 	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
@@ -118,9 +118,8 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	const plugins = [
 		agentInstructionsPlugin(),
 		workspacePlugin(storage),
-		discordPlugin(),
-		discordToolsPlugin(rest, guildId, (threadId, subscribed) =>
-			setThreadSubscription(env, guildId, threadId, subscribed),
+		discordPlugin(rest, guildId, (kind, id, subscribed) =>
+			setSubscription(env, guildId, kind, id, subscribed),
 		),
 	];
 	const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));

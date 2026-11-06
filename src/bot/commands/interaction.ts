@@ -28,7 +28,7 @@ export interface CommandContext {
 	readonly log: (message: string) => void;
 	readonly applicationId: string;
 	readonly session: (guildId: string) => SessionClient;
-	readonly ownsThread: (threadId: string) => Promise<boolean>;
+	readonly ownsConversation: (channelId: string) => Promise<boolean>;
 	readonly rest: DiscordRest;
 }
 

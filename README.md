@@ -3,7 +3,8 @@
 Eryn is a Discord bot that runs an [OpenCode](https://opencode.ai) agent inside a
 thread. Mention `@eryn` in a server and it opens a thread for the request, works
 through it, and streams the reply. Replies in the thread continue the same
-session.
+session. Eryn can also subscribe to a channel, where it answers every message
+in the channel itself and keeps one session for that channel.
 
 The hosted instance is at [eryn.otbeaumont.me](https://eryn.otbeaumont.me).
 There is no web dashboard; setup happens in Discord.
@@ -11,6 +12,8 @@ There is no web dashboard; setup happens in Discord.
 ## What it does
 
 - Gives each request its own thread, with a persistent session for follow-ups.
+- Can be subscribed to a channel, where it replies to every message in the
+  channel without needing a mention and keeps one session per channel.
 - Lets every Discord server connect its own inference provider and choose its
   own model. The server pays for its own inference.
 - Gives the agent a virtual filesystem and a sandboxed shell for working through
@@ -27,7 +30,8 @@ There is no web dashboard; setup happens in Discord.
 3. Choose **Connect provider**, connect the provider, then pick a model from the
    list Eryn shows next. OpenCode Go is available through the **OpenCode
    Console** connection; it is not a separate provider.
-4. Mention `@eryn` in a channel to start a thread.
+4. Mention `@eryn` in a channel to start a thread. To make Eryn answer in a
+   channel directly, ask it in a thread to join that channel.
 
 Everything is a slash command:
 

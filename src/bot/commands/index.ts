@@ -146,8 +146,8 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		case "stop":
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
-				if (!channelId || !(await ctx.ownsThread(channelId))) {
-					await responder(request).reply("There is no Eryn run in this thread.");
+				if (!channelId || !(await ctx.ownsConversation(channelId))) {
+					await responder(request).reply("There is no Eryn run here.");
 					return;
 				}
 				await responder(request).reply("Stopping the current run…");

@@ -5,7 +5,7 @@
  * connected providers, its chosen model, and its linked MCP servers; a change
  * to any of them rebuilds it, so a rotated key or a new link takes effect on
  * the next turn. A prompt runs the agent turn and streams the reply into the
- * Discord thread.
+ * Discord conversation: a thread, or a subscribed channel.
  */
 
 import { KEYS, log } from "../config";
@@ -638,8 +638,8 @@ class GuildAgentImpl implements GuildAgentShape {
 		const threadId = this.threadBySession.get(sessionID);
 		if (!threadId) {
 			// A schedule fires the Session directly, with no thread prompt to own
-			// the turn. Adopt it so its reply still lands in the Discord thread
-			// recorded on the Session.
+			// the turn. Adopt it so its reply still lands in the Discord
+			// conversation recorded on the Session.
 			if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
 				this.adopt(sessionID);
 			}

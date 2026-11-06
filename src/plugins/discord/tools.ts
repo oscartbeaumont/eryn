@@ -9,10 +9,16 @@
  * entry names its schema and returns a value, and {@link toolExecute} turns
  * that value (or a thrown refusal) into the result the model reads. They cover
  * what the agent needs to participate in a conversation — look around, read,
- * reply, manage threads, and react — and never touch server administration.
+ * post elsewhere, manage threads, subscribe to channels, and react — and never
+ * touch server administration. The agent's own reply is streamed into its
+ * conversation, so there is deliberately no second way for it to answer there.
+ *
+ * This module is wired up by {@link discordPlugin}, which also owns the
+ * per-session context: the two only make sense together, because the tools are
+ * how the agent acts in the conversation the context describes.
  */
 
-import { Plugin } from "@opencode/plugin";
+import type { Plugin } from "@opencode/plugin";
 
 import {
 	MAX_CONTENT,
@@ -44,10 +50,10 @@ type ChannelInput = { channelId: string };
 type MessageInput = ChannelInput & { messageId: string };
 type ThreadInput = { threadId: string };
 
-export function discordToolsPlugin(
+export function discordTools(
 	rest: DiscordRest,
 	guildId: string,
-	setSubscription: (threadId: string, subscribed: boolean) => Promise<void>,
+	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 ) {
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
@@ -62,6 +68,16 @@ export function discordToolsPlugin(
 	const thread = async (threadId: string): Promise<DiscordChannelRef> => {
 		const found = await channel(threadId);
 		if (!THREAD_TYPES.has(found.type)) throw new Error(`${threadId} is not a thread.`);
+		return found;
+	};
+
+	/** A channel that can hold a subscribed conversation, which a thread cannot. */
+	const subscribableChannel = async (channelId: string): Promise<DiscordChannelRef> => {
+		const found = await channel(channelId);
+		if (found.guild_id !== guildId) throw new Error(`Channel ${channelId} is not in this server.`);
+		if (THREAD_TYPES.has(found.type)) {
+			throw new Error(`${channelId} is a thread. Use discord_join_thread and discord_leave_thread for threads.`);
+		}
 		return found;
 	};
 
@@ -119,7 +135,7 @@ export function discordToolsPlugin(
 		{
 			name: "discord_send_message",
 			description:
-				"Send a message to a channel or thread in this server. Mentions are suppressed; replyTo attaches the message as a reply.",
+				"Send a message to a different channel or thread in this server. Your own reply is streamed into the current conversation automatically, so never use this to answer the conversation you are replying in — that posts a duplicate. Mentions are suppressed; replyTo attaches the message as a reply.",
 			input: objectSchema(
 				{
 					channelId: CHANNEL_ID,
@@ -187,7 +203,7 @@ export function discordToolsPlugin(
 				const { threadId } = rawInput as ThreadInput;
 				await thread(threadId);
 				await rest.joinThread(threadId);
-				await setSubscription(threadId, true);
+				await setSubscription("thread", threadId, true);
 				return { ok: true, threadId, subscribed: true };
 			},
 		},
@@ -200,8 +216,33 @@ export function discordToolsPlugin(
 				const { threadId } = rawInput as ThreadInput;
 				await thread(threadId);
 				await rest.leaveThread(threadId);
-				await setSubscription(threadId, false);
+				await setSubscription("thread", threadId, false);
 				return { ok: true, threadId, subscribed: false };
+			},
+		},
+
+		{
+			name: "discord_join_channel",
+			description:
+				"Subscribe Eryn to a channel. New messages in the channel will start a turn without needing a mention, and replies are posted in the channel. Use this for channels, not threads.",
+			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
+			async run(rawInput) {
+				const { channelId } = rawInput as ChannelInput;
+				await subscribableChannel(channelId);
+				await setSubscription("channel", channelId, true);
+				return { ok: true, channelId, subscribed: true };
+			},
+		},
+
+		{
+			name: "discord_leave_channel",
+			description: "Unsubscribe Eryn from a channel and stop responding to its messages.",
+			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
+			async run(rawInput) {
+				const { channelId } = rawInput as ChannelInput;
+				await subscribableChannel(channelId);
+				await setSubscription("channel", channelId, false);
+				return { ok: true, channelId, subscribed: false };
 			},
 		},
 
@@ -279,9 +320,9 @@ export function discordToolsPlugin(
 		},
 	];
 
-	return Plugin.define({
-		id: "eryn.discord-tools",
-		async setup(ctx) {
+	return {
+		/** Register the tools on the plugin context, after resolving the bot's id. */
+		async setup(ctx: Plugin.Context): Promise<void> {
 			botUserId = await rest.me().then((me) => me.id).catch(() => undefined);
 			await ctx.tool.transform((editor) => {
 				for (const spec of tools) {
@@ -294,5 +335,5 @@ export function discordToolsPlugin(
 				}
 			});
 		},
-	});
+	};
 }
