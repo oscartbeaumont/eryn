@@ -18,6 +18,18 @@ function isLoopback(hostname: string): boolean {
 	);
 }
 
+/** The loopback hosts a development deployment may talk to over plain HTTP. */
+export { isLoopback };
+
+/**
+ * Whether a URL is acceptable to talk to: HTTPS, or loopback HTTP during
+ * development. Every network module (redirects, the MCP probe, the OAuth flow)
+ * shares this rule, so "is this safe?" has one answer.
+ */
+export function isSecureUrl(url: URL): boolean {
+	return url.protocol === "https:" || (url.protocol === "http:" && isLoopback(url.hostname));
+}
+
 function assertSupported(url: URL, allowLoopback: boolean): void {
 	if (url.protocol === "https:") return;
 	if (allowLoopback && url.protocol === "http:" && isLoopback(url.hostname)) return;

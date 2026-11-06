@@ -1,5 +1,5 @@
 /**
- * The guild's embedded OpenCode host, provider catalogue, and turn machinery.
+ * The guild's agent: its embedded OpenCode host, provider connections, and turns.
  *
  * One instance per guild object. It builds the host lazily from the guild's
  * connected providers, its chosen model, and its linked MCP servers; a change
@@ -8,69 +8,31 @@
  * Discord thread.
  */
 
-import { Context, Effect, Layer } from "effect";
-import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
-import type { Configuration } from "@opencode/sdk/workerd";
-import type { Plugin as PromisePlugin } from "@opencode/plugin";
-
-import { CATALOGUE_PATH } from "../catalogue";
-import { KEYS, log, publicOrigin } from "../config";
-import { withDeploy } from "../deploy";
+import { KEYS, log } from "../config";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
-import { DISCORD_METADATA_KEY, readDiscordContext, type DiscordContext } from "../discord/context";
 import { renderUserMessage } from "../discord/render";
 import { DiscordStream } from "../discord/stream";
-import { fetchWithRedirects } from "../http";
-import { DiscordApi } from "../discord/api";
-import { Workspace } from "../opencode/store";
-import { workspacePlugin } from "../opencode/workspace";
-import { bytesToBase64 } from "../opencode/bytes";
-import { discordPlugin } from "../opencode/discord";
-import { agentInstructionsPlugin } from "../opencode/instructions";
-import { discordToolsPlugin } from "../opencode/discord-tools";
-import { mcpGuidancePlugin } from "../opencode/guidance";
-import mcpeventsPlugin from "../plugins/mcpevents";
-import type { FileStore } from "../opencode/store";
-import { createHost } from "./host";
-import {
-	type IntegrationMethodOption,
-	type IntegrationOption,
-	type McpLink,
-	type ModelOption,
-	type OAuthAttempt,
-	type OAuthStatus,
-	type PromptAttachment,
-	type PromptRequest,
-	type ProviderConnection,
-	type ProviderField,
+import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
+import { fetchAttachmentFiles } from "./attachments";
+import type { HostInterface } from "./host";
+import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
+import type {
+	DiscordContext,
+	IntegrationOption,
+	ModelOption,
+	OAuthAttempt,
+	OAuthStatus,
+	PromptRequest,
 } from "./models";
+import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
+import { applyTurnEvent, createTurn, failureNote, renderTurn, type Turn } from "./turn";
+
+export type { HostConfig };
 
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
 const TURN_TIMEOUT_MS = 900_000;
-
-/**
- * Integrations that supply provider ids other than their own. The catalogue
- * filter has to keep those providers' models, or the host never sees them.
- */
-const INTEGRATION_PROVIDERS: Record<string, readonly string[]> = {
-	opencode: ["opencode-go"],
-};
-
-/** A Discord attachment larger than this is skipped rather than decoded in the isolate. */
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-/** Image types the providers accept as prompt files. */
-const ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-/** Discord's CDN hosts, so an attachment URL cannot point anywhere else. */
-const ATTACHMENT_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
-
-/** Everything the host needs to be built, and to decide whether to rebuild. */
-export interface HostConfig {
-	readonly connections: readonly ProviderConnection[];
-	readonly model: string;
-	readonly links: readonly McpLink[];
-}
 
 /** The live state of one thread inside this guild's object. */
 interface ThreadRun {
@@ -78,266 +40,13 @@ interface ThreadRun {
 	stream?: DiscordStream;
 }
 
-/** The shape the host's config wants for a remote MCP server. */
-type RemoteMcpServer = {
-	type: "remote";
-	url: string;
-	headers?: Record<string, string>;
-	oauth: false;
-};
-
 interface Host {
-	promise: Promise<OpenCodeWorkerd.Interface>;
-	/** Signature of the provider set, so a changed or rotated credential rebuilds the host. */
+	promise: Promise<HostInterface>;
+	/** Signature of the provider set, at the time the host was built. */
 	connections: string;
-	/** Signature of the linked MCP servers, so adding one rebuilds the host. */
+	/** Signature of the linked MCP servers, at the time the host was built. */
 	mcp: string;
 }
-
-interface Turn {
-	readonly threadId: string;
-	readonly createdAt: number;
-	readonly parts: Map<string, Map<number, string>>;
-	/** Assistant message ids that belong to a real step, excluding auxiliary requests. */
-	readonly main: Set<string>;
-	done: boolean;
-	interrupted: boolean;
-	failed: boolean;
-	/** Set when the thread was deleted, so the reply has nowhere to go. */
-	gone: boolean;
-	error?: string;
-	readonly resolve: () => void;
-	readonly completed: Promise<void>;
-}
-
-function createTurn(threadId: string): Turn {
-	let resolve!: () => void;
-	const completed = new Promise<void>((res) => {
-		resolve = res;
-	});
-	return {
-		threadId,
-		createdAt: Date.now(),
-		parts: new Map(),
-		main: new Set(),
-		done: false,
-		interrupted: false,
-		failed: false,
-		gone: false,
-		resolve,
-		completed,
-	};
-}
-
-function completeTurn(turn: Turn): void {
-	if (turn.done) return;
-	turn.done = true;
-	turn.resolve();
-}
-
-/** Split a stored `provider/model` reference for the session API. */
-function parseModelRef(model: string): { providerID: string; id: string } | undefined {
-	const at = model.indexOf("/");
-	if (at <= 0 || at === model.length - 1) return undefined;
-	return { providerID: model.slice(0, at), id: model.slice(at + 1) };
-}
-
-/** The error detail an SDK failure carries, if any. */
-function errorDetail(error: unknown): string | undefined {
-	if (!error || typeof error !== "object") return undefined;
-	const shape = error as { message?: unknown; type?: unknown };
-	if (typeof shape.message === "string" && shape.message.trim()) return shape.message.trim();
-	if (typeof shape.type === "string") return shape.type;
-	return undefined;
-}
-
-/**
- * What to say when a turn failed. The SDK reports the provider's own message,
- * which is far more useful than a generic apology, and the fix is almost always
- * the model or the key for this server.
- */
-function failureNote(error: string): string {
-	const hint = /deprecat|unavailable|not found/i.test(error)
-		? "\n\nThe model for this server is no longer available — pick another with `/eryn setup`."
-		: /credential|unauthor|401|403/i.test(error)
-			? "\n\nThe key for this server was rejected — check or replace it with `/eryn setup`."
-			: "";
-	return `**That turn failed.**\n> ${error}${hint}`;
-}
-
-/** Render the streamed text so far, preferring messages that belong to a step. */
-function renderTurn(turn: Turn): string {
-	const messages: string[] = [];
-	for (const [messageID, ordinals] of turn.parts) {
-		if (turn.main.size > 0 && !turn.main.has(messageID)) continue;
-		const text = [...ordinals.entries()]
-			.sort((a, b) => a[0] - b[0])
-			.map(([, value]) => value)
-			.join("")
-			.trim();
-		if (text) messages.push(text);
-	}
-	return messages.join("\n\n").trim();
-}
-
-/** How a provider describes one way to connect it, as far as we read it. */
-type HostIntegrationMethod =
-	| { type: "key"; label?: string }
-	| { type: "oauth"; id: string; label: string; form?: readonly unknown[] }
-	| { type: "command"; id: string; label: string }
-	| { type: "external"; id: string; label: string }
-	| { type: "env"; names: readonly string[] };
-
-/**
- * Which flows this deployment can run.
- *
- * `key` is a secret we can hold and replay, and `oauth` is a browser round trip
- * the host performs. The rest cannot work here, and are reported rather than
- * hidden so the setup command can say why a provider cannot be connected.
- */
-function describeMethod(method: HostIntegrationMethod): IntegrationMethodOption | undefined {
-	const label = (fallback: string) => {
-		const value = (method as { label?: unknown }).label;
-		return typeof value === "string" && value.trim() ? value.trim() : fallback;
-	};
-	switch (method.type) {
-		case "key":
-			return { type: "key", label: label("API key"), supported: true };
-		case "oauth": {
-			const fields = (Array.isArray(method.form) ? method.form : []).map(describeField);
-			return {
-				type: "oauth",
-				id: typeof method.id === "string" ? method.id : "",
-				label: label("Sign in"),
-				supported: fields.every((field) => field !== undefined),
-				fields: fields.filter((field): field is ProviderField => field !== undefined),
-			};
-		}
-		case "env": {
-			const names = (Array.isArray(method.names) ? method.names : []).filter(
-				(name): name is string => typeof name === "string",
-			);
-			return {
-				type: "env",
-				label: names.length ? `Environment variable (${names.join(", ")})` : "Environment variable",
-				supported: false,
-			};
-		}
-		case "command":
-			return { type: "command", label: label("Run a command"), supported: false };
-		case "external":
-			return { type: "external", label: label("External credential"), supported: false };
-		default:
-			return undefined;
-	}
-}
-
-/**
- * Project one field of a flow's form. The provider declares these, so this
- * validates rather than trusts: a field of a kind a Worker cannot render is
- * left out, and the flow it belongs to is then reported as unavailable.
- */
-function describeField(value: unknown): ProviderField | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const field = value as Record<string, unknown>;
-	if (typeof field.key !== "string" || !field.key) return undefined;
-	const when = readConditions(field.when);
-	const common = {
-		key: field.key,
-		...(typeof field.title === "string" ? { title: field.title } : {}),
-		...(typeof field.description === "string" ? { description: field.description } : {}),
-		...(field.required === true ? { required: true } : {}),
-		...(when ? { when } : {}),
-	};
-	if (field.type === "string") {
-		const options = readOptions(field.options);
-		return {
-			...common,
-			type: "string",
-			...(typeof field.placeholder === "string" ? { placeholder: field.placeholder } : {}),
-			...(typeof field.default === "string" ? { default: field.default } : {}),
-			...(options ? { options } : {}),
-		};
-	}
-	if (field.type === "number" || field.type === "integer") {
-		return {
-			...common,
-			type: field.type,
-			...(typeof field.default === "number" ? { default: field.default } : {}),
-		};
-	}
-	if (field.type === "boolean") {
-		return {
-			...common,
-			type: "boolean",
-			...(typeof field.default === "boolean" ? { default: field.default } : {}),
-		};
-	}
-	return undefined;
-}
-
-/**
- * Whether a sign-in sends the browser back to the machine running this Worker.
- *
- * Several of OpenCode's provider flows open a listener on `127.0.0.1` and wait
- * for the provider to redirect to it. That cannot work here: a Worker has no
- * inbound socket, and the address names the *caller's* machine. The only trace
- * is the redirect in the URL the flow hands back, so that is what is inspected.
- */
-function needsLocalCallback(url: string): boolean {
-	try {
-		const redirect = new URL(url).searchParams.get("redirect_uri");
-		if (!redirect) return false;
-		const host = new URL(redirect).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-		return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
-	} catch {
-		return false;
-	}
-}
-
-/** A field's visibility conditions, ignoring anything malformed. */
-function readConditions(value: unknown): ProviderField["when"] {
-	if (!Array.isArray(value)) return undefined;
-	const conditions: { key: string; op: "eq" | "neq"; value: string | number | boolean }[] = [];
-	for (const entry of value) {
-		if (!entry || typeof entry !== "object") continue;
-		const condition = entry as { key?: unknown; op?: unknown; value?: unknown };
-		if (typeof condition.key !== "string") continue;
-		if (condition.op !== "eq" && condition.op !== "neq") continue;
-		const expected = condition.value;
-		if (typeof expected !== "string" && typeof expected !== "number" && typeof expected !== "boolean") continue;
-		conditions.push({ key: condition.key, op: condition.op, value: expected });
-	}
-	return conditions.length ? conditions : undefined;
-}
-
-/** A string field's choices, ignoring anything malformed. */
-function readOptions(value: unknown): ProviderField["options"] {
-	if (!Array.isArray(value)) return undefined;
-	const options = value.flatMap((entry) => {
-		if (!entry || typeof entry !== "object") return [];
-		const option = entry as { value?: unknown; label?: unknown; description?: unknown };
-		if (typeof option.value !== "string" || typeof option.label !== "string") return [];
-		return [
-			{
-				value: option.value,
-				label: option.label,
-				...(typeof option.description === "string" ? { description: option.description } : {}),
-			},
-		];
-	});
-	return options.length ? options : undefined;
-}
-
-/** Models preferred when a guild has not chosen one (or chose a free one). */
-const PREFERRED_MODELS = [
-	"deepseek-v4.1-flash",
-	"claude-sonnet-4-5",
-	"claude-sonnet-4-6",
-	"gpt-5",
-	"gpt-5.1",
-	"gemini-2.5-pro",
-];
 
 /** The service surface the session object drives. */
 export interface GuildAgentShape {
@@ -361,38 +70,12 @@ export interface GuildAgentShape {
 	ensureHost(config: HostConfig): Promise<void>;
 }
 
-/** Read at most `limit` bytes; `undefined` means the body exceeded it. */
-async function readCapped(response: Response, limit: number): Promise<Uint8Array | undefined> {
-	const reader = response.body?.getReader();
-	if (!reader) return new Uint8Array(0);
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		if (!value) continue;
-		total += value.byteLength;
-		if (total > limit) {
-			await reader.cancel().catch(() => undefined);
-			return undefined;
-		}
-		chunks.push(value);
-	}
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
-}
-
 class GuildAgentImpl implements GuildAgentShape {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
 	private consuming: Promise<void> | undefined;
 	/** The host the live event subscription belongs to. */
-	private consumingHost: OpenCodeWorkerd.Interface | undefined;
+	private consumingHost: HostInterface | undefined;
 	/** Sessions whose out-of-band turn is being adopted, so two events cannot race. */
 	private readonly adopting = new Set<string>();
 	/** The model catalogue for the current host, fetched at most once per host. */
@@ -417,7 +100,6 @@ class GuildAgentImpl implements GuildAgentShape {
 	constructor(
 		private readonly env: Env,
 		private readonly storage: DurableObjectStorage,
-		private readonly files: FileStore,
 		private readonly rest: DiscordRest,
 		private readonly turnTimeoutMs: number,
 		private readonly guildId: string,
@@ -425,54 +107,17 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	// --- Host -----------------------------------------------------------------
 
-	/** Add or remove the bot gateway's marker for a subscribed thread. */
-	private async setThreadSubscription(threadId: string, subscribed: boolean): Promise<void> {
-		const stub = this.env.BOT_GATEWAY.get(this.env.BOT_GATEWAY.idFromName("bot"));
-		const response = await stub.fetch(
-			"https://bot.internal/subscription",
-			withDeploy(this.env, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ guildId: this.guildId, threadId, subscribed }),
-			}),
-		);
-		if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
-	}
-
-	private mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {
-		const servers: Record<string, RemoteMcpServer> = {};
-		for (const link of links) {
-			servers[link.name] = {
-				type: "remote",
-				url: link.url,
-				oauth: false,
-				// Leave codemode unset. OpenCode uses Code Mode for normal MCP
-				// servers and keeps Executor/PostHog direct because they already
-				// expose their own execute tool.
-				...(link.token ? { headers: { Authorization: `Bearer ${link.token}` } } : {}),
-			};
-		}
-		return Object.keys(servers).length ? { servers } : undefined;
-	}
-
 	/**
 	 * The embedded OpenCode host for this guild, built on first use and rebuilt
 	 * when the provider set, the model, or the linked MCP servers change.
 	 */
-	private async hostFor(config: HostConfig, excludeThreadId?: string): Promise<OpenCodeWorkerd.Interface> {
-		const signature = config.connections
-			.map((connection) => `${connection.integrationID}:${connection.method}:${connection.key}`)
-			.sort()
-			.join("\u0000");
-		const mcp = this.mcpConfig(config.links);
-		const mcpSignature = config.links
-			.map((link) => `${link.id}:${link.url}:${link.token ?? ""}`)
-			.sort()
-			.join("|");
+	private async hostFor(config: HostConfig, excludeThreadId?: string): Promise<HostInterface> {
+		const connections = connectionSignature(config.connections);
+		const mcp = linkSignature(config.links);
 
 		const changed =
 			this.host !== undefined &&
-			(this.host.connections !== signature || this.host.mcp !== mcpSignature);
+			(this.host.connections !== connections || this.host.mcp !== mcp);
 		// A config change must not tear down a host that has another thread's turn
 		// streaming on it. The turn being started is allowed through.
 		const busy = [...this.runs].some(
@@ -482,88 +127,14 @@ class GuildAgentImpl implements GuildAgentShape {
 			const previous = this.host?.promise;
 			this.abort?.abort();
 			this.abort = new AbortController();
-
-			// All three are promise-API plugins, which is what this host accepts. The
-			// MCP-events plugin parses upstream envelopes with Effect Schema, but its
-			// lifecycle is the promise plugin API.
-			const plugins: PromisePlugin.Plugin[] = [
-				agentInstructionsPlugin(),
-				workspacePlugin(this.files),
-				discordPlugin(),
-				discordToolsPlugin(this.rest, this.guildId, (threadId, subscribed) => this.setThreadSubscription(threadId, subscribed)),
-				mcpeventsPlugin,
-			];
-			const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
-			if (guidance) plugins.push(guidance);
-
-			const catalogueProviders = new Set(config.connections.map((connection) => connection.integrationID));
-			for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
-				if (!catalogueProviders.has(integrationID)) continue;
-				for (const providerID of providerIDs) catalogueProviders.add(providerID);
-			}
-
-			const promise = createHost({
+			const promise = buildHost(config, {
+				env: this.env,
 				storage: this.storage,
-				// `experimental.schedules` gives Sessions a durable schedule table.
-				// The runner that fires it is started on the host runtime.
-				schedules: true,
-				// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
-				// exceeds a Durable Object's memory. Ask this deployment's own
-				// endpoint for the same catalogue with only the connected providers
-				// keeping their models; the provider list itself stays complete.
-				models: {
-					snapshot: false,
-					fetch: true,
-					url: `${publicOrigin(this.env)}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
-				},
-				config: {
-					model: config.model,
-					default_agent: "build",
-					permissions: [{ action: "*", resource: "*", effect: "allow" }],
-					mcp,
-					experimental: { schedules: true },
-				},
-				plugins,
-			}).then(async (host) => {
-				// Every provider is connected the same way: the integration the guild
-				// chose and the key it gave us. The credential is supplied as an
-				// integration credential, not as `providers.<id>.settings.apiKey`,
-				// because only the integration store reaches provider activation.
-				//
-				// Connecting is idempotent: the provider records the host persists are
-				// bound to a credential id, so minting a fresh credential on every host
-				// build would leave every known model unreachable (`provider.no-route`)
-				// after each restart. Reuse the credential for this key, and clear out
-				// the duplicates earlier builds left behind.
-				const credentials = await host.credential.list().catch(() => []);
-				for (const connection of config.connections) {
-					if (!connection.key) continue;
-					const owned = credentials.filter((entry) => entry.integrationID === connection.integrationID);
-					const existing = owned.find(
-						(entry) => entry.value.type === "key" && entry.value.key === connection.key,
-					);
-					try {
-						if (!existing) {
-							await host.integration.connect.key({
-								integrationID: connection.integrationID,
-								key: connection.key,
-								location: { directory: LOCATION },
-							});
-							continue;
-						}
-						if (!existing.active) await host.credential.activate({ credentialID: existing.id });
-						for (const stale of owned) {
-							if (stale.id === existing.id) continue;
-							if (stale.value.type !== "key" || stale.value.key !== connection.key) continue;
-							await host.credential.remove({ credentialID: stale.id }).catch(() => undefined);
-						}
-					} catch (error) {
-						log("session", `could not connect ${connection.integrationID}: ${describeError(error)}`);
-					}
-				}
-				return host;
+				rest: this.rest,
+				guildId: this.guildId,
+				directory: LOCATION,
 			});
-			this.host = { promise, connections: signature, mcp: mcpSignature };
+			this.host = { promise, connections, mcp };
 			this.consuming = undefined;
 			// A different provider set means a different catalogue.
 			this.modelCache = undefined;
@@ -594,9 +165,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					id: String(entry.id),
 					name: entry.name || String(entry.id),
 					connected: Array.isArray(entry.connections) && entry.connections.length > 0,
-					methods: (Array.isArray(entry.methods) ? entry.methods : [])
-						.map(describeMethod)
-						.filter((method): method is IntegrationMethodOption => method !== undefined),
+					methods: describeMethods(entry.methods),
 				});
 			} catch (error) {
 				log("session", `could not describe ${String((entry as { id?: unknown }).id)}: ${describeError(error)}`);
@@ -614,42 +183,25 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * marks it unavailable.
 	 */
 	async models(config: HostConfig): Promise<ModelOption[]> {
-		return await this.listModels(config);
+		return this.listModels(config);
 	}
 
 	/**
 	 * The model a turn should use.
 	 *
-	 * A guild can connect a provider while the stored model still names another
-	 * one — the default names `opencode-go`, but a guild may have connected
-	 * `opencode`. That model cannot run, and the turn would produce nothing, so
-	 * fall back to a model from a provider that is actually connected.
+	 * The stored choice may name a provider this guild has not connected, in
+	 * which case the turn would produce nothing. `resolveModelChoice` falls back
+	 * to a model that can actually run; the switch is logged because it changes
+	 * what the next turn uses.
 	 */
 	async resolveModel(config: HostConfig): Promise<string> {
 		const provider = config.model.split("/")[0] ?? "";
 		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
-		const free = /-free$/i.test(config.model);
-		// A `-free` model is the host's fallback rather than a choice worth
-		// keeping: it is the one that tends to return nothing, and the provider
-		// the guild connected has real models.
-		if (directlyConnected && !free) return config.model;
-
-		const models = await this.listModels(config).catch(() => [] as ModelOption[]);
-		// An integration can supply providers beyond its own id, such as
-		// OpenCode Console supplying OpenCode Go.
-		if (!free && models.some((entry) => entry.id === config.model && entry.connected)) return config.model;
-		const candidates = models.filter((entry) => entry.connected && entry.enabled);
-		const preferred = PREFERRED_MODELS.map((name) => candidates.find((entry) => entry.id.endsWith(`/${name}`))).find(
-			(entry) => entry !== undefined,
+		const model = await resolveModelChoice(config.model, directlyConnected, () =>
+			this.listModels(config).catch(() => [] as ModelOption[]),
 		);
-		const fallback =
-			preferred ??
-			candidates.find((entry) => !/-free$/i.test(entry.id)) ??
-			candidates[0] ??
-			models.find((entry) => entry.connected);
-		if (!fallback || fallback.id === config.model) return config.model;
-		log("session", `using ${fallback.id} instead of ${config.model}`);
-		return fallback.id;
+		if (model !== config.model) log("session", `using ${model} instead of ${config.model}`);
+		return model;
 	}
 
 	private async listModels(config: HostConfig): Promise<ModelOption[]> {
@@ -703,7 +255,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * only has public free access is not counted until its integration is
 	 * connected.
 	 */
-	private async connectedProviders(host: OpenCodeWorkerd.Interface): Promise<Set<string>> {
+	private async connectedProviders(host: HostInterface): Promise<Set<string>> {
 		const integrations = await host.integration
 			.list({ location: { directory: LOCATION } })
 			.catch(() => undefined);
@@ -799,11 +351,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
 		const stream = new DiscordStream(this.rest, request.threadId);
-		const run = this.runs.get(request.threadId) ?? {};
-		const turn = createTurn(request.threadId);
-		run.turn = turn;
-		run.stream = stream;
-		this.runs.set(request.threadId, run);
+		const turn = this.beginTurn(request.threadId, stream);
 
 		let stopTyping: () => void = () => undefined;
 		try {
@@ -818,7 +366,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 			await this.applyModel(host, request.threadId, sessionID, config.model);
 
-			const attached = await this.attachedImages(request.attachments);
+			const attached = await fetchAttachmentFiles(request.attachments);
 			const message = renderUserMessage(request.author, request.mentions ?? [], request.text.trim() || "(attached files)");
 			const text =
 				attached.notes.length > 0
@@ -854,81 +402,29 @@ class GuildAgentImpl implements GuildAgentShape {
 			await stream.finish(`I hit an error before I could finish: ${describeError(error)}`);
 		} finally {
 			stopTyping();
-			turn.done = true;
-			const current = this.runs.get(request.threadId);
-			if (current && current.turn === turn) {
-				current.turn = undefined;
-				current.stream = undefined;
-				this.runs.delete(request.threadId);
-			}
+			this.endTurn(request.threadId, turn);
 			if (turn.gone) await this.discardThread(request.threadId);
 		}
 	}
 
-	/**
-	 * Turn Discord attachments into prompt files.
-	 *
-	 * The model sees pixels only when they are part of the prompt, so the file is
-	 * fetched from Discord's CDN and embedded as a data URL. Anything too large or
-	 * not an image is left out and reported, because silently dropping an image
-	 * is indistinguishable from the model ignoring it.
-	 */
-	private async attachedImages(
-		attachments: readonly PromptAttachment[] | undefined,
-	): Promise<{ files: { uri: string; name?: string }[]; notes: string[] }> {
-		const files: { uri: string; name?: string }[] = [];
-		const notes: string[] = [];
-		for (const attachment of attachments ?? []) {
-			const name = attachment.name?.trim() || "attachment";
-			let url: URL;
-			try {
-				url = new URL(attachment.url);
-			} catch {
-				notes.push(`${name}: invalid link`);
-				continue;
-			}
-			if (url.protocol !== "https:" || !ATTACHMENT_HOSTS.has(url.hostname)) {
-				notes.push(`${name}: unsupported link`);
-				continue;
-			}
-			const declared = attachment.contentType?.split(";")[0]?.trim().toLowerCase();
-			if (declared && !ATTACHMENT_TYPES.has(declared)) {
-				notes.push(`${name}: only images can be attached`);
-				continue;
-			}
-			if (typeof attachment.size === "number" && attachment.size > MAX_ATTACHMENT_BYTES) {
-				notes.push(`${name}: larger than 5 MB`);
-				continue;
-			}
-			try {
-				const response = await fetchWithRedirects(url, { headers: { accept: "image/*" } });
-				if (!response.ok) {
-					notes.push(`${name}: download failed (HTTP ${response.status})`);
-					continue;
-				}
-				const served = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-				const type = served && ATTACHMENT_TYPES.has(served) ? served : declared;
-				if (!type || !ATTACHMENT_TYPES.has(type)) {
-					notes.push(`${name}: unsupported type ${served ?? declared ?? "unknown"}`);
-					continue;
-				}
-				const declaredLength = Number(response.headers.get("content-length") ?? "");
-				if (Number.isFinite(declaredLength) && declaredLength > MAX_ATTACHMENT_BYTES) {
-					await response.body?.cancel().catch(() => undefined);
-					notes.push(`${name}: larger than 5 MB`);
-					continue;
-				}
-				const bytes = await readCapped(response, MAX_ATTACHMENT_BYTES);
-				if (!bytes) {
-					notes.push(`${name}: larger than 5 MB`);
-					continue;
-				}
-				files.push({ uri: `data:${type};base64,${bytesToBase64(bytes)}`, name });
-			} catch (error) {
-				notes.push(`${name}: ${describeError(error)}`);
-			}
-		}
-		return { files, notes };
+	/** Take ownership of a thread's turn, so events and the prompt agree on it. */
+	private beginTurn(threadId: string, stream: DiscordStream): Turn {
+		const run = this.runs.get(threadId) ?? {};
+		const turn = createTurn(threadId);
+		run.turn = turn;
+		run.stream = stream;
+		this.runs.set(threadId, run);
+		return turn;
+	}
+
+	/** Release a thread's turn, leaving the run behind for the next one. */
+	private endTurn(threadId: string, turn: Turn): void {
+		turn.done = true;
+		const run = this.runs.get(threadId);
+		if (run?.turn !== turn) return;
+		run.turn = undefined;
+		run.stream = undefined;
+		this.runs.delete(threadId);
 	}
 
 	/**
@@ -937,7 +433,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * is what actually applies the choice.
 	 */
 	private async applyModel(
-		host: OpenCodeWorkerd.Interface,
+		host: HostInterface,
 		threadId: string,
 		sessionID: string,
 		model: string,
@@ -958,7 +454,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * `eryn.discord` plugin can tell the agent about it.
 	 */
 	private async applyDiscord(
-		host: OpenCodeWorkerd.Interface,
+		host: HostInterface,
 		threadId: string,
 		sessionID: string,
 		discord: DiscordContext | undefined,
@@ -987,17 +483,16 @@ class GuildAgentImpl implements GuildAgentShape {
 	async interrupt(threadId: string | undefined, gone: boolean): Promise<boolean> {
 		const run = threadId ? this.runs.get(threadId) : undefined;
 		const sessionID = threadId ? await this.sessionFor(threadId) : undefined;
-		const active = Boolean(run?.turn && this.host && sessionID);
-		if (active) {
-			if (gone && run?.turn) run.turn.gone = true;
-			const host = await this.host!.promise;
-			await host.sessions.interrupt({ sessionID: sessionID! });
+		if (!run?.turn || !this.host || !sessionID) {
+			// With no turn in flight there is no completion event left to wait for,
+			// so a deleted thread can be discarded now. A live turn discards itself
+			// in `prompt`'s finally, once it has actually settled.
+			if (gone && threadId) await this.discardThread(threadId);
+			return false;
 		}
-		// With no turn in flight there is no completion event left to wait for, so
-		// a deleted thread can be discarded now. A live turn discards itself in
-		// `prompt`'s finally, once it has actually settled.
-		if (gone && threadId && !active) await this.discardThread(threadId);
-		return active;
+		if (gone) run.turn.gone = true;
+		await (await this.host.promise).sessions.interrupt({ sessionID });
+		return true;
 	}
 
 	/** Forget everything about a thread whose Discord thread is gone. */
@@ -1034,8 +529,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		const cached = this.sessionByThread.get(threadId);
 		if (cached) return cached;
 		const stored = await this.storage.get<unknown>(KEYS.session + threadId);
-		if (typeof stored === "string") this.remember(threadId, stored);
-		return typeof stored === "string" ? stored : undefined;
+		if (typeof stored !== "string") return undefined;
+		this.remember(threadId, stored);
+		return stored;
 	}
 
 	private remember(threadId: string, sessionID: string): void {
@@ -1049,11 +545,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.sessionByThread.delete(threadId);
 	}
 
-	private async ensureSession(
-		host: OpenCodeWorkerd.Interface,
-		threadId: string,
-		title: string,
-	): Promise<string> {
+	private async ensureSession(host: HostInterface, threadId: string, title: string): Promise<string> {
 		const existing = await this.sessionFor(threadId);
 		if (existing) {
 			try {
@@ -1070,7 +562,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		return session.id;
 	}
 
-	private async lastAssistantID(host: OpenCodeWorkerd.Interface, sessionID: string): Promise<string | undefined> {
+	private async lastAssistantID(host: HostInterface, sessionID: string): Promise<string | undefined> {
 		const messages = await host.sessions.context({ sessionID });
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index]!;
@@ -1079,12 +571,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		return undefined;
 	}
 
-	/** The assistant text produced since `baseline`, read from the transcript. */
-	private async finalText(
-		host: OpenCodeWorkerd.Interface,
+	/** Assistant message text, newest first, stopping at `baseline`. */
+	private async assistantTexts(
+		host: HostInterface,
 		sessionID: string,
-		baseline: string | undefined,
-	): Promise<string | undefined> {
+		baseline?: string,
+	): Promise<string[]> {
 		const messages = await host.sessions.context({ sessionID });
 		const collected: string[] = [];
 		for (let index = messages.length - 1; index >= 0; index--) {
@@ -1098,7 +590,16 @@ class GuildAgentImpl implements GuildAgentShape {
 				.trim();
 			if (text) collected.push(text);
 		}
-		return collected.reverse().join("\n\n").trim() || undefined;
+		return collected;
+	}
+
+	/** The assistant text produced since `baseline`, in conversation order. */
+	private async finalText(
+		host: HostInterface,
+		sessionID: string,
+		baseline: string | undefined,
+	): Promise<string | undefined> {
+		return (await this.assistantTexts(host, sessionID, baseline)).reverse().join("\n\n").trim() || undefined;
 	}
 
 	// --- Event stream ---------------------------------------------------------
@@ -1108,7 +609,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * and the turn's completion signal come from. The feed is volatile: a
 	 * subscription that ends has to be replaced, so `prompt` re-ensures it.
 	 */
-	private startConsuming(host: OpenCodeWorkerd.Interface): void {
+	private startConsuming(host: HostInterface): void {
 		if (this.consuming) return;
 		this.consumingHost = host;
 		const loop = (async () => {
@@ -1150,49 +651,8 @@ class GuildAgentImpl implements GuildAgentShape {
 		// Ignore events that predate this turn, such as the previous one going idle.
 		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
 
-		switch (shape.type) {
-			case "session.step.started": {
-				if (typeof data.assistantMessageID === "string") turn.main.add(data.assistantMessageID);
-				return;
-			}
-			case "session.text.delta": {
-				this.appendText(threadId, turn, data, typeof data.delta === "string" ? data.delta : "");
-				return;
-			}
-			case "session.text.ended": {
-				this.setPart(threadId, turn, data, typeof data.text === "string" ? data.text : "");
-				return;
-			}
-			case "session.execution.failed": {
-				turn.failed = true;
-				turn.error ??= errorDetail(data.error);
-				completeTurn(turn);
-				return;
-			}
-			case "session.step.failed": {
-				// The SDK puts the provider's own message here, which is the only
-				// place the real reason for a failure appears.
-				turn.failed = true;
-				turn.error ??= errorDetail(data.error);
-				return;
-			}
-			case "session.execution.interrupted": {
-				turn.interrupted = true;
-				completeTurn(turn);
-				return;
-			}
-			case "session.execution.succeeded": {
-				completeTurn(turn);
-				return;
-			}
-			case "session.idle": {
-				// Only a session that actually started a step is considered finished.
-				if (turn.main.size > 0) completeTurn(turn);
-				return;
-			}
-			default:
-				return;
-		}
+		const text = applyTurnEvent(turn, shape.type, data);
+		if (text !== undefined) this.runs.get(threadId)?.stream?.push(text);
 	}
 
 	/**
@@ -1216,11 +676,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 				this.remember(threadId, sessionID);
 				const stream = new DiscordStream(this.rest, threadId);
-				const run = this.runs.get(threadId) ?? {};
-				const turn = createTurn(threadId);
-				run.turn = turn;
-				run.stream = stream;
-				this.runs.set(threadId, run);
+				const turn = this.beginTurn(threadId, stream);
 
 				let stopTyping: () => void = () => undefined;
 				try {
@@ -1233,20 +689,14 @@ class GuildAgentImpl implements GuildAgentShape {
 						stream.abandon();
 						return;
 					}
-					const text = renderTurn(turn).trim() || (await this.lastAssistantText(host, sessionID)) || "";
+					const text = renderTurn(turn).trim() || (await this.assistantTexts(host, sessionID))[0] || "";
 					const body = turn.error ? failureNote(turn.error) : text || "The scheduled turn produced no text.";
 					await stream.finish(body, turn.interrupted ? "Stopped." : undefined);
 				} catch (error) {
 					await stream.finish(`I hit an error before I could finish: ${describeError(error)}`).catch(() => undefined);
 				} finally {
 					stopTyping();
-					turn.done = true;
-					const current = this.runs.get(threadId);
-					if (current && current.turn === turn) {
-						current.turn = undefined;
-						current.stream = undefined;
-						this.runs.delete(threadId);
-					}
+					this.endTurn(threadId, turn);
 				}
 			} catch (error) {
 				log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
@@ -1255,59 +705,14 @@ class GuildAgentImpl implements GuildAgentShape {
 			}
 		})();
 	}
-
-	/** The text of the newest assistant message, for a turn with no baseline. */
-	private async lastAssistantText(host: OpenCodeWorkerd.Interface, sessionID: string): Promise<string | undefined> {
-		const messages = await host.sessions.context({ sessionID });
-		for (let index = messages.length - 1; index >= 0; index--) {
-			const message = messages[index]!;
-			if (message.type !== "assistant") continue;
-			const text = message.content
-				.filter((part) => part.type === "text")
-				.map((part) => part.text)
-				.join("")
-				.trim();
-			if (text) return text;
-		}
-		return undefined;
-	}
-
-	private appendText(threadId: string, turn: Turn, data: Record<string, unknown>, delta: string): void {
-		const messageID = data.assistantMessageID;
-		const ordinal = data.ordinal;
-		if (typeof messageID !== "string" || typeof ordinal !== "number" || !delta) return;
-		const ordinals = turn.parts.get(messageID) ?? new Map<number, string>();
-		ordinals.set(ordinal, (ordinals.get(ordinal) ?? "") + delta);
-		turn.parts.set(messageID, ordinals);
-		this.runs.get(threadId)?.stream?.push(renderTurn(turn));
-	}
-
-	private setPart(threadId: string, turn: Turn, data: Record<string, unknown>, text: string): void {
-		const messageID = data.assistantMessageID;
-		const ordinal = data.ordinal;
-		if (typeof messageID !== "string" || typeof ordinal !== "number") return;
-		const ordinals = turn.parts.get(messageID) ?? new Map<number, string>();
-		ordinals.set(ordinal, text);
-		turn.parts.set(messageID, ordinals);
-		this.runs.get(threadId)?.stream?.push(renderTurn(turn));
-	}
 }
 
-/** The guild's agent as a service. */
-export class GuildAgent extends Context.Service<GuildAgent, GuildAgentShape>()("eryn/bot/GuildAgent") {
-	static layer(
-		env: Env,
-		storage: DurableObjectStorage,
-		guildId: string,
-	): Layer.Layer<GuildAgent, never, Workspace | DiscordApi> {
-		return Layer.effect(
-			this,
-			Effect.gen(function* () {
-				const workspace = yield* Workspace;
-				const rest = yield* DiscordApi;
-				return new GuildAgentImpl(env, storage, workspace, rest, TURN_TIMEOUT_MS, guildId);
-			}),
-		);
-	}
+/** Build the guild's agent, sharing the object's storage and Discord client. */
+export function createGuildAgent(
+	env: Env,
+	storage: DurableObjectStorage,
+	rest: DiscordRest,
+	guildId: string,
+): GuildAgentShape {
+	return new GuildAgentImpl(env, storage, rest, TURN_TIMEOUT_MS, guildId);
 }
-

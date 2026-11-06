@@ -13,6 +13,8 @@
 
 import { Plugin } from "@opencode/plugin";
 
+import { appendToSystemPrompt } from "../hooks";
+
 const MARKER = "eryn:mcp-guidance";
 
 export function mcpGuidancePlugin(servers: readonly string[]) {
@@ -29,12 +31,7 @@ export function mcpGuidancePlugin(servers: readonly string[]) {
 	return Plugin.define({
 		id: "eryn.mcp-guidance",
 		async setup(ctx) {
-			for (const name of ["context", "compaction"] as const) {
-				await ctx.session.hook(name, async (event) => {
-					if (event.system.some((part) => part.text.includes(MARKER))) return;
-					event.system.push({ type: "text", text: guidance });
-				});
-			}
+			await appendToSystemPrompt(ctx, MARKER, guidance);
 		},
 	});
 }

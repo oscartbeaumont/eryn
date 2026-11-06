@@ -22,6 +22,15 @@ import { BotSessionV5 } from "./session/do";
 
 export { BotGatewayV5, BotSessionV5 };
 
+/** What the bot object reports about itself, as `/health` passes it on. */
+interface WakeState {
+	connected?: boolean;
+	deploy?: string | null;
+	restart?: boolean;
+}
+
+const isRead = (request: Request): boolean => request.method === "GET" || request.method === "HEAD";
+
 /**
  * Poke the singleton bot object so it connects and arms its alarm.
  *
@@ -30,16 +39,12 @@ export { BotGatewayV5, BotSessionV5 };
  * restart has had a moment: that brings the socket back immediately instead of
  * leaving the bot offline until the next cron tick.
  */
-export async function wake(
-	env: Env,
-): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> {
+export async function wake(env: Env): Promise<WakeState | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
-	const call = async (): Promise<{ connected?: boolean; deploy?: string | null; restart?: boolean } | undefined> => {
+	const call = async (): Promise<WakeState | undefined> => {
 		const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
 		if (!response.ok) return undefined;
-		return (await response.json().catch(() => undefined)) as
-			| { connected?: boolean; deploy?: string | null; restart?: boolean }
-			| undefined;
+		return (await response.json().catch(() => undefined)) as WakeState | undefined;
 	};
 
 	let state = await call().catch(() => undefined);
@@ -58,77 +63,60 @@ export async function wake(
 /**
  * Handle the Worker's own routes.
  *
- * The external MCP sign-in callback and catalogue return `undefined` for
- * everything else, so the Worker can fall through to the health check or a 404.
+ * Each route handler returns `undefined` for a path it does not own, so the
+ * Worker can fall through to the health check or a 404.
  */
 export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
 	// The public origin is a landing page, since the bot's whole UI is Discord.
-	if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
-		return landingPage();
-	}
-
-	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") {
-		return termsPage();
-	}
-	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") {
-		return privacyPage();
-	}
+	if (url.pathname === "/" && isRead(request)) return landingPage();
+	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
+	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
 
 	// The filtered models.dev catalogue an embedded host points at, so it does
 	// not decode the bundled one in a Durable Object.
-	if ((request.method === "GET" || request.method === "HEAD") && isCatalogueRequest(url.pathname)) {
-		return await catalogueResponse(request);
-	}
+	if (isRead(request) && isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
 
-	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) {
-		if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
-		const secret = env.SESSION_SECRET?.trim();
-		const token = url.pathname.slice(MCP_START_PATH.length + 1);
-		const pointer = secret ? await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret) : undefined;
-		const guildId = typeof pointer?.guildId === "string" ? pointer.guildId : undefined;
-		const attemptId = typeof pointer?.attemptId === "string" ? pointer.attemptId : undefined;
-		if (!guildId || !attemptId) {
-			return page(
-				"Sign-in link not valid",
-				"This link is not valid any more. Start the sign-in again from Discord.",
-				400,
-			);
-		}
-		try {
-			const target = await new SessionClient(env, guildId).mcpAuthUrl(attemptId);
-			return Response.redirect(target, 302);
-		} catch {
-			return page(
-				"Sign-in link expired",
-				"This sign-in is no longer available. Start it again from Discord.",
-				400,
-			);
-		}
-	}
-
+	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) return await handleMcpStart(request, url);
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
+	return await handleMcpCallback(request, url);
+}
+
+/**
+ * The short link a Discord button points at: resolve the signed pointer and
+ * forward the browser to the authorization URL the attempt recorded.
+ */
+async function handleMcpStart(request: Request, url: URL): Promise<Response> {
 	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
 
-	const secret = env.SESSION_SECRET?.trim();
-	const state = url.searchParams.get("state") ?? "";
-	const pointer = secret ? await verify<{ guildId?: unknown; attemptId?: unknown }>(state, secret) : undefined;
-	const guildId = typeof pointer?.guildId === "string" ? pointer.guildId : undefined;
-	const attemptId = typeof pointer?.attemptId === "string" ? pointer.attemptId : undefined;
-	if (!guildId || !attemptId) {
+	const pointer = await readPointer(url.pathname.slice(MCP_START_PATH.length + 1), env);
+	if (!pointer) return invalidLink();
+
+	try {
+		const target = await new SessionClient(env, pointer.guildId).mcpAuthUrl(pointer.attemptId);
+		return Response.redirect(target, 302);
+	} catch {
 		return page(
-			"Sign-in link not valid",
-			"This link is not valid any more. Start the sign-in again from Discord.",
+			"Sign-in link expired",
+			"This sign-in is no longer available. Start it again from Discord.",
 			400,
 		);
 	}
+}
+
+/** Where the authorization server sends the browser back to. */
+async function handleMcpCallback(request: Request, url: URL): Promise<Response> {
+	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
+
+	const pointer = await readPointer(url.searchParams.get("state") ?? undefined, env);
+	if (!pointer) return invalidLink();
 
 	const error = url.searchParams.get("error") ?? undefined;
 	const code = url.searchParams.get("code") ?? undefined;
 	if (error) log("callback", `an MCP authorization server returned ${error}`);
 
 	try {
-		const result = await new SessionClient(env, guildId).mcpAuthComplete(attemptId, code, error);
+		const result = await new SessionClient(env, pointer.guildId).mcpAuthComplete(pointer.attemptId, code, error);
 		if (result.ok && result.link) {
 			return page(
 				"Connected",
@@ -148,6 +136,27 @@ export async function handle(request: Request): Promise<Response | undefined> {
 			500,
 		);
 	}
+}
+
+/** Verify a signed sign-in pointer and narrow it to the two ids it must carry. */
+async function readPointer(
+	token: string | undefined,
+	env: Env,
+): Promise<{ guildId: string; attemptId: string } | undefined> {
+	const secret = env.SESSION_SECRET?.trim();
+	if (!secret || !token) return undefined;
+	const pointer = await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret);
+	if (typeof pointer?.guildId !== "string" || typeof pointer.attemptId !== "string") return undefined;
+	return { guildId: pointer.guildId, attemptId: pointer.attemptId };
+}
+
+/** A sign-in link whose signed pointer is gone or was never valid. */
+function invalidLink(): Response {
+	return page(
+		"Sign-in link not valid",
+		"This link is not valid any more. Start the sign-in again from Discord.",
+		400,
+	);
 }
 
 function escapeHtml(value: string): string {

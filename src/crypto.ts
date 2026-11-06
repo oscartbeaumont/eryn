@@ -6,22 +6,16 @@
  * here as the one shared sealing primitive the bot needs.
  */
 
+import { Result } from "effect";
+import { Base64Url } from "effect/encoding";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export function base64url(bytes: Uint8Array): string {
-	let binary = "";
-	for (const byte of bytes) binary += String.fromCharCode(byte);
-	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
+export const base64url = Base64Url.encode;
 
 export function fromBase64url(value: string): Uint8Array {
-	const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-	const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-	const binary = atob(padded);
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
+	return Result.getOrThrow(Base64Url.decode(value));
 }
 
 /** A fresh random token, base64url encoded. */
@@ -76,12 +70,7 @@ export async function verify<T>(token: string | undefined, secret: string): Prom
 	if (!token) return undefined;
 	const [body, signature] = token.split(".");
 	if (!body || !signature) return undefined;
-	const valid = await crypto.subtle.verify(
-		"HMAC",
-		await hmacKey(secret),
-		fromBase64url(signature),
-		encoder.encode(body),
-	);
+	const valid = await crypto.subtle.verify("HMAC", await hmacKey(secret), fromBase64url(signature), encoder.encode(body));
 	if (!valid) return undefined;
 	try {
 		return JSON.parse(decoder.decode(fromBase64url(body))) as T;

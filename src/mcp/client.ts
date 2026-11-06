@@ -12,11 +12,12 @@
  * session again. It never calls a tool.
  */
 
-import { Option, Schema } from "effect";
+import { Schema } from "effect";
 
 import { describeError } from "../errors";
-import { fetchWithRedirects } from "../http";
+import { fetchWithRedirects, isSecureUrl } from "../http";
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
+import { decode } from "./wire";
 
 /** The protocol revision this client asks for. A server may negotiate another. */
 const PROTOCOL_VERSION = "2025-06-18";
@@ -42,16 +43,6 @@ const ListToolsResultSchema = Schema.Struct({
 		}),
 	),
 	nextCursor: Schema.optional(Schema.String),
-});
-
-const JsonRpcResponseSchema = Schema.Struct({
-	result: Schema.optional(Schema.Unknown),
-	error: Schema.optional(
-		Schema.Struct({
-			code: Schema.optional(Schema.Number),
-			message: Schema.optional(Schema.String),
-		}),
-	),
 });
 
 export interface ProbeOptions {
@@ -91,33 +82,64 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 	} catch {
 		return failed("That URL is not valid.");
 	}
-	if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && isLoopback(endpoint.hostname))) {
-		return failed("An MCP server URL must use https.");
-	}
+	if (!isSecureUrl(endpoint)) return failed("An MCP server URL must use https.");
 	if (endpoint.username || endpoint.password) {
 		return failed("An MCP server URL must not contain a username or password.");
 	}
 	endpoint.hash = "";
+
+	const token = options.token;
 	const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+
+	// Every request carries the same headers; only the session and the
+	// negotiated protocol revision change, and only after `initialize`.
+	const headers = (sessionId?: string, protocolVersion?: string): Record<string, string> => ({
+		accept: "application/json, text/event-stream",
+		...(token ? { authorization: `Bearer ${token}` } : {}),
+		...(sessionId ? { "mcp-session-id": sessionId } : {}),
+		...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
+	});
+	const post = (body: unknown, sessionId?: string, protocolVersion?: string): Promise<Response> =>
+		fetchWithRedirects(endpoint, {
+			method: "POST",
+			headers: { ...headers(sessionId, protocolVersion), "content-type": "application/json" },
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	const rpc = async (
+		request: RpcRequest,
+		sessionId?: string,
+		protocolVersion?: string,
+	): Promise<RpcResult> => {
+		const response = await post({ jsonrpc: "2.0", ...request }, sessionId, protocolVersion);
+		if (!response.ok) {
+			// Drain the body so the connection can be reused; the status and headers
+			// are all this call is interested in.
+			await response.body?.cancel().catch(() => undefined);
+			return { response };
+		}
+		const message = (await readReply(response, request.id)) as RpcResult["message"];
+		if (message?.error) {
+			throw new Error(message.error.message ?? `The server returned JSON-RPC error ${message.error.code ?? "?"}.`);
+		}
+		return { response, message };
+	};
+	const notify = async (method: string, sessionId: string | undefined, protocolVersion: string): Promise<void> => {
+		const response = await post({ jsonrpc: "2.0", method }, sessionId, protocolVersion);
+		await response.body?.cancel().catch(() => undefined);
+	};
 
 	let sessionId: string | undefined;
 	try {
-		const initialize = await rpc(
-			endpoint,
-			{
-				jsonrpc: "2.0",
-				id: 1,
-				method: "initialize",
-				params: {
-					protocolVersion: PROTOCOL_VERSION,
-					capabilities: {},
-					clientInfo: { name: "eryn", version: "1.0.0" },
-				},
+		const initialize = await rpc({
+			id: 1,
+			method: "initialize",
+			params: {
+				protocolVersion: PROTOCOL_VERSION,
+				capabilities: {},
+				clientInfo: { name: "eryn", version: "1.0.0" },
 			},
-			options.token,
-			undefined,
-			timeoutMs,
-		);
+		});
 
 		if (initialize.response.status === 401 || initialize.response.status === 403) {
 			const header = initialize.response.headers.get("www-authenticate");
@@ -135,7 +157,7 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 				error:
 					challenge.errorDescription ??
 					challenge.error ??
-					(options.token
+					(token
 						? "This server rejected the token."
 						: "This server needs authorisation before it will talk."),
 			};
@@ -152,29 +174,18 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		if (!initialized) return failed("The server's initialize response was not MCP.");
 		const protocolVersion = initialized.protocolVersion ?? PROTOCOL_VERSION;
 
-		await notify(
-			endpoint,
-			"notifications/initialized",
-			options.token,
-			sessionId,
-			protocolVersion,
-			timeoutMs,
-		);
+		await notify("notifications/initialized", sessionId, protocolVersion);
 
 		const tools: McpToolSummary[] = [];
 		let cursor: string | undefined;
 		for (let page = 0; page < MAX_TOOL_PAGES; page++) {
 			const listing = await rpc(
-				endpoint,
 				{
-					jsonrpc: "2.0",
 					id: 2 + page,
 					method: "tools/list",
 					params: cursor ? { cursor } : {},
 				},
-				options.token,
 				sessionId,
-				timeoutMs,
 				protocolVersion,
 			);
 			if (listing.response.status === 401) {
@@ -214,8 +225,8 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 			// The session is not reused, so end it rather than leave the server
 			// holding state for a test that is already over.
 			await fetchWithRedirects(endpoint, {
-						method: "DELETE",
-				headers: headers(options.token, sessionId),
+				method: "DELETE",
+				headers: headers(sessionId),
 				signal: AbortSignal.timeout(2_000),
 			}).catch(() => undefined);
 		}
@@ -226,70 +237,15 @@ function failed(error: string, status?: number): ProbeFailure {
 	return { ok: false, tools: [], error, ...(status === undefined ? {} : { status }) };
 }
 
-/** Loopback is allowed over http so a local server can be tried in development. */
-function isLoopback(hostname: string): boolean {
-	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
-}
-
-function headers(token: string | undefined, sessionId?: string, protocolVersion?: string): Record<string, string> {
-	return {
-		accept: "application/json, text/event-stream",
-		...(token ? { authorization: `Bearer ${token}` } : {}),
-		...(sessionId ? { "mcp-session-id": sessionId } : {}),
-		...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
-	};
+interface RpcRequest {
+	readonly id: number;
+	readonly method: string;
+	readonly params?: unknown;
 }
 
 interface RpcResult {
 	response: Response;
 	message?: { result?: unknown; error?: { code?: number; message?: string } };
-}
-
-/** Send one JSON-RPC request and read the matching reply, JSON or SSE framed. */
-async function rpc(
-	endpoint: URL,
-	body: unknown,
-	token: string | undefined,
-	sessionId: string | undefined,
-	timeoutMs: number,
-	protocolVersion?: string,
-): Promise<RpcResult> {
-	const response = await fetchWithRedirects(endpoint, {
-		method: "POST",
-		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
-		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(timeoutMs),
-	});
-	if (!response.ok) {
-		// Drain the body so the connection can be reused; the status and headers
-		// are all this call is interested in.
-		await response.body?.cancel().catch(() => undefined);
-		return { response };
-	}
-
-	const message = (await readReply(response, (body as { id: number }).id)) as RpcResult["message"];
-	if (message?.error) {
-		throw new Error(message.error.message ?? `The server returned JSON-RPC error ${message.error.code ?? "?"}.`);
-	}
-	return { response, message };
-}
-
-/** Send a notification; the reply is a status code and nothing worth reading. */
-async function notify(
-	endpoint: URL,
-	method: string,
-	token: string | undefined,
-	sessionId: string | undefined,
-	protocolVersion: string,
-	timeoutMs: number,
-): Promise<void> {
-	const response = await fetchWithRedirects(endpoint, {
-		method: "POST",
-		headers: { ...headers(token, sessionId, protocolVersion), "content-type": "application/json" },
-		body: JSON.stringify({ jsonrpc: "2.0", method }),
-		signal: AbortSignal.timeout(timeoutMs),
-	});
-	await response.body?.cancel().catch(() => undefined);
 }
 
 /**
@@ -360,10 +316,4 @@ export function parseChallenge(header: string | null): Challenge {
 		...(params.error ? { error: params.error } : {}),
 		...(params.error_description ? { errorDescription: params.error_description } : {}),
 	};
-}
-
-function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] | undefined {
-	if (input === undefined) return undefined;
-	const parsed = Schema.decodeUnknownOption(schema)(input);
-	return Option.isSome(parsed) ? parsed.value : undefined;
 }

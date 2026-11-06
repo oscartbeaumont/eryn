@@ -6,8 +6,10 @@
  * for the same conversation.
  */
 
-import type { DiscordChannelRef, DiscordMessageView, DiscordUser } from "./api";
-import { escapeXml } from "./context";
+import type { DiscordChannelRef, DiscordMessageView } from "./api";
+import { openingTag, selfClosing } from "./xml";
+
+type Attachment = NonNullable<DiscordMessageView["attachments"]>[number];
 
 export interface RenderUser {
 	name: string;
@@ -31,31 +33,25 @@ function account(
 
 /** A self-closing account reference. */
 export function renderUser(user: RenderUser): string {
-	const attributes: [string, string][] = [
-		["name", user.name],
-		...(user.username ? [["username", user.username] as [string, string]] : []),
-		...(user.id ? [["id", user.id] as [string, string]] : []),
-		...(user.bot ? [["bot", "true"] as [string, string]] : []),
-	];
-	return `<user ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
+	const entries: [string, string][] = [["name", user.name]];
+	if (user.username) entries.push(["username", user.username]);
+	if (user.id) entries.push(["id", user.id]);
+	if (user.bot) entries.push(["bot", "true"]);
+	return selfClosing("user", entries);
 }
 
 /** A self-closing channel reference. */
 export function renderChannel(channel: DiscordChannelRef): string {
-	const attributes: [string, string][] = [
-		["id", channel.id],
-		...(channel.name ? [["name", channel.name] as [string, string]] : []),
-		["type", String(channel.type)],
-		...(channel.parent_id ? [["parentId", channel.parent_id] as [string, string]] : []),
-	];
-	return `<channel ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
+	const entries: [string, string][] = [["id", channel.id]];
+	if (channel.name) entries.push(["name", channel.name]);
+	entries.push(["type", String(channel.type)]);
+	if (channel.parent_id) entries.push(["parentId", channel.parent_id]);
+	return selfClosing("channel", entries);
 }
 
 function replaceBotMentions(text: string, botUserId: string | undefined): string {
 	if (!botUserId) return text;
-	return text
-		.replaceAll(`<@${botUserId}>`, "Eryn")
-		.replaceAll(`<@!${botUserId}>`, "Eryn");
+	return text.replaceAll(`<@${botUserId}>`, "Eryn").replaceAll(`<@!${botUserId}>`, "Eryn");
 }
 
 /**
@@ -91,25 +87,23 @@ export function renderMessage(message: DiscordMessageView, botUserId?: string): 
 	const text =
 		replaceBotMentions(message.content?.trim() ?? "", botUserId) ||
 		(attachments.length > 0 ? "(attached files)" : "(no text)");
-	const attributes: [string, string][] = [
-		["id", message.id],
-		...(message.timestamp ? [["timestamp", message.timestamp] as [string, string]] : []),
-		...(message.edited_timestamp ? [["edited", "true"] as [string, string]] : []),
-	];
-	const header = `<message ${attributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")}>`;
+
+	const header: [string, string][] = [["id", message.id]];
+	if (message.timestamp) header.push(["timestamp", message.timestamp]);
+	if (message.edited_timestamp) header.push(["edited", "true"]);
+
 	const files =
 		attachments.length > 0
-			? `\n<attachments>\n${attachments
-					.map((file) => {
-						const fileAttributes: [string, string][] = [
-							...(file.filename ? [["name", file.filename] as [string, string]] : []),
-							...(file.url ? [["url", file.url] as [string, string]] : []),
-							...(file.content_type ? [["contentType", file.content_type] as [string, string]] : []),
-							...(typeof file.size === "number" ? [["size", String(file.size)] as [string, string]] : []),
-						];
-						return `  <attachment ${fileAttributes.map(([name, value]) => `${name}="${escapeXml(value)}"`).join(" ")} />`;
-					})
-					.join("\n")}\n</attachments>`
+			? `\n<attachments>\n${attachments.map(renderAttachment).join("\n")}\n</attachments>`
 			: "";
-	return `${header}\n${renderUserMessage(author, mentions, text, botUserId)}${files}\n</message>`;
+	return `${openingTag("message", header)}\n${renderUserMessage(author, mentions, text, botUserId)}${files}\n</message>`;
+}
+
+function renderAttachment(file: Attachment): string {
+	const entries: [string, string][] = [];
+	if (file.filename) entries.push(["name", file.filename]);
+	if (file.url) entries.push(["url", file.url]);
+	if (file.content_type) entries.push(["contentType", file.content_type]);
+	if (typeof file.size === "number") entries.push(["size", String(file.size)]);
+	return `  ${selfClosing("attachment", entries)}`;
 }

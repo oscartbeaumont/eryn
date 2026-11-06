@@ -9,11 +9,33 @@
 
 export const DEPLOY_HEADER = "x-eryn-deploy";
 
+/** Where an object remembers the deploy it last saw. */
+const DEPLOY_KEY = "deploy:version";
+
 type Versioned = { CF_VERSION?: { id?: string } };
 
 /** The deploy this Worker is serving. */
 export function currentDeploy(env: Versioned): string | undefined {
 	return env.CF_VERSION?.id;
+}
+
+/**
+ * Note which deploy a request came from.
+ *
+ * Returns true when this object has seen a newer deploy and should restart.
+ * A first run has no stored version; only a change needs a restart.
+ */
+export async function deployChanged(
+	storage: DurableObjectStorage,
+	request: Request,
+	env: Versioned,
+): Promise<boolean> {
+	const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(env);
+	if (!version) return false;
+	const stored = await storage.get<string>(DEPLOY_KEY);
+	if (stored === version) return false;
+	await storage.put(DEPLOY_KEY, version);
+	return stored !== undefined;
 }
 
 /** Request options for a call into a Durable Object, carrying the current deploy. */

@@ -9,6 +9,8 @@
 
 import { Plugin } from "@opencode/plugin";
 
+import { appendToSystemPrompt } from "../hooks";
+
 const MARKER = "eryn:instructions";
 
 const INSTRUCTIONS = [
@@ -23,12 +25,7 @@ export function agentInstructionsPlugin() {
 	return Plugin.define({
 		id: "eryn.instructions",
 		async setup(ctx) {
-			for (const name of ["context", "compaction"] as const) {
-				await ctx.session.hook(name, async (event) => {
-					if (event.system.some((part) => part.text.includes(MARKER))) return;
-					event.system.push({ type: "text", text: INSTRUCTIONS });
-				});
-			}
+			await appendToSystemPrompt(ctx, MARKER, INSTRUCTIONS);
 		},
 	});
 }

@@ -14,7 +14,6 @@
     "check": "pnpm typecheck && pnpm build"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.0.0",
     "@opencode/client": "2.2.5",
     "@opencode/core": "2.2.5",
     "@opencode/plugin": "2.2.5",

@@ -7,8 +7,7 @@
  * keeps the workspace consistent no matter which tool the model picks.
  */
 
-import { Context, Layer } from "effect";
-import { KEYS } from "../config";
+import { KEYS } from "../../config";
 
 export interface StoredFile {
 	/** Base64-encoded file bytes. */
@@ -50,11 +49,4 @@ export function fileStore(storage: DurableObjectStorage): FileStore {
 			return [...entries].map(([stored, file]) => ({ path: stored.slice(KEY_PREFIX.length), file }));
 		},
 	};
-}
-
-/** The virtual filesystem as an Effect service, one per guild object. */
-export class Workspace extends Context.Service<Workspace, FileStore>()("eryn/bot/Workspace") {
-	static layer(storage: DurableObjectStorage): Layer.Layer<Workspace> {
-		return Layer.succeed(this)(fileStore(storage));
-	}
 }

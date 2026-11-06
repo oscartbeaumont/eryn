@@ -8,7 +8,27 @@
 
 import { Schema } from "effect";
 
-import { DiscordContextSchema } from "../discord/context";
+/**
+ * Where a thread's conversation lives, in Discord terms.
+ *
+ * The gateway writes this into a session's metadata so the Discord plugin can
+ * tell the agent where it is. It lives here because it is a stored record: the
+ * session owns the shape, and the plugin reads it.
+ */
+export const DiscordRefSchema = Schema.Struct({
+	id: Schema.String,
+	name: Schema.optional(Schema.String),
+});
+
+export const DiscordContextSchema = Schema.Struct({
+	/** The server the bot was invoked in. */
+	guild: DiscordRefSchema,
+	/** The channel the bot was invoked in — the thread's parent, when there is one. */
+	channel: DiscordRefSchema,
+	/** The thread the conversation happens in, and where replies are posted. */
+	thread: DiscordRefSchema,
+});
+export type DiscordContext = typeof DiscordContextSchema.Type;
 
 /**
  * What is needed to keep an OAuth link's bearer alive.
@@ -160,11 +180,14 @@ export const GuildSettingsSchema = Schema.Struct({
 });
 export type GuildSettings = typeof GuildSettingsSchema.Type;
 
-/** A connection as the status command shows it: never the secret. */
-export interface ConnectionSummary {
-	integrationID: string;
-	method: string;
-}
+/** The status `/eryn setup` shows: readiness, the model, and no secret. */
+export const GuildStatusSchema = Schema.Struct({
+	ready: Schema.Boolean,
+	model: Schema.String,
+	providers: Schema.Array(Schema.Struct({ integrationID: Schema.String, method: Schema.String })),
+	links: Schema.Array(PublicLinkSchema),
+});
+export type GuildStatus = typeof GuildStatusSchema.Type;
 
 // --- Provider catalogue --------------------------------------------------------
 
@@ -288,6 +311,8 @@ export type ProviderConnectResponse = typeof ProviderConnectResponseSchema.Type;
 
 export const ModelRequestSchema = Schema.Struct({ guildId: Schema.String, model: Schema.String });
 
+export const DisconnectRequestSchema = Schema.Struct({ guildId: Schema.String, integrationID: Schema.String });
+
 export const LinkAddRequestSchema = Schema.Struct({ guildId: Schema.String, link: McpLinkSchema });
 export const LinkRemoveRequestSchema = Schema.Struct({ guildId: Schema.String, linkId: Schema.String });
 export const McpProbeRequestSchema = Schema.Struct({
@@ -357,11 +382,3 @@ export const InterruptRequestSchema = Schema.Struct({
 	gone: Schema.optional(Schema.Boolean),
 });
 export type InterruptRequest = typeof InterruptRequestSchema.Type;
-
-/** The status the bot reports for a guild without exposing any secret. */
-export interface GuildStatus {
-	ready: boolean;
-	model: string;
-	providers: ConnectionSummary[];
-	links: PublicLink[];
-}

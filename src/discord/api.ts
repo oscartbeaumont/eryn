@@ -6,11 +6,11 @@
  * registration, the install audit lookup, and DM channels. It never logs the
  * bot token or a Discord response body, which can contain user messages.
  *
- * It is exposed as an Effect service so a Durable Object can inject one client
- * and every subsystem shares it.
+ * The client is created once by the object that owns the token and passed to
+ * every subsystem that needs it.
  */
 
-import { Context, Layer, Option, Schema } from "effect";
+import { Option, Schema } from "effect";
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -173,6 +173,18 @@ function channelRef(value: unknown): DiscordChannelRef | undefined {
 	};
 }
 
+/** Decode a list of channels, dropping entries that are not one. */
+function channelRefs(value: unknown): DiscordChannelRef[] {
+	if (!Array.isArray(value)) return [];
+	return value.map(channelRef).filter((ref): ref is DiscordChannelRef => ref !== undefined);
+}
+
+/** The path of one message, which most message operations extend. */
+function messagePath(channelId: string, messageId: string): string {
+	return `/channels/${channelId}/messages/${messageId}`;
+}
+
+
 /**
  * A minimal Discord REST client. Responses are never echoed back in errors and
  * rate limits are retried a few times.
@@ -205,6 +217,13 @@ export function discordRest(token: string) {
 		}
 	}
 
+	/** POST a body and return the id of the resource Discord created. */
+	async function create(path: string, body: unknown, failure: string): Promise<{ id: string }> {
+		const result = await request<{ id?: unknown }>("POST", path, body);
+		if (!result || typeof result.id !== "string") throw new DiscordError(failure);
+		return { id: result.id };
+	}
+
 	async function interactionCallback(interactionId: string, interactionToken: string, payload: unknown): Promise<void> {
 		await request<void>("POST", `/interactions/${interactionId}/${interactionToken}/callback`, payload);
 	}
@@ -227,16 +246,13 @@ export function discordRest(token: string) {
 
 		/** Every channel the bot can see in a guild, excluding threads. */
 		async guildChannels(guildId: string): Promise<DiscordChannelRef[]> {
-			const result = await request<unknown[]>("GET", `/guilds/${guildId}/channels`);
-			return Array.isArray(result) ? result.map(channelRef).filter((value): value is DiscordChannelRef => value !== undefined) : [];
+			return channelRefs(await request<unknown[]>("GET", `/guilds/${guildId}/channels`));
 		},
 
 		/** Active threads in a guild, which Discord lists separately from channels. */
 		async activeThreads(guildId: string): Promise<DiscordChannelRef[]> {
 			const result = await request<{ threads?: unknown[] }>("GET", `/guilds/${guildId}/threads/active`);
-			return Array.isArray(result?.threads)
-				? result.threads.map(channelRef).filter((value): value is DiscordChannelRef => value !== undefined)
-				: [];
+			return channelRefs(result?.threads);
 		},
 
 		/** Recent messages in a channel or thread, newest first. */
@@ -262,9 +278,7 @@ export function discordRest(token: string) {
 			};
 			if (options.replyTo) body.message_reference = { message_id: options.replyTo, fail_if_not_exists: false };
 			if (options.components?.length) body.components = options.components;
-			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/messages`, body);
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not accept the message");
-			return { id: result.id };
+			return await create(`/channels/${channelId}/messages`, body, "Discord did not accept the message");
 		},
 
 		/** Add a user to a thread so they follow it. This does not notify them. */
@@ -273,30 +287,24 @@ export function discordRest(token: string) {
 		},
 
 		async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
-			await request<void>("PATCH", `/channels/${channelId}/messages/${messageId}`, {
+			await request<void>("PATCH", messagePath(channelId, messageId), {
 				content,
 				allowed_mentions: { parse: [] },
 			});
 		},
 
 		async createThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> {
-			const result = await request<{ id?: unknown }>(
-				"POST",
-				`/channels/${channelId}/messages/${messageId}/threads`,
-				{ name, auto_archive_duration: 1_440 },
-			);
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
-			return { id: result.id };
+			const path = `${messagePath(channelId, messageId)}/threads`;
+			return await create(path, { name, auto_archive_duration: 1_440 }, "Discord did not create the thread");
 		},
 
 		/** Start a public thread in a channel, not attached to a message. */
 		async startThread(channelId: string, name: string): Promise<{ id: string }> {
-			const result = await request<{ id?: unknown }>("POST", `/channels/${channelId}/threads`, {
-				name,
-				auto_archive_duration: 1_440,
-			});
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not create the thread");
-			return { id: result.id };
+			return await create(
+				`/channels/${channelId}/threads`,
+				{ name, auto_archive_duration: 1_440 },
+				"Discord did not create the thread",
+			);
 		},
 
 		/** Archive or unarchive a thread. */
@@ -315,15 +323,15 @@ export function discordRest(token: string) {
 		},
 
 		async deleteMessage(channelId: string, messageId: string): Promise<void> {
-			await request<void>("DELETE", `/channels/${channelId}/messages/${messageId}`);
+			await request<void>("DELETE", messagePath(channelId, messageId));
 		},
 
 		async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-			await request<void>("PUT", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
+			await request<void>("PUT", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
 		},
 
 		async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-			await request<void>("DELETE", `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
+			await request<void>("DELETE", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
 		},
 
 		async pinMessage(channelId: string, messageId: string): Promise<void> {
@@ -372,9 +380,7 @@ export function discordRest(token: string) {
 
 		/** Open (or reuse) a direct-message channel with a user. */
 		async openDm(userId: string): Promise<{ id: string }> {
-			const result = await request<{ id?: unknown }>("POST", "/users/@me/channels", { recipient_id: userId });
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not open a DM channel");
-			return { id: result.id };
+			return await create("/users/@me/channels", { recipient_id: userId }, "Discord did not open a DM channel");
 		},
 
 		/** Acknowledge an interaction with a message (ephemeral by default). */
@@ -456,11 +462,4 @@ export function discordRest(token: string) {
 }
 
 export type DiscordRest = ReturnType<typeof discordRest>;
-
-/** The Discord REST client as an Effect service, so layers can inject one. */
-export class DiscordApi extends Context.Service<DiscordApi, DiscordRest>()("eryn/bot/DiscordApi") {
-	static layer(token: string): Layer.Layer<DiscordApi> {
-		return Layer.succeed(this)(discordRest(token));
-	}
-}
 

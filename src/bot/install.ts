@@ -3,9 +3,8 @@
  *
  * When the bot is added to a guild, Discord records a `BOT_ADD` audit entry
  * naming who did it. That person is DMed a short welcome with a button that
- * starts `/eryn setup provider`; if the DM cannot be delivered (a user can
- * close their DMs) the guild's system channel is used instead, mentioning the
- * owner.
+ * opens the setup menu; if the DM cannot be delivered (a user can close their
+ * DMs) the guild's system channel is used instead, mentioning the owner.
  *
  * The button carries the guild id, because a DM has no guild context: clicking
  * it runs the same setup flow against the guild the bot was added to.
@@ -14,14 +13,10 @@
 import { actionButton, buttonRow } from "../discord/components";
 import type { DiscordRest } from "../discord/api";
 import { log } from "../config";
+import { installSetupId } from "./ids";
 
 /** Only a very recent install is announced; a READY replay of old guilds is not. */
 const RECENT_MS = 10 * 60_000;
-
-/** The custom id on the "Start setup" button: `install:setup:<guildId>`. */
-export function installSetupId(guildId: string): string {
-	return `install:setup:${guildId}`;
-}
 
 /** Where the guild's install announcement is recorded, so it is sent once. */
 function marker(guildId: string): string {

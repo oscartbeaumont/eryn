@@ -13,11 +13,12 @@
  * pointer to it.
  */
 
-import { Option, Schema } from "effect";
+import { Schema } from "effect";
 
 import { base64url, randomToken } from "../crypto";
 import { describeError } from "../errors";
-import { fetchWithRedirects } from "../http";
+import { fetchWithRedirects, isSecureUrl } from "../http";
+import { decode } from "./wire";
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
@@ -94,7 +95,7 @@ export async function discover(resourceUrl: string, resourceMetadataUrl?: string
 
 	const protectedResource = decode(
 		ProtectedResourceSchema,
-		await fetchJson(metadataUrl, "the protected resource metadata"),
+		await fetchJson(metadataUrl, "protected resource metadata"),
 	);
 	if (!protectedResource) throw new McpOAuthError("This server's OAuth metadata could not be read.");
 	const issuer = protectedResource.authorization_servers[0];
@@ -268,7 +269,7 @@ function normaliseSeconds(value: number | string): number {
  * three costs one request each and makes the flow work with all of them.
  */
 async function findResourceMetadata(resource: URL): Promise<string | undefined> {
-	const path = resource.pathname.replace(/\/+$/, "");
+	const path = trimSlash(resource.pathname);
 	const candidates = [
 		`${resource.origin}/.well-known/oauth-protected-resource${path}`,
 		`${resource.origin}/.well-known/oauth-protected-resource`,
@@ -279,14 +280,14 @@ async function findResourceMetadata(resource: URL): Promise<string | undefined> 
 
 async function findAuthorizationServer(issuer: string): Promise<Schema.Schema.Type<typeof AuthorizationServerSchema>> {
 	const base = new URL(issuer);
-	const path = base.pathname.replace(/\/+$/, "");
+	const path = trimSlash(base.pathname);
 	const candidates = [
 		`${base.origin}/.well-known/oauth-authorization-server${path}`,
 		`${base.origin}/.well-known/openid-configuration${path}`,
 		`${base.origin}${path}/.well-known/openid-configuration`,
 	];
 	for (const candidate of candidates) {
-		const payload = await fetchJson(candidate, undefined, true);
+		const payload = await fetchJson(candidate, "metadata", true);
 		const metadata = decode(AuthorizationServerSchema, payload);
 		if (!metadata) continue;
 		// RFC 8414 §3.3: metadata served from one issuer must not name another,
@@ -306,22 +307,25 @@ function trimSlash(value: string): string {
 /** The first candidate URL that answers with JSON. */
 async function firstJson(candidates: readonly string[]): Promise<string | undefined> {
 	for (const candidate of candidates) {
-		if ((await fetchJson(candidate, undefined, true)) !== undefined) return candidate;
+		if ((await fetchJson(candidate, "metadata", true)) !== undefined) return candidate;
 	}
 	return undefined;
 }
 
-async function fetchJson(url: string, label: string | undefined, optional = false): Promise<unknown> {
+/**
+ * Fetch JSON from an endpoint, requiring HTTPS.
+ *
+ * `optional` is for the discovery candidates: a URL that is unreachable or
+ * answers with the wrong shape is simply not the metadata location, so the
+ * caller moves on. A non-optional request reports why it gave up.
+ */
+async function fetchJson(url: string, label = "metadata", optional = false): Promise<unknown> {
 	let parsed: URL;
 	try {
-		parsed = new URL(url);
-	} catch {
+		parsed = requireTransport(url, label);
+	} catch (error) {
 		if (optional) return undefined;
-		throw new McpOAuthError(`The ${label ?? "metadata"} URL is not valid.`);
-	}
-	if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback(parsed.hostname))) {
-		if (optional) return undefined;
-		throw new McpOAuthError(`The ${label ?? "metadata"} URL must use https.`);
+		throw error;
 	}
 	try {
 		const response = await fetchWithRedirects(parsed, {
@@ -331,20 +335,14 @@ async function fetchJson(url: string, label: string | undefined, optional = fals
 		if (!response.ok) {
 			await response.body?.cancel().catch(() => undefined);
 			if (optional) return undefined;
-			throw new McpOAuthError(`The ${label ?? "metadata"} request answered HTTP ${response.status}.`);
+			throw new McpOAuthError(`The ${label} request answered HTTP ${response.status}.`);
 		}
 		return (await response.json().catch(() => undefined)) as unknown;
 	} catch (error) {
 		if (optional) return undefined;
 		if (error instanceof McpOAuthError) throw error;
-		throw new McpOAuthError(`Could not read the ${label ?? "metadata"}: ${describeError(error)}`);
+		throw new McpOAuthError(`Could not read the ${label}: ${describeError(error)}`);
 	}
-}
-
-function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] | undefined {
-	if (input === undefined) return undefined;
-	const parsed = Schema.decodeUnknownOption(schema)(input);
-	return Option.isSome(parsed) ? parsed.value : undefined;
 }
 
 /** OAuth endpoints carry secrets, so only https is acceptable in production. */
@@ -355,13 +353,6 @@ function requireTransport(url: string, label: string): URL {
 	} catch {
 		throw new McpOAuthError(`The ${label} URL is not valid.`);
 	}
-	if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback(parsed.hostname))) {
-		throw new McpOAuthError(`The ${label} must use https.`);
-	}
+	if (!isSecureUrl(parsed)) throw new McpOAuthError(`The ${label} must use https.`);
 	return parsed;
-}
-
-/** Loopback is allowed over http so a local server can be tried in development. */
-function isLoopback(hostname: string): boolean {
-	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
 }

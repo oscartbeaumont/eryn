@@ -17,8 +17,6 @@ There is no web dashboard; setup happens in Discord.
   a task.
 - Links external MCP servers, with OAuth or a bearer token, and keeps their
   tokens fresh.
-- Bundles the MCP-events tools so the agent can subscribe to events from any
-  linked MCP server.
 - Stops a running turn with `/eryn stop`.
 
 ## Getting started
@@ -90,8 +88,7 @@ src/
 ├─ session/       per-guild Durable Object, OpenCode agent, storage
 ├─ discord/       Discord REST and gateway socket
 ├─ mcp/           external MCP client, linking, OAuth
-├─ opencode/      embedded host storage, shell, filesystem
-└─ plugins/       bundled MCP-events plugin
+└─ plugins/       OpenCode plugins, one self-contained directory each
 ```
 
 ### Development

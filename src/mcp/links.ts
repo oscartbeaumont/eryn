@@ -12,7 +12,6 @@
 import { log, publicOrigin } from "../config";
 import { randomToken, sign } from "../crypto";
 import { describeError } from "../errors";
-import type { GuildStoreShape } from "../session/store";
 import type { McpLink, PendingMcpAuth } from "../session/models";
 import { probeServer, type ProbeResult } from "./client";
 import {
@@ -23,7 +22,23 @@ import {
 	refreshTokens,
 	registerClient,
 	type McpDiscovery,
+	type McpTokens,
 } from "./oauth";
+
+/**
+ * The slice of guild storage a link needs.
+ *
+ * Declared here rather than importing the session's full store, so this module
+ * depends only on the records it actually reads and writes.
+ */
+export interface LinkStore {
+	links(): Promise<McpLink[]>;
+	getLink(id: string): Promise<McpLink | undefined>;
+	putLink(link: McpLink): Promise<void>;
+	authAttempts(): Promise<PendingMcpAuth[]>;
+	putAuthAttempt(attempt: PendingMcpAuth): Promise<void>;
+	removeAuthAttempt(id: string): Promise<void>;
+}
 
 /** Where an authorization server sends the browser back to. */
 export const MCP_CALLBACK_PATH = "/api/bot/mcp/callback";
@@ -43,7 +58,7 @@ export function mcpRedirectUri(env: Env): string {
 }
 
 export interface BeginAuthorizationInput {
-	store: GuildStoreShape;
+	store: LinkStore;
 	env: Env;
 	guildId: string;
 	name: string;
@@ -129,7 +144,7 @@ export interface FinishAuthorizationResult {
  * sign-in never leaves something the agent would try to use.
  */
 export async function finishAuthorization(
-	store: GuildStoreShape,
+	store: LinkStore,
 	pending: PendingMcpAuth,
 	input: { code?: string; error?: string },
 ): Promise<FinishAuthorizationResult> {
@@ -152,7 +167,7 @@ export async function finishAuthorization(
 		return await fail(store, pending, `A server named "${pending.name}" is already linked.`);
 	}
 
-	let tokens;
+	let tokens: McpTokens;
 	try {
 		tokens = await exchangeCode({
 			tokenEndpoint: pending.tokenEndpoint,
@@ -205,7 +220,7 @@ export async function finishAuthorization(
 
 /** Mark an attempt failed, so the interaction and the callback say the same thing. */
 async function fail(
-	store: GuildStoreShape,
+	store: LinkStore,
 	pending: PendingMcpAuth,
 	message: string,
 ): Promise<FinishAuthorizationResult> {
@@ -223,7 +238,7 @@ const refreshes = new Map<string, Promise<McpLink>>();
  * refresh leaves the old token in place: the next turn reports the server's own
  * rejection, which is more useful than hiding the link.
  */
-export async function refreshLink(store: GuildStoreShape, link: McpLink): Promise<McpLink> {
+export async function refreshLink(store: LinkStore, link: McpLink): Promise<McpLink> {
 	const running = refreshes.get(link.id);
 	if (running) return await running;
 	const refresh = refreshLinkOnce(store, link).finally(() => refreshes.delete(link.id));
@@ -231,7 +246,7 @@ export async function refreshLink(store: GuildStoreShape, link: McpLink): Promis
 	return await refresh;
 }
 
-async function refreshLinkOnce(store: GuildStoreShape, link: McpLink): Promise<McpLink> {
+async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink> {
 	const oauth = link.oauth;
 	if (!oauth || !oauth.refreshToken) return link;
 	if (oauth.expiresAt - Date.now() > REFRESH_SKEW_MS) return link;
@@ -265,7 +280,7 @@ async function refreshLinkOnce(store: GuildStoreShape, link: McpLink): Promise<M
 }
 
 /** Refresh every link that needs it, leaving the rest untouched. */
-export async function refreshLinks(store: GuildStoreShape, links: readonly McpLink[]): Promise<McpLink[]> {
+export async function refreshLinks(store: LinkStore, links: readonly McpLink[]): Promise<McpLink[]> {
 	return await Promise.all(links.map((link) => refreshLink(store, link)));
 }
 
@@ -275,7 +290,7 @@ export async function testLink(link: McpLink): Promise<ProbeResult> {
 }
 
 /** Drop attempts nobody will finish, so storage does not accumulate verifiers. */
-async function pruneAttempts(store: GuildStoreShape): Promise<void> {
+async function pruneAttempts(store: LinkStore): Promise<void> {
 	const attempts = await store.authAttempts().catch(() => []);
 	const cutoff = Date.now() - AUTH_TTL_MS;
 	for (const attempt of attempts) {

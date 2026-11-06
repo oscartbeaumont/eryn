@@ -10,8 +10,8 @@
  * is a value that fails to decode rather than a runtime surprise.
  */
 
-import { Context, Layer, Option, Schema } from "effect";
-import { DEFAULT_MODEL, KEYS, log } from "../config";
+import { Option, Schema } from "effect";
+import { DEFAULT_MODEL, KEYS } from "../config";
 import { decryptSecret, encryptSecret, type Sealed } from "../crypto";
 import { botError } from "../errors";
 import {
@@ -75,14 +75,30 @@ class GuildStoreImpl implements GuildStoreShape {
 		} catch {
 			return undefined;
 		}
-		const parsed = Schema.decodeUnknownOption(schema)(value);
-		return Option.isSome(parsed) ? parsed.value : undefined;
+		return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(value));
+	}
+
+	private async sealedList<S extends Schema.ConstraintDecoder<unknown>>(prefix: string, schema: S): Promise<S["Type"][]> {
+		const entries = await this.storage.list<Sealed>({ prefix });
+		const values = await Promise.all([...entries].map(([, sealed]) => this.open(sealed, schema)));
+		const found: S["Type"][] = [];
+		for (const value of values) if (value !== undefined) found.push(value);
+		return found;
+	}
+
+	private async sealedGet<S extends Schema.ConstraintDecoder<unknown>>(
+		key: string,
+		schema: S,
+	): Promise<S["Type"] | undefined> {
+		return await this.open(await this.storage.get<Sealed>(key), schema);
+	}
+
+	private async plain<S extends Schema.ConstraintDecoder<unknown>>(key: string, schema: S): Promise<S["Type"] | undefined> {
+		return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(await this.storage.get<unknown>(key)));
 	}
 
 	async settings(): Promise<GuildSettings> {
-		const stored = await this.storage.get<unknown>(KEYS.guild);
-		const parsed = Schema.decodeUnknownOption(GuildSettingsSchema)(stored);
-		return Option.isSome(parsed) ? parsed.value : { model: DEFAULT_MODEL, updatedAt: 0 };
+		return (await this.plain(KEYS.guild, GuildSettingsSchema)) ?? { model: DEFAULT_MODEL, updatedAt: 0 };
 	}
 
 	async putSettings(settings: GuildSettings): Promise<void> {
@@ -90,12 +106,7 @@ class GuildStoreImpl implements GuildStoreShape {
 	}
 
 	async providers(): Promise<ProviderConnection[]> {
-		const entries = await this.storage.list<Sealed>({ prefix: KEYS.provider });
-		const connections: ProviderConnection[] = [];
-		for (const [, sealed] of entries) {
-			const connection = await this.open(sealed, ProviderConnectionSchema);
-			if (connection) connections.push(connection);
-		}
+		const connections = await this.sealedList(KEYS.provider, ProviderConnectionSchema);
 		return connections.sort((a, b) => a.integrationID.localeCompare(b.integrationID));
 	}
 
@@ -107,34 +118,30 @@ class GuildStoreImpl implements GuildStoreShape {
 		await this.storage.delete(KEYS.provider + integrationID);
 	}
 
+	/**
+	 * A link, dropping the legacy shape that pointed at the MCP gateway Eryn no
+	 * longer hosts. Such a link names an endpoint that does not exist, so it is
+	 * deleted rather than carried forward.
+	 */
+	private async readLink(key: string): Promise<McpLink | undefined> {
+		const link = await this.sealedGet(key, McpLinkSchema);
+		if (link?.kind !== "eryn") return link;
+		await this.storage.delete(key);
+		return undefined;
+	}
+
 	async links(): Promise<McpLink[]> {
 		const entries = await this.storage.list<Sealed>({ prefix: KEYS.link });
 		const links: McpLink[] = [];
-		for (const [key, sealed] of entries) {
-			const link = await this.open(sealed, McpLinkSchema);
-			if (!link) {
-				log("session", `could not read link ${key}, ignoring it`);
-				continue;
-			}
-			// A hosted link pointed at the MCP gateway, which is gone. Delete it once
-			// instead of carrying it forever.
-			if (link.kind === "eryn") {
-				await this.storage.delete(key);
-				continue;
-			}
-			links.push(link);
+		for (const [key] of entries) {
+			const link = await this.readLink(key);
+			if (link) links.push(link);
 		}
 		return links.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
 	async getLink(id: string): Promise<McpLink | undefined> {
-		const sealed = await this.storage.get<Sealed>(KEYS.link + id);
-		const link = await this.open(sealed, McpLinkSchema);
-		if (link?.kind === "eryn") {
-			await this.storage.delete(KEYS.link + id);
-			return undefined;
-		}
-		return link;
+		return await this.readLink(KEYS.link + id);
 	}
 
 	async putLink(link: McpLink): Promise<void> {
@@ -146,18 +153,12 @@ class GuildStoreImpl implements GuildStoreShape {
 	}
 
 	async authAttempts(): Promise<PendingMcpAuth[]> {
-		const entries = await this.storage.list<Sealed>({ prefix: KEYS.mcpAuth });
-		const attempts: PendingMcpAuth[] = [];
-		for (const [, sealed] of entries) {
-			const attempt = await this.open(sealed, PendingMcpAuthSchema);
-			if (attempt) attempts.push(attempt);
-		}
+		const attempts = await this.sealedList(KEYS.mcpAuth, PendingMcpAuthSchema);
 		return attempts.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
 	async getAuthAttempt(id: string): Promise<PendingMcpAuth | undefined> {
-		const sealed = await this.storage.get<Sealed>(KEYS.mcpAuth + id);
-		return await this.open(sealed, PendingMcpAuthSchema);
+		return await this.sealedGet(KEYS.mcpAuth + id, PendingMcpAuthSchema);
 	}
 
 	async putAuthAttempt(attempt: PendingMcpAuth): Promise<void> {
@@ -173,9 +174,7 @@ class GuildStoreImpl implements GuildStoreShape {
 	}
 
 	async pendingOAuth(): Promise<PendingOAuth | undefined> {
-		const stored = await this.storage.get<unknown>(KEYS.pendingOAuth);
-		const parsed = Schema.decodeUnknownOption(PendingOAuthSchema)(stored);
-		return Option.isSome(parsed) ? parsed.value : undefined;
+		return await this.plain(KEYS.pendingOAuth, PendingOAuthSchema);
 	}
 
 	async clearPendingOAuth(): Promise<void> {
@@ -183,12 +182,7 @@ class GuildStoreImpl implements GuildStoreShape {
 	}
 }
 
-/**
- * The guild's durable state as a service. `storage` is the Durable Object's own
- * store and `secret` is the worker's `ENCRYPTION_KEY`.
- */
-export class GuildStore extends Context.Service<GuildStore, GuildStoreShape>()("eryn/bot/GuildStore") {
-	static layer(storage: DurableObjectStorage, secret: string | undefined): Layer.Layer<GuildStore> {
-		return Layer.succeed(this)(new GuildStoreImpl(storage, secret));
-	}
+/** Build the guild's durable state over a Durable Object's storage. */
+export function guildStore(storage: DurableObjectStorage, secret: string | undefined): GuildStoreShape {
+	return new GuildStoreImpl(storage, secret);
 }

@@ -16,29 +16,21 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { CLIENT_ID, log as botLog } from "../config";
-import { DEPLOY_HEADER, currentDeploy } from "../deploy";
+import { deployChanged } from "../deploy";
 import { describeError } from "../errors";
-import {
-	DEFAULT_THREAD_NAME,
-	DiscordError,
-	THREAD_TYPES,
-	discordRest,
-	type DiscordChannelRef,
-	type DiscordRest,
-} from "../discord/api";
-import type { DiscordContext } from "../discord/context";
+import { DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
 import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
+import type { DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { SessionClient } from "./client";
 import { maybeAnnounceInstall } from "./install";
+import { DiscordLookups } from "./lookups";
+import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mentionInfo, stripMention, threadName } from "./message";
 
 const WAKE_PATH = "/wake";
 const SUBSCRIPTION_PATH = "/subscription";
 const THREAD_PREFIX = "thread:";
-const MAX_THREAD_NAME = 100;
 const KEEPALIVE_MS = 840_000;
-/** Text that interrupts the running turn when sent in an owned thread. */
-const STOP_TEXT = new Set(["stop", "cancel", "!stop", "!cancel", "/stop", "/cancel", "eryn stop", "eryn cancel"]);
 
 function log(message: string): void {
 	botLog("gateway", message);
@@ -52,18 +44,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	private readonly socket: DiscordSocket;
+	private readonly lookups: DiscordLookups;
 	private readonly keepAliveMs = KEEPALIVE_MS;
 	private readonly locks = new Map<string, Promise<void>>();
-	/** Bot managed-role id per guild, resolved lazily. */
-	private readonly roleCache = new Map<string, string>();
-	/**
-	 * Channels the agent's context needs, by id. Only a thread's parent is ever
-	 * looked up here, so this is one request per thread rather than one per
-	 * message.
-	 */
-	private readonly channels = new Map<string, DiscordChannelRef>();
-	/** Guild names by id, filled from one listing. */
-	private readonly guildNames = new Map<string, string>();
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
@@ -84,6 +67,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		super(state, env);
 		this.token = env.DISCORD_BOT_TOKEN?.trim() ?? "";
 		this.rest = discordRest(this.token);
+		this.lookups = new DiscordLookups(this.rest);
 		this.socket = new DiscordSocket(this.token, log, {
 			onMessage: (message) => this.track(() => this.onMessage(message), "message handling failed"),
 			onInteraction: (interaction) =>
@@ -137,13 +121,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	 * this request has finished.
 	 */
 	private async ensureCurrentVersion(request: Request): Promise<void> {
-		const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(this.env);
-		if (!version) return;
-		const stored = await this.ctx.storage.get<string>("deploy:version");
-		if (stored === version) return;
-		await this.ctx.storage.put("deploy:version", version);
-		// A first run has no stored version; only a change needs a restart.
-		if (stored === undefined) return;
+		if (!(await deployChanged(this.ctx.storage, request, this.env))) return;
 		this.restartPending = true;
 		await this.ctx.storage.setAlarm(Date.now() + 1_000);
 	}
@@ -156,7 +134,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			const body = (await request.json().catch(() => undefined)) as
 				| { guildId?: unknown; threadId?: unknown; subscribed?: unknown }
 				| undefined;
-			if (typeof body?.threadId !== "string" || typeof body.subscribed !== "boolean") {
+			if (typeof body?.threadId !== "string" || typeof body?.subscribed !== "boolean") {
 				return json({ error: "bad request" }, 400);
 			}
 			if (body.subscribed) await this.ctx.storage.put(THREAD_PREFIX + body.threadId, true);
@@ -243,22 +221,21 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (!this.botUserId) return;
 		const guildId = message.guild_id;
 		if (guildId === undefined) return;
-		if (message.webhook_id !== undefined) return;
-		if (message.author?.bot || message.author?.id === this.botUserId) return;
+		if (isBotMessage(message, this.botUserId)) return;
 
-		const channel = await this.channelRef(message.channel_id);
+		const channel = await this.lookups.channel(message.channel_id);
 		if (!channel) return;
 
 		// Discord also creates a managed role named after the bot, and its `@`
 		// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
-		const roleId = await this.botRoleMention(message);
+		const roleId = await this.lookups.botRoleMention(message, this.botUserId);
 
 		// A message inside a thread we own goes straight to that thread's session.
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) return;
-			const text = this.stripMention(message.content ?? "", roleId).trim();
-			if (!text && this.attachmentsOf(message).length === 0) return;
-			if (STOP_TEXT.has(text.toLowerCase())) {
+			const text = stripMention(message.content ?? "", this.botUserId, roleId);
+			if (!text && attachmentsOf(message).length === 0) return;
+			if (isStopText(text)) {
 				await this.stopThread(guildId, channel.id);
 				return;
 			}
@@ -269,23 +246,23 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			// The agent is told about the channel the request came from, which for a
 			// message inside a thread is the thread's parent — the thread is where
 			// the reply goes, the parent is the room it belongs to.
-			const parent = channel.parent_id ? await this.channelRef(channel.parent_id) : undefined;
+			const parent = channel.parent_id ? await this.lookups.channel(channel.parent_id) : undefined;
 			await this.forward(
 				guildId,
 				channel.id,
-				this.threadName(text),
+				threadName(text),
 				text,
 				message,
-				await this.discordContext(guildId, parent, channel),
+				await this.lookups.context(guildId, parent, channel),
 			);
 			return;
 		}
 
 		// Otherwise require an explicit mention and open a thread for the request.
-		if (!this.isMention(message, roleId)) return;
+		if (!isMention(message, this.botUserId, roleId)) return;
 
-		const text = this.stripMention(message.content ?? "", roleId).trim();
-		const name = this.threadName(text || DEFAULT_THREAD_NAME);
+		const text = stripMention(message.content ?? "", this.botUserId, roleId);
+		const name = threadName(text);
 		let threadId: string;
 		try {
 			threadId = await this.createThread(channel.id, message.id, name);
@@ -306,7 +283,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				.addThreadMember(threadId, authorId)
 				.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
 		}
-		if (!text && this.attachmentsOf(message).length === 0) {
+		if (!text && attachmentsOf(message).length === 0) {
 			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
 			return;
 		}
@@ -320,7 +297,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			name,
 			text,
 			message,
-			await this.discordContext(guildId, channel, { id: threadId, name }),
+			await this.lookups.context(guildId, channel, { id: threadId, name }),
 		);
 	}
 
@@ -329,7 +306,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			env: this.env,
 			log: (message) => log(message),
 			applicationId: this.botUserId ?? CLIENT_ID,
-			session: (guildId) => new SessionClient(this.env, guildId),
+			session: (guildId) => this.session(guildId),
 			ownsThread: (threadId) => this.ownsThread(threadId),
 			rest: this.rest,
 		};
@@ -354,9 +331,14 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	// --- Session object plumbing ------------------------------------------------
 
+	/** The guild's own session object, which is the security boundary between servers. */
+	private session(guildId: string): SessionClient {
+		return new SessionClient(this.env, guildId);
+	}
+
 	/** Whether the guild has connected a provider yet. */
 	private async guildReady(guildId: string): Promise<boolean> {
-		return await new SessionClient(this.env, guildId)
+		return await this.session(guildId)
 			.config()
 			.then((status) => status.ready)
 			.catch(() => false);
@@ -372,31 +354,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			.catch(() => undefined);
 	}
 
-	/** The files a Discord message carried, in the shape the session accepts. */
-	private attachmentsOf(message: DiscordMessage): {
-		url: string;
-		name?: string;
-		contentType?: string;
-		size?: number;
-	}[] {
-		return (message.attachments ?? []).flatMap((attachment) => {
-			const url = attachment.url ?? attachment.proxy_url;
-			if (!url) return [];
-			return [
-				{
-					url,
-					...(attachment.filename ? { name: attachment.filename } : {}),
-					...(attachment.content_type ? { contentType: attachment.content_type } : {}),
-					...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
-				},
-			];
-		});
-	}
-
 	/**
 	 * Forward a prompt to the guild's session object and wait for the turn,
-	 * serialised per thread so messages keep their order. The object is named
-	 * after the guild, which is the security boundary between servers.
+	 * serialised per thread so messages keep their order.
 	 */
 	private forward(
 		guildId: string,
@@ -407,16 +367,16 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		discord: DiscordContext,
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
-			const client = new SessionClient(this.env, guildId);
+			const client = this.session(guildId);
 			try {
 				await client.prompt({
 					threadId,
 					title,
 					text,
-					author: this.authorInfo(message),
-					mentions: this.mentionInfo(message),
+					author: authorInfo(message),
+					mentions: mentionInfo(message, this.botUserId),
 					discord,
-					attachments: this.attachmentsOf(message),
+					attachments: attachmentsOf(message),
 				});
 				return;
 			} catch (error) {
@@ -438,7 +398,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	 */
 	private async stopThread(guildId: string | undefined, threadId: string, gone = false): Promise<void> {
 		if (guildId === undefined) return;
-		await new SessionClient(this.env, guildId).interrupt(threadId, gone).catch((error) => {
+		await this.session(guildId).interrupt(threadId, gone).catch((error) => {
 			log(`could not interrupt ${threadId}: ${describeError(error)}`);
 		});
 	}
@@ -460,170 +420,6 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			if (this.locks.get(key) === guard) this.locks.delete(key);
 		});
 		return next;
-	}
-
-	// --- Helpers ----------------------------------------------------------------
-
-	/**
-	 * Everything the agent needs to identify the speaker: the guild nickname or
-	 * display name, the account handle, and the Discord id. Discord's name
-	 * precedence is server nickname, then display name, then the handle.
-	 */
-	private authorInfo(message: DiscordMessage): {
-		name: string;
-		username?: string;
-		id?: string;
-	} {
-		const username = message.author?.username?.trim();
-		return {
-			name:
-				message.member?.nick?.trim() ||
-				message.author?.global_name?.trim() ||
-				username ||
-				"someone",
-			...(username ? { username } : {}),
-			...(message.author?.id ? { id: message.author.id } : {}),
-		};
-	}
-
-	/**
-	 * Other accounts pinged by the message, so inline <@id> references are not
-	 * opaque. The author is already the speaker and is left out here.
-	 */
-	private mentionInfo(message: DiscordMessage): {
-		name: string;
-		username?: string;
-		id?: string;
-		bot?: boolean;
-	}[] {
-		const seen = new Set<string>();
-		const mentions: {
-			name: string;
-			username?: string;
-			id?: string;
-			bot?: boolean;
-		}[] = [];
-		for (const user of message.mentions ?? []) {
-			if (
-				!user.id ||
-				user.id === this.botUserId ||
-				user.id === message.author?.id ||
-				seen.has(user.id)
-			) {
-				continue;
-			}
-			seen.add(user.id);
-			const username = user.username?.trim();
-			mentions.push({
-				name: user.global_name?.trim() || username || user.id,
-				...(username ? { username } : {}),
-				id: user.id,
-				...(user.bot ? { bot: true } : {}),
-			});
-		}
-		return mentions;
-	}
-
-	/**
-	 * Describe where the agent was invoked, for the session to store and the
-	 * `eryn.discord` plugin to put in front of the model.
-	 */
-	private async discordContext(
-		guildId: string,
-		invocation: DiscordChannelRef | undefined,
-		thread: { id: string; name?: string },
-	): Promise<DiscordContext> {
-		const channel = invocation ?? thread;
-		const guildName = await this.guildName(guildId);
-		return {
-			guild: guildName ? { id: guildId, name: guildName } : { id: guildId },
-			channel: channel.name ? { id: channel.id, name: channel.name } : { id: channel.id },
-			thread: thread.name ? { id: thread.id, name: thread.name } : { id: thread.id },
-		};
-	}
-
-	/**
-	 * A channel or thread, cached: a thread's parent is looked up once, not per
-	 * message. Only a real answer is remembered — a lookup that failed is not a
-	 * channel that is missing, and the next message should try again.
-	 */
-	private async channelRef(channelId: string): Promise<DiscordChannelRef | undefined> {
-		const cached = this.channels.get(channelId);
-		if (cached) return cached;
-		const channel = await this.rest.channel(channelId).catch(() => undefined);
-		if (channel) {
-			// A long-lived guild object should not remember every channel forever.
-			if (this.channels.size > 500) this.channels.clear();
-			this.channels.set(channelId, channel);
-		}
-		return channel;
-	}
-
-	/** A guild's name, from one cached listing. A failed listing is not cached. */
-	private async guildName(guildId: string): Promise<string | undefined> {
-		const cached = this.guildNames.get(guildId);
-		if (cached) return cached;
-		const guilds = await this.rest.guilds().catch(() => undefined);
-		if (!guilds) return undefined;
-		for (const guild of guilds) this.guildNames.set(guild.id, guild.name);
-		return this.guildNames.get(guildId);
-	}
-
-	private mentionPattern(): RegExp | undefined {
-		return this.botUserId ? new RegExp(`<@!?${this.botUserId}>`, "g") : undefined;
-	}
-
-	private isMention(message: DiscordMessage, roleId: string | undefined): boolean {
-		if (!this.botUserId) return false;
-		if (message.mentions?.some((user) => user.id === this.botUserId)) return true;
-		if (this.mentionPattern()?.test(message.content ?? "")) return true;
-		if (roleId !== undefined) {
-			if (message.mention_roles?.includes(roleId)) return true;
-			if ((message.content ?? "").includes(`<@&${roleId}>`)) return true;
-		}
-		return false;
-	}
-
-	private stripMention(content: string, roleId: string | undefined): string {
-		const pattern = this.mentionPattern();
-		let without = pattern ? content.replace(pattern, " ") : content;
-		if (roleId !== undefined) without = without.replaceAll(`<@&${roleId}>`, " ");
-		// A message that was only a ping is still empty; it should not become a
-		// one-word request just because the ping is rendered as "Eryn".
-		if (!without.replace(/\s+/g, " ").trim()) return "";
-
-		let text = pattern ? content.replace(pattern, "Eryn") : content;
-		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, "Eryn");
-		return text.replace(/\s+/g, " ").trim();
-	}
-
-	/**
-	 * The bot's managed role id for the guild, but only when the message might
-	 * reference it, so ordinary messages never pay for the lookup.
-	 */
-	private async botRoleMention(message: DiscordMessage): Promise<string | undefined> {
-		if (message.guild_id === undefined) return undefined;
-		const roles = message.mention_roles ?? [];
-		if (!roles.length && !/<@&\d+>/.test(message.content ?? "")) return undefined;
-		return await this.botRoleId(message.guild_id).catch(() => undefined);
-	}
-
-	private async botRoleId(guildId: string): Promise<string | undefined> {
-		const cached = this.roleCache.get(guildId);
-		if (cached) return cached;
-		if (!this.botUserId) return undefined;
-		const roles = await this.rest.guildRoles(guildId);
-		const role = roles.find((candidate) => candidate.tags?.bot_id === this.botUserId);
-		if (!role) return undefined;
-		this.roleCache.set(guildId, role.id);
-		return role.id;
-	}
-
-	/** Discord permits 100 characters in a thread name; derive one from the request. */
-	private threadName(content: string): string {
-		const text = content.replace(/\s+/g, " ").trim();
-		if (!text) return DEFAULT_THREAD_NAME;
-		return text.length > MAX_THREAD_NAME ? text.slice(0, MAX_THREAD_NAME - 1) : text;
 	}
 
 	/** Reuse an existing thread for a message, or start one from it. */
