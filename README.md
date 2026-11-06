@@ -2,7 +2,7 @@
 
 Eryn is a Discord bot that runs an [OpenCode](https://opencode.ai) agent inside a
 thread. Mention `@eryn` in a server and it opens a thread for the request, works
-through it, and streams the reply. Replies in the thread continue the same
+through it, and posts the reply. Replies in the thread continue the same
 session. Eryn can also subscribe to a channel, where it answers every message
 in the channel itself and keeps one session for that channel.
 

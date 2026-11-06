@@ -18,7 +18,8 @@ import { DurableObject } from "cloudflare:workers";
 import { CLIENT_ID, log as botLog } from "../config";
 import { deployChanged } from "../deploy";
 import { describeError } from "../errors";
-import { DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
+import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
+import { renderThreadCreated } from "../discord/render";
 import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
 import type { DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
@@ -29,12 +30,25 @@ import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mention
 
 const WAKE_PATH = "/wake";
 const SUBSCRIPTION_PATH = "/subscription";
+const MESSAGE_WATCH_PATH = "/message-watch";
 const THREAD_PREFIX = "thread:";
 const CHANNEL_PREFIX = "channel:";
+const WATCH_PREFIX = "watch:";
 const KEEPALIVE_MS = 840_000;
 
 function log(message: string): void {
 	botLog("gateway", message);
+}
+
+/** A message whose threads the agent asked to be told about. */
+interface MessageWatch {
+	readonly guildId: string;
+	readonly channelId: string;
+	readonly messageId: string;
+	/** The conversation the agent asked from; the notice is delivered there. */
+	readonly notifyThreadId?: string;
+	readonly notifyTitle?: string;
+	readonly notifyDiscord?: DiscordContext;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -74,6 +88,8 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			onInteraction: (interaction) =>
 				this.track(() => this.onInteraction(interaction), "interaction handling failed"),
 			onGuild: (guild) => this.track(() => this.onGuild(guild), "guild handling failed"),
+			onThreadCreate: (thread) =>
+				this.track(() => this.onThreadCreate(thread), "thread creation handling failed"),
 			onChannelDelete: (channel) =>
 				this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
 		});
@@ -145,6 +161,46 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
 			if (body.subscribed) await this.ctx.storage.put(key, true);
 			else await this.ctx.storage.delete(key);
+			return json({ ok: true });
+		}
+		if (pathname === MESSAGE_WATCH_PATH) {
+			await this.ensureCurrentVersion(request);
+			if (request.method !== "POST") return json({ error: "not found" }, 404);
+			const body = (await request.json().catch(() => undefined)) as
+				| {
+						guildId?: unknown;
+						channelId?: unknown;
+						messageId?: unknown;
+						subscribed?: unknown;
+						notifyThreadId?: unknown;
+						notifyTitle?: unknown;
+						notifyDiscord?: unknown;
+					}
+				| undefined;
+			if (
+				typeof body?.guildId !== "string" ||
+				typeof body.channelId !== "string" ||
+				typeof body.messageId !== "string" ||
+				typeof body.subscribed !== "boolean"
+			) {
+				return json({ error: "bad request" }, 400);
+			}
+			const key = WATCH_PREFIX + body.messageId;
+			if (!body.subscribed) {
+				await this.ctx.storage.delete(key);
+				return json({ ok: true });
+			}
+			const watch: MessageWatch = {
+				guildId: body.guildId,
+				channelId: body.channelId,
+				messageId: body.messageId,
+				...(typeof body.notifyThreadId === "string" ? { notifyThreadId: body.notifyThreadId } : {}),
+				...(typeof body.notifyTitle === "string" ? { notifyTitle: body.notifyTitle } : {}),
+				...(body.notifyDiscord && typeof body.notifyDiscord === "object"
+					? { notifyDiscord: body.notifyDiscord as DiscordContext }
+					: {}),
+			};
+			await this.ctx.storage.put(key, watch);
 			return json({ ok: true });
 		}
 		if (pathname === WAKE_PATH) {
@@ -329,6 +385,50 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			message,
 			await this.lookups.context(guildId, channel, { id: threadId, name }),
 		);
+	}
+
+	/**
+	 * A thread was created. A thread made from a message shares that message's
+	 * id, so a watch stored under the message id is found from the thread id.
+	 * The thread is joined and subscribed, then the agent is told its id in the
+	 * conversation that asked for the watch.
+	 */
+	private async onThreadCreate(thread: DiscordChannel): Promise<void> {
+		const guildId = thread.guild_id;
+		if (guildId === undefined) return;
+		const watch = await this.ctx.storage.get<MessageWatch>(WATCH_PREFIX + thread.id);
+		if (!watch || watch.guildId !== guildId) return;
+		// A thread made from a message can only live in that message's channel.
+		if (thread.parent_id !== undefined && thread.parent_id !== watch.channelId) {
+			log(`watched message ${watch.messageId} grew a thread in ${thread.parent_id}, not ${watch.channelId}`);
+			return;
+		}
+		// A duplicate event, or a thread this bot already owns, has been handled
+		// before; only a fresh thread needs a notice.
+		if (await this.ownsThread(thread.id)) return;
+
+		await this.rest.joinThread(thread.id).catch((error) => {
+			log(`could not join new thread ${thread.id}: ${describeError(error)}`);
+		});
+		await this.ctx.storage.put(THREAD_PREFIX + thread.id, true);
+
+		const notifyThreadId = watch.notifyThreadId;
+		if (!notifyThreadId) return;
+		const text = renderThreadCreated(thread, watch.messageId);
+		await this.withLock(notifyThreadId, async () => {
+			try {
+				await this.session(watch.guildId).prompt({
+					threadId: notifyThreadId,
+					title: watch.notifyTitle ?? DEFAULT_THREAD_NAME,
+					text,
+					...(watch.notifyDiscord ? { discord: watch.notifyDiscord } : {}),
+				});
+			} catch (error) {
+				log(
+					`could not tell ${notifyThreadId} that thread ${thread.id} was created: ${describeError(error)}`,
+				);
+			}
+		});
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {

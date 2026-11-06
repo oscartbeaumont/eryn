@@ -23,14 +23,15 @@ import type { DiscordRest } from "../../discord/api";
 import { describeError } from "../../errors";
 import { appendToSystemPrompt } from "../hooks";
 import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./context";
-import { discordTools } from "./tools";
+import { discordTools, type SetMessageSubscription } from "./tools";
 
 export function discordPlugin(
 	rest: DiscordRest,
 	guildId: string,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
+	setMessageSubscription: SetMessageSubscription,
 ) {
-	const tools = discordTools(rest, guildId, setSubscription);
+	const tools = discordTools(rest, guildId, setSubscription, setMessageSubscription);
 
 	return Plugin.define({
 		id: "eryn.discord",

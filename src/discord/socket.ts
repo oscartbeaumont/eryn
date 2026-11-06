@@ -55,13 +55,18 @@ export interface DiscordMessage {
 }
 
 /**
- * The subset of a deleted channel this bot reads. A thread is a channel, so a
- * thread's deletion arrives in this shape too.
+ * The subset of a channel this bot reads. A thread is a channel, so a thread's
+ * creation and deletion arrive in this shape too.
  */
 export interface DiscordChannel {
 	id: string;
 	type?: number;
 	guild_id?: string;
+	/** The channel a thread was created in. */
+	parent_id?: string;
+	name?: string;
+	/** Discord sets this on a thread whose creation this event is reporting. */
+	newly_created?: boolean;
 }
 
 /** A guild the bot has just been added to (or that it can already see). */
@@ -115,6 +120,8 @@ export interface DiscordSocketHandlers {
 	onMessage(message: DiscordMessage): void;
 	onInteraction(interaction: DiscordInteraction): void;
 	onGuild(guild: DiscordGuildCreate): void;
+	/** A thread was created, or the bot was added to one. */
+	onThreadCreate(thread: DiscordChannel): void;
 	/** A channel or thread was deleted. Threads are channels, so both arrive here. */
 	onChannelDelete(channel: DiscordChannel): void;
 }
@@ -306,6 +313,11 @@ export class DiscordSocket {
 				} else if (payload.t === "GUILD_CREATE") {
 					const guild = payload.d as DiscordGuildCreate | undefined;
 					if (guild && typeof guild.id === "string") this.handlers.onGuild(guild);
+				} else if (payload.t === "THREAD_CREATE") {
+					const thread = payload.d as DiscordChannel | undefined;
+					if (thread && typeof thread.id === "string") {
+						this.handlers.onThreadCreate(thread);
+					}
 				} else if (payload.t === "THREAD_DELETE" || payload.t === "CHANNEL_DELETE") {
 					// A thread is a channel: Discord names the thread's own deletion
 					// THREAD_DELETE but can also report it as CHANNEL_DELETE, so both

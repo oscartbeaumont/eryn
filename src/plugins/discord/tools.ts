@@ -9,9 +9,10 @@
  * entry names its schema and returns a value, and {@link toolExecute} turns
  * that value (or a thrown refusal) into the result the model reads. They cover
  * what the agent needs to participate in a conversation — look around, read,
- * post elsewhere, manage threads, subscribe to channels, and react — and never
- * touch server administration. The agent's own reply is streamed into its
- * conversation, so there is deliberately no second way for it to answer there.
+ * post elsewhere, manage threads, subscribe to channels, watch a message for a
+ * new thread, and react — and never touch server administration. The agent's
+ * output is not posted, so `discord_send_message` is the only way it can speak
+ * to users.
  *
  * This module is wired up by {@link discordPlugin}, which also owns the
  * per-session context: the two only make sense together, because the tools are
@@ -27,7 +28,9 @@ import {
 	type DiscordRest,
 } from "../../discord/api";
 import { renderChannel, renderMessage } from "../../discord/render";
+import type { DiscordContext } from "../../session/models";
 import { objectSchema, toolExecute, type ToolSpec } from "../tool";
+import { readDiscordContext } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
 	return {
@@ -50,10 +53,23 @@ type ChannelInput = { channelId: string };
 type MessageInput = ChannelInput & { messageId: string };
 type ThreadInput = { threadId: string };
 
+/** A message to watch for a thread being created from it. */
+export interface MessageWatch {
+	readonly channelId: string;
+	readonly messageId: string;
+	/** The conversation the agent should be told in; the caller's own, when it has one. */
+	readonly notifyThreadId?: string;
+	readonly notifyTitle?: string;
+	readonly notifyDiscord?: DiscordContext;
+}
+
+export type SetMessageSubscription = (watch: MessageWatch, subscribed: boolean) => Promise<void>;
+
 export function discordTools(
 	rest: DiscordRest,
 	guildId: string,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
+	setMessageSubscription: SetMessageSubscription,
 ) {
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
@@ -84,6 +100,23 @@ export function discordTools(
 	// Filled in by `setup`: a tool may render a message, and the bot's own id is
 	// what turns its mentions into "Eryn" rather than a raw `<@…>` token.
 	let botUserId: string | undefined;
+	// Also filled in by `setup`: the notice for a fired watch is sent to the
+	// conversation that asked for the watch, which is read from the session.
+	let plugin: Plugin.Context | undefined;
+
+	/** The conversation a watch should notify, from the calling session's metadata. */
+	const notifyTarget = async (sessionID: string) => {
+		const session = plugin
+			? await plugin.session.get({ sessionID }).catch(() => undefined)
+			: undefined;
+		const discord = readDiscordContext(session?.metadata);
+		if (!discord) return {};
+		return {
+			notifyThreadId: discord.thread.id,
+			...(discord.thread.name ? { notifyTitle: discord.thread.name } : {}),
+			notifyDiscord: discord,
+		};
+	};
 
 	const tools: ToolSpec[] = [
 		{
@@ -135,7 +168,7 @@ export function discordTools(
 		{
 			name: "discord_send_message",
 			description:
-				"Send a message to a different channel or thread in this server. Your own reply is streamed into the current conversation automatically, so never use this to answer the conversation you are replying in — that posts a duplicate. Mentions are suppressed; replyTo attaches the message as a reply.",
+				"Send a message to a channel or thread in this server. This is how you reply: your own output is not posted to Discord. Pass the thread id from the message's <thread> element, or the channel id from its <channel> element, as channelId. Mentions are suppressed; replyTo attaches the message as a reply.",
 			input: objectSchema(
 				{
 					channelId: CHANNEL_ID,
@@ -173,6 +206,39 @@ export function discordTools(
 				return messageId
 					? await rest.createThread(channelId, messageId, name)
 					: await rest.startThread(channelId, name);
+			},
+		},
+
+		{
+			name: "discord_subscribe_message",
+			description:
+				"Watch a message in this server. If a thread is created from it, you will be told the new thread's id in this conversation, and Eryn will automatically join and subscribe to that thread so its messages start a turn. Discord gives a thread created from a message the same id as the message.",
+			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
+			async run(rawInput, call) {
+				const { channelId, messageId } = rawInput as MessageInput;
+				if (THREAD_TYPES.has((await channel(channelId)).type)) {
+					throw new Error(`A thread cannot be created from a message inside ${channelId}.`);
+				}
+				if (!(await rest.message(channelId, messageId))) {
+					throw new Error(`Message ${messageId} was not found in ${channelId}.`);
+				}
+				await setMessageSubscription(
+					{ channelId, messageId, ...(await notifyTarget(call.sessionID)) },
+					true,
+				);
+				return { ok: true, channelId, messageId, subscribed: true };
+			},
+		},
+
+		{
+			name: "discord_unsubscribe_message",
+			description: "Stop watching a message for a thread being created from it. Existing thread subscriptions are unchanged.",
+			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
+			async run(rawInput) {
+				const { channelId, messageId } = rawInput as MessageInput;
+				await channel(channelId);
+				await setMessageSubscription({ channelId, messageId }, false);
+				return { ok: true, channelId, messageId, subscribed: false };
 			},
 		},
 
@@ -323,6 +389,7 @@ export function discordTools(
 	return {
 		/** Register the tools on the plugin context, after resolving the bot's id. */
 		async setup(ctx: Plugin.Context): Promise<void> {
+			plugin = ctx;
 			botUserId = await rest.me().then((me) => me.id).catch(() => undefined);
 			await ctx.tool.transform((editor) => {
 				for (const spec of tools) {

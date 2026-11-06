@@ -255,6 +255,11 @@ export function discordRest(token: string) {
 			return channelRefs(result?.threads);
 		},
 
+		/** One message in a channel or thread, or undefined when it does not exist. */
+		async message(channelId: string, messageId: string): Promise<DiscordMessageView | undefined> {
+			return await request<DiscordMessageView>("GET", messagePath(channelId, messageId));
+		},
+
 		/** Recent messages in a channel or thread, newest first. */
 		async channelMessages(
 			channelId: string,

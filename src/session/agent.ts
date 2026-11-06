@@ -11,8 +11,7 @@
 import { KEYS, log } from "../config";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
-import { renderUserMessage } from "../discord/render";
-import { DiscordStream } from "../discord/stream";
+import { renderConversation, renderFailure, renderUserMessage } from "../discord/render";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
 import type { HostInterface } from "./host";
@@ -26,7 +25,7 @@ import type {
 	PromptRequest,
 } from "./models";
 import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
-import { applyTurnEvent, createTurn, failureNote, renderTurn, type Turn } from "./turn";
+import { applyTurnEvent, createTurn, type Turn } from "./turn";
 
 export type { HostConfig };
 
@@ -34,10 +33,9 @@ export type { HostConfig };
 const LOCATION = "/eryn";
 const TURN_TIMEOUT_MS = 900_000;
 
-/** The live state of one thread inside this guild's object. */
+/** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
 	turn?: Turn;
-	stream?: DiscordStream;
 }
 
 interface Host {
@@ -350,80 +348,85 @@ class GuildAgentImpl implements GuildAgentShape {
 	// --- A turn ---------------------------------------------------------------
 
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
-		const stream = new DiscordStream(this.rest, request.threadId);
-		const turn = this.beginTurn(request.threadId, stream);
+		const turn = this.beginTurn(request.threadId);
+		let failure: string | undefined;
 
 		let stopTyping: () => void = () => undefined;
 		try {
 			stopTyping = this.startTyping(request.threadId);
 
 			const host = await this.hostFor(config, request.threadId);
-			// The reply and the completion signal both arrive as events, so a stream
-			// that died since the last turn has to be replaced before this one starts.
+			// The completion signal arrives as an event, so a subscription that
+			// died since the last turn has to be replaced before this one starts.
 			this.startConsuming(host);
 			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
 			await this.applyDiscord(host, request.threadId, sessionID, request.discord);
-			const baseline = await this.lastAssistantID(host, sessionID).catch(() => undefined);
 			await this.applyModel(host, request.threadId, sessionID, config.model);
 
 			const attached = await fetchAttachmentFiles(request.attachments);
 			const message = renderUserMessage(request.author, request.mentions ?? [], request.text.trim() || "(attached files)");
+			// The message carries the channel and (when there is one) the thread
+			// it came from. The agent posts its reply with a Discord tool, so
+			// these ids are what tell it where the reply belongs.
+			const context = request.discord ? renderConversation(request.discord) : undefined;
+			const body = [context, message].filter(Boolean).join("\n\n");
 			const text =
 				attached.notes.length > 0
-					? `${message}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
-					: message;
+					? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
+					: body;
 			await host.sessions.prompt({
 				sessionID,
 				text,
 				...(attached.files.length > 0 ? { files: attached.files } : {}),
 			});
 			const finished = await this.wait(turn);
-			if (!finished) await this.interrupt(request.threadId, false).catch(() => undefined);
-
-			if (turn.gone) {
-				// The thread was deleted mid-turn: there is nowhere to put the reply
-				// and no one left to read it, so nothing is written.
-				stream.abandon();
-				log("session", `thread ${request.threadId} was deleted, so the reply was dropped`);
-			} else {
-				const final = await this.finalText(host, sessionID, baseline).catch(() => undefined);
-				const text = final ?? renderTurn(turn);
-				const body = turn.error
-					? failureNote(turn.error)
-					: text.trim() ||
-						`The model \`${config.model}\` returned no text. If it is not connected, pick one with \`/eryn setup model\`.`;
-				const suffix = turn.interrupted ? "Stopped." : finished ? undefined : "Stopped after timing out.";
-				await stream.finish(body, suffix);
+			if (!finished) {
+				await this.interrupt(request.threadId, false).catch(() => undefined);
+				failure = "The turn timed out before it finished.";
 			}
+			if (turn.error) {
+				failure = turn.error;
+				log("session", `turn in ${request.threadId} failed: ${turn.error}`);
+			}
+
+			// The assistant's own text is deliberately ignored: the reply is
+			// whatever it posted through discord_send_message.
 		} catch (error) {
-			log("session", `prompt failed: ${describeError(error)}`);
-			// Always say something: a silent failure is indistinguishable from a
-			// hung turn.
-			await stream.finish(`I hit an error before I could finish: ${describeError(error)}`);
+			failure = describeError(error);
+			log("session", `prompt failed: ${failure}`);
 		} finally {
 			stopTyping();
 			this.endTurn(request.threadId, turn);
 			if (turn.gone) await this.discardThread(request.threadId);
 		}
+
+		// Report the failure where the turn was triggered, once the run itself
+		// has been released.
+		if (failure && !turn.gone) await this.postFailure(request.threadId, failure);
 	}
 
-	/** Take ownership of a thread's turn, so events and the prompt agree on it. */
-	private beginTurn(threadId: string, stream: DiscordStream): Turn {
+	/** Send a turn failure to the conversation that triggered it. */
+	private async postFailure(threadId: string, error: string): Promise<void> {
+		await this.rest.sendMessage(threadId, renderFailure(error)).catch((sendError) => {
+			log("session", `could not post the failure for ${threadId}: ${describeError(sendError)}`);
+		});
+	}
+
+	/** Take ownership of a conversation's turn, so events and the prompt agree on it. */
+	private beginTurn(threadId: string): Turn {
 		const run = this.runs.get(threadId) ?? {};
 		const turn = createTurn(threadId);
 		run.turn = turn;
-		run.stream = stream;
 		this.runs.set(threadId, run);
 		return turn;
 	}
 
-	/** Release a thread's turn, leaving the run behind for the next one. */
+	/** Release a conversation's turn, leaving the run behind for the next one. */
 	private endTurn(threadId: string, turn: Turn): void {
 		turn.done = true;
 		const run = this.runs.get(threadId);
 		if (run?.turn !== turn) return;
 		run.turn = undefined;
-		run.stream = undefined;
 		this.runs.delete(threadId);
 	}
 
@@ -562,52 +565,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		return session.id;
 	}
 
-	private async lastAssistantID(host: HostInterface, sessionID: string): Promise<string | undefined> {
-		const messages = await host.sessions.context({ sessionID });
-		for (let index = messages.length - 1; index >= 0; index--) {
-			const message = messages[index]!;
-			if (message.type === "assistant") return message.id;
-		}
-		return undefined;
-	}
-
-	/** Assistant message text, newest first, stopping at `baseline`. */
-	private async assistantTexts(
-		host: HostInterface,
-		sessionID: string,
-		baseline?: string,
-	): Promise<string[]> {
-		const messages = await host.sessions.context({ sessionID });
-		const collected: string[] = [];
-		for (let index = messages.length - 1; index >= 0; index--) {
-			const message = messages[index]!;
-			if (message.type !== "assistant") continue;
-			if (baseline && message.id === baseline) break;
-			const text = message.content
-				.filter((part) => part.type === "text")
-				.map((part) => part.text)
-				.join("")
-				.trim();
-			if (text) collected.push(text);
-		}
-		return collected;
-	}
-
-	/** The assistant text produced since `baseline`, in conversation order. */
-	private async finalText(
-		host: HostInterface,
-		sessionID: string,
-		baseline: string | undefined,
-	): Promise<string | undefined> {
-		return (await this.assistantTexts(host, sessionID, baseline)).reverse().join("\n\n").trim() || undefined;
-	}
-
 	// --- Event stream ---------------------------------------------------------
 
 	/**
-	 * Subscribe to the host's event stream, which is where the streaming reply
-	 * and the turn's completion signal come from. The feed is volatile: a
-	 * subscription that ends has to be replaced, so `prompt` re-ensures it.
+	 * Subscribe to the host's event stream, which is where the completion
+	 * signal comes from. The feed is volatile: a subscription that ends has to
+	 * be replaced, so `prompt` re-ensures it.
 	 */
 	private startConsuming(host: HostInterface): void {
 		if (this.consuming) return;
@@ -651,17 +614,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		// Ignore events that predate this turn, such as the previous one going idle.
 		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
 
-		const text = applyTurnEvent(turn, shape.type, data);
-		if (text !== undefined) this.runs.get(threadId)?.stream?.push(text);
+		applyTurnEvent(turn, shape.type, data);
 	}
 
 	/**
-	 * Render a turn this object did not start, such as one a schedule fired.
+	 * Follow a turn this object did not start, such as one a schedule fired.
 	 *
-	 * The thread is not in memory after an eviction, so it comes from the Discord
-	 * context the Session carries in its metadata. Everything after that is the
-	 * same as a prompted turn: one stream, the shared event handler, and the
-	 * reply written when the execution settles.
+	 * The conversation is not in memory after an eviction, so it comes from the
+	 * Discord context the Session carries in its metadata. The agent posts any
+	 * reply through a Discord tool; this only waits for the turn to settle.
 	 */
 	private adopt(sessionID: string): void {
 		const host = this.consumingHost;
@@ -675,8 +636,8 @@ class GuildAgentImpl implements GuildAgentShape {
 				if (!threadId || this.runs.get(threadId)?.turn) return;
 
 				this.remember(threadId, sessionID);
-				const stream = new DiscordStream(this.rest, threadId);
-				const turn = this.beginTurn(threadId, stream);
+				const turn = this.beginTurn(threadId);
+				let failure: string | undefined;
 
 				let stopTyping: () => void = () => undefined;
 				try {
@@ -684,20 +645,17 @@ class GuildAgentImpl implements GuildAgentShape {
 					if (!(await this.wait(turn))) {
 						turn.interrupted = true;
 						await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+						failure = "The turn timed out before it finished.";
 					}
-					if (turn.gone) {
-						stream.abandon();
-						return;
+					if (turn.error) {
+						failure = turn.error;
+						log("session", `scheduled turn for ${sessionID} failed: ${turn.error}`);
 					}
-					const text = renderTurn(turn).trim() || (await this.assistantTexts(host, sessionID))[0] || "";
-					const body = turn.error ? failureNote(turn.error) : text || "The scheduled turn produced no text.";
-					await stream.finish(body, turn.interrupted ? "Stopped." : undefined);
-				} catch (error) {
-					await stream.finish(`I hit an error before I could finish: ${describeError(error)}`).catch(() => undefined);
 				} finally {
 					stopTyping();
 					this.endTurn(threadId, turn);
 				}
+				if (failure && !turn.gone) await this.postFailure(threadId, failure);
 			} catch (error) {
 				log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
 			} finally {

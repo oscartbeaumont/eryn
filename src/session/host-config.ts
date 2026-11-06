@@ -22,7 +22,7 @@ import {
 	workspacePlugin,
 } from "../plugins";
 import { createHost, type HostInterface } from "./host";
-import type { McpLink, ProviderConnection } from "./models";
+import type { DiscordContext, McpLink, ProviderConnection } from "./models";
 
 /** Everything the host needs to be built, and to decide whether to rebuild. */
 export interface HostConfig {
@@ -77,6 +77,31 @@ async function setSubscription(
 	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
 }
 
+/** Add or remove the bot gateway's watch for a message that may grow a thread. */
+async function setMessageSubscription(
+	env: Env,
+	guildId: string,
+	watch: {
+		readonly channelId: string;
+		readonly messageId: string;
+		readonly notifyThreadId?: string;
+		readonly notifyTitle?: string;
+		readonly notifyDiscord?: DiscordContext;
+	},
+	subscribed: boolean,
+): Promise<void> {
+	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
+	const response = await stub.fetch(
+		"https://bot.internal/message-watch",
+		withDeploy(env, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ guildId, ...watch, subscribed }),
+		}),
+	);
+	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
+}
+
 function mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {
 	const servers: Record<string, RemoteMcpServer> = {};
 	for (const link of links) {
@@ -118,8 +143,11 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	const plugins = [
 		agentInstructionsPlugin(),
 		workspacePlugin(storage),
-		discordPlugin(rest, guildId, (kind, id, subscribed) =>
-			setSubscription(env, guildId, kind, id, subscribed),
+		discordPlugin(
+			rest,
+			guildId,
+			(kind, id, subscribed) => setSubscription(env, guildId, kind, id, subscribed),
+			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
 		),
 	];
 	const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));

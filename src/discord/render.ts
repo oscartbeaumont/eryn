@@ -49,6 +49,68 @@ export function renderChannel(channel: DiscordChannelRef): string {
 	return selfClosing("channel", entries);
 }
 
+/**
+ * An automated notice that a thread was created from a message the agent
+ * subscribed to. The reference carries the ids the agent needs to act there.
+ */
+export function renderThreadCreated(
+	thread: { id: string; name?: string; parent_id?: string },
+	messageId: string,
+): string {
+	const entries: [string, string][] = [
+		["type", "thread_created"],
+		["messageId", messageId],
+		["threadId", thread.id],
+	];
+	if (thread.name) entries.push(["name", thread.name]);
+	if (thread.parent_id) entries.push(["channelId", thread.parent_id]);
+	return [
+		selfClosing("discord-event", entries),
+		"Automated notice: a thread was created on the message you subscribed to. Eryn has joined it and is now subscribed, so its messages will reach you automatically.",
+	].join("\n\n");
+}
+
+/**
+ * The channel a live prompt came from, and the thread when it came from one.
+ *
+ * The agent needs this in the message itself so it knows which conversation a
+ * reply belongs to; its own output is not posted, so the ids are the only way
+ * to address the reply.
+ */
+export function renderConversation(context: {
+	channel: { id: string; name?: string };
+	thread?: { id: string; name?: string };
+	kind?: "thread" | "channel";
+}): string {
+	const channel: [string, string][] = [["id", context.channel.id]];
+	if (context.channel.name) channel.push(["name", context.channel.name]);
+	const blocks = [selfClosing("channel", channel)];
+	if ((context.kind ?? "thread") === "thread" && context.thread) {
+		const thread: [string, string][] = [["id", context.thread.id]];
+		if (context.thread.name) thread.push(["name", context.thread.name]);
+		blocks.push(selfClosing("thread", thread));
+	}
+	return blocks.join("\n");
+}
+
+/**
+ * A message that reports a failed turn. It is deliberately distinct from
+ * anything the agent wrote, so a reader can tell the turn stopped rather than
+ * the agent choosing to say this.
+ */
+export function renderFailure(error: string): string {
+	const hint = /deprecat|unavailable|not found/i.test(error)
+		? "\n\nThe model for this server is no longer available — pick another with `/eryn setup`."
+		: /credential|unauthor|401|403/i.test(error)
+			? "\n\nThe key for this server was rejected — check or replace it with `/eryn setup`."
+			: "";
+	const quoted = (error.trim() || "Unknown error.")
+		.split("\n")
+		.map((line) => `> ${line}`)
+		.join("\n");
+	return `⚠️ **Eryn could not finish that turn.**\n${quoted}${hint}`;
+}
+
 function replaceBotMentions(text: string, botUserId: string | undefined): string {
 	if (!botUserId) return text;
 	return text.replaceAll(`<@${botUserId}>`, "Eryn").replaceAll(`<@!${botUserId}>`, "Eryn");
