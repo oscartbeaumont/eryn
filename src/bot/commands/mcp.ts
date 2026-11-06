@@ -6,8 +6,6 @@
  * screen is only reachable in the server, never from the install DM.
  */
 
-import { publicOrigin } from "../../config";
-import { sign } from "../../crypto";
 import { describeError } from "../../errors";
 import {
 	actionButton,
@@ -18,7 +16,7 @@ import {
 	type DiscordModal,
 	type DiscordSelectOption,
 } from "../../discord/components";
-import { describeTools, MCP_START_PATH } from "../../mcp/links";
+import { describeTools } from "../../mcp/describe";
 import type { McpLink, McpProbeResponse, PublicLink } from "../../session/models";
 import { SETUP_MENU_ID, payloadId } from "../ids";
 import { guarded, responder, textInput, textModal, MAX_SELECT_OPTIONS, type InteractionRequest } from "./interaction";
@@ -211,9 +209,7 @@ async function startAuth(
 	}
 	// The callback lands on the Worker, not this interaction, so the start link
 	// carries a signed attempt rather than the server's own URL.
-	const secret = request.ctx.env.SESSION_SECRET?.trim();
-	const state = secret ? await sign({ guildId: request.guildId, attemptId: started.attemptId }, secret) : undefined;
-	const signInUrl = state ? `${publicOrigin(request.ctx.env)}${MCP_START_PATH}/${state}` : started.url;
+	const signInUrl = started.startUrl ?? started.url;
 	await answer.reply(
 		[
 			`**${name}** needs you to sign in before Eryn can use it.`,

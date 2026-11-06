@@ -78,8 +78,9 @@ async function openMcp(request: InteractionRequest): Promise<void> {
 
 export function helpText(): string {
 	return [
-		"**Eryn setup**",
-		"• `/eryn setup` — providers, models, MCP servers, and current status",
+		"**Eryn commands**",
+		"• `/eryn setup` — providers, models, MCP servers, and current status (needs Manage Server)",
 		"• `/eryn stop` — stop the run in this thread",
+		"• `/eryn help` — show this",
 	].join("\n");
 }

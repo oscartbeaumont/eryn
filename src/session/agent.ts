@@ -44,6 +44,8 @@ interface Host {
 	connections: string;
 	/** Signature of the linked MCP servers, at the time the host was built. */
 	mcp: string;
+	/** Whether this host has the schedule runner running. */
+	schedules: boolean;
 }
 
 /** The service surface the session object drives. */
@@ -66,6 +68,12 @@ export interface GuildAgentShape {
 	interrupt(threadId: string | undefined, gone: boolean): Promise<boolean>;
 	/** Build the host if it is not up, so its schedule runner is running. */
 	ensureHost(config: HostConfig): Promise<void>;
+	/** Whether a host is in memory and holding timers or streams. */
+	hasHost(): boolean;
+	/** Whether any turn is still running, including one adopted from a schedule. */
+	busy(): boolean;
+	/** Close the host and its background fibers, letting the object hibernate. */
+	close(): Promise<void>;
 }
 
 class GuildAgentImpl implements GuildAgentShape {
@@ -112,10 +120,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async hostFor(config: HostConfig, excludeThreadId?: string): Promise<HostInterface> {
 		const connections = connectionSignature(config.connections);
 		const mcp = linkSignature(config.links);
+		const schedules = this.hasSchedules();
 
 		const changed =
 			this.host !== undefined &&
-			(this.host.connections !== connections || this.host.mcp !== mcp);
+			(this.host.connections !== connections ||
+				this.host.mcp !== mcp ||
+				(schedules && !this.host.schedules));
 		// A config change must not tear down a host that has another thread's turn
 		// streaming on it. The turn being started is allowed through.
 		const busy = [...this.runs].some(
@@ -131,8 +142,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				rest: this.rest,
 				guildId: this.guildId,
 				directory: LOCATION,
+				schedules,
 			});
-			this.host = { promise, connections, mcp };
+			this.host = { promise, connections, mcp, schedules };
 			this.consuming = undefined;
 			// A different provider set means a different catalogue.
 			this.modelCache = undefined;
@@ -151,6 +163,55 @@ class GuildAgentImpl implements GuildAgentShape {
 		// A scheduled turn starts without an HTTP prompt, so nothing else would
 		// subscribe to its events and render it into Discord.
 		this.startConsuming(host);
+	}
+
+	hasHost(): boolean {
+		return this.host !== undefined;
+	}
+
+	/** Whether any active schedule exists, so the host needs its runner. */
+	private hasSchedules(): boolean {
+		try {
+			return this.storage.sql.exec("SELECT 1 FROM schedule WHERE status = 'active' LIMIT 1").toArray().length > 0;
+		} catch {
+			// The table only exists once a host has enabled schedules.
+			return false;
+		}
+	}
+
+	busy(): boolean {
+		if (this.adopting.size > 0) return true;
+		for (const run of this.runs.values()) if (run.turn !== undefined) return true;
+		return false;
+	}
+
+	/**
+	 * Stop the host so the Durable Object can hibernate.
+	 *
+	 * The host keeps the schedule runner and event stream alive in memory, and
+	 * those timers would otherwise keep this object resident and billable for
+	 * the whole day. The next request builds a host again from storage.
+	 */
+	async close(): Promise<void> {
+		if (this.busy()) return;
+		this.abort?.abort();
+		this.abort = undefined;
+		this.consuming = undefined;
+		this.consumingHost = undefined;
+
+		const host = this.host;
+		this.host = undefined;
+		this.modelCache = undefined;
+		this.runs.clear();
+		this.sessionByThread.clear();
+		this.threadBySession.clear();
+		this.appliedModels.clear();
+		this.appliedContext.clear();
+
+		if (!host) return;
+		await host.promise
+			.then((running) => running.close())
+			.catch((error) => log("session", `could not close the host: ${describeError(error)}`));
 	}
 
 	async integrations(config: HostConfig): Promise<IntegrationOption[]> {

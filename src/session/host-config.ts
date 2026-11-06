@@ -39,6 +39,8 @@ export interface HostBuildOptions {
 	readonly guildId: string;
 	/** The directory every session in this deployment lives in. */
 	readonly directory: string;
+	/** Whether the guild already has schedules worth a resident runner. */
+	readonly schedules?: boolean;
 }
 
 /**
@@ -136,7 +138,7 @@ export function linkSignature(links: readonly McpLink[]): string {
 
 /** Build a host for this config; the returned promise rejects if it cannot start. */
 export async function buildHost(config: HostConfig, options: HostBuildOptions): Promise<HostInterface> {
-	const { env, storage, rest, guildId, directory } = options;
+	const { env, storage, rest, guildId, directory, schedules = false } = options;
 	const location = { directory };
 
 	// Every plugin is the promise API, which is what this host accepts.
@@ -161,9 +163,10 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 
 	const host = await createHost({
 		storage,
-		// `experimental.schedules` gives Sessions a durable schedule table.
-		// The runner that fires it is started on the host runtime.
-		schedules: true,
+		// `experimental.schedules` gives Sessions a durable schedule table. The
+		// runner is only started when there is an active schedule to fire; it
+		// otherwise polls forever and keeps the object awake.
+		schedules,
 		// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
 		// exceeds a Durable Object's memory. Ask this deployment's own
 		// endpoint for the same catalogue with only the connected providers

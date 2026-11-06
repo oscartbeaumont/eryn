@@ -12,15 +12,10 @@ import { Schema } from "effect";
 import { isValidModel, log } from "../config";
 import type { DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
-import { probeServer } from "../mcp/client";
-import {
-	AUTH_TTL_MS,
-	beginAuthorization,
-	describeTools,
-	finishAuthorization,
-	refreshLink,
-	testLink,
-} from "../mcp/links";
+import { describeTools } from "../mcp/describe";
+import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "../mcp/links";
+import { AUTH_TTL_MS } from "../mcp/paths";
+import { probeServer } from "../mcp/probe";
 import type { GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
 import {
@@ -52,8 +47,6 @@ export interface RouteContext {
 	readonly agent: GuildAgentShape;
 	loadConfig(refresh?: boolean): Promise<HostConfig>;
 	reconcileModel(config: HostConfig): Promise<HostConfig>;
-	/** Wake the object when the next schedule is due. */
-	armScheduleAlarm(): Promise<void>;
 }
 
 export function json(body: unknown, status = 200): Response {
@@ -110,7 +103,7 @@ function openRoute<S extends Schema.ConstraintDecoder<unknown>>(
 
 /** Build the route table and the dispatcher that serves it. */
 export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Response> {
-	const { env, guildId, rest, store, agent, loadConfig, reconcileModel, armScheduleAlarm } = ctx;
+	const { env, guildId, rest, store, agent, loadConfig, reconcileModel } = ctx;
 
 	/** Record an OAuth connection and move the guild onto a model it can run. */
 	const recordOAuth = async (integrationID: string) => {
@@ -386,8 +379,8 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 				return json({ ok: false, error: "no provider is connected" }, 400);
 			}
 			await agent.prompt(body, await reconcileModel(config));
-			// The turn may have created or changed a schedule; arm for it.
-			await armScheduleAlarm();
+			// The object's alarm is re-armed after this request returns, so a
+			// schedule the turn created still fires on time.
 			return json({ ok: true });
 		}),
 

@@ -154,6 +154,8 @@ export const McpAuthStartResponseSchema = Schema.Struct({
 	ok: Schema.optional(Schema.Boolean),
 	attemptId: Schema.optional(Schema.String),
 	url: Schema.optional(Schema.String),
+	/** The short signed link that forwards the browser to `url`. */
+	startUrl: Schema.optional(Schema.String),
 	error: Schema.optional(Schema.String),
 });
 export type McpAuthStartResponse = typeof McpAuthStartResponseSchema.Type;

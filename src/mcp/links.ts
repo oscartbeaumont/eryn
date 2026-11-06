@@ -13,17 +13,9 @@ import { log, publicOrigin } from "../config";
 import { randomToken, sign } from "../crypto";
 import { describeError } from "../errors";
 import type { McpLink, PendingMcpAuth } from "../session/models";
-import { probeServer, type ProbeResult } from "./client";
-import {
-	authorizationUrl,
-	discover,
-	exchangeCode,
-	pkce,
-	refreshTokens,
-	registerClient,
-	type McpDiscovery,
-	type McpTokens,
-} from "./oauth";
+import { discover, exchangeCode, initiate, refreshTokens, type McpDiscovery, type McpTokens } from "./oauth";
+import { MCP_CALLBACK_PATH, MCP_START_PATH, AUTH_TTL_MS } from "./paths";
+import { probeServer, type ProbeResult } from "./probe";
 
 /**
  * The slice of guild storage a link needs.
@@ -39,14 +31,6 @@ export interface LinkStore {
 	putAuthAttempt(attempt: PendingMcpAuth): Promise<void>;
 	removeAuthAttempt(id: string): Promise<void>;
 }
-
-/** Where an authorization server sends the browser back to. */
-export const MCP_CALLBACK_PATH = "/api/bot/mcp/callback";
-/** Short browser hop that forwards to a long authorization URL. */
-export const MCP_START_PATH = "/api/bot/mcp/start";
-
-/** A started sign-in is valid for this long, which is how long a browser tab has. */
-export const AUTH_TTL_MS = 15 * 60_000;
 
 /** Refresh a token this long before it expires, so a turn never starts on a dead one. */
 const REFRESH_SKEW_MS = 60_000;
@@ -78,32 +62,19 @@ export interface BeginAuthorizationInput {
  */
 export async function beginAuthorization(
 	input: BeginAuthorizationInput,
-): Promise<{ attemptId: string; url: string }> {
+): Promise<{ attemptId: string; url: string; startUrl: string }> {
 	const secret = input.env.SESSION_SECRET?.trim();
 	if (!secret) throw new Error("This deployment has no session secret, so a sign-in cannot be completed.");
 
 	const discovery = await discover(input.url, input.resourceMetadataUrl);
-	if (!discovery.registrationEndpoint) {
-		throw new Error(
-			"This server does not support automatic client registration. Add it with a token instead.",
-		);
-	}
-
 	const redirectUri = mcpRedirectUri(input.env);
 	const scope = input.scope ?? requestedScope(discovery);
-	const client = await registerClient({
-		registrationEndpoint: discovery.registrationEndpoint,
-		redirectUri,
-		...(scope ? { scope } : {}),
-	});
-	const { verifier, challenge } = await pkce();
 	const attemptId = randomToken(16);
 	const state = await sign({ guildId: input.guildId, attemptId }, secret);
-	const url = authorizationUrl(discovery, {
-		clientId: client.clientId,
+	const started = await initiate({
+		discovery,
 		redirectUri,
 		state,
-		challenge,
 		...(scope ? { scope } : {}),
 	});
 
@@ -115,19 +86,19 @@ export async function beginAuthorization(
 		...(input.applicationId ? { applicationId: input.applicationId } : {}),
 		...(input.interactionToken ? { interactionToken: input.interactionToken } : {}),
 		state,
-		authorizationUrl: url,
-		clientId: client.clientId,
-		...(client.clientSecret ? { clientSecret: client.clientSecret } : {}),
-		tokenEndpoint: discovery.tokenEndpoint,
-		...(discovery.resource ? { resource: discovery.resource } : {}),
+		authorizationUrl: started.url,
+		clientId: started.clientId,
+		...(started.clientSecret ? { clientSecret: started.clientSecret } : {}),
+		tokenEndpoint: discovery.authorizationServerMetadata.token_endpoint,
+		resource: discovery.resource,
 		...(scope ? { scope } : {}),
-		codeVerifier: verifier,
+		codeVerifier: started.codeVerifier,
 		redirectUri,
 		status: "pending",
 		createdAt: Date.now(),
 	});
 
-	return { attemptId, url };
+	return { attemptId, url: started.url, startUrl: `${publicOrigin(input.env)}${MCP_START_PATH}/${state}` };
 }
 
 export interface FinishAuthorizationResult {
@@ -296,16 +267,6 @@ async function pruneAttempts(store: LinkStore): Promise<void> {
 	for (const attempt of attempts) {
 		if (attempt.createdAt < cutoff) await store.removeAuthAttempt(attempt.attemptId).catch(() => undefined);
 	}
-}
-
-/** A one-line account of what a server offers, for a Discord message. */
-export function describeTools(tools: readonly { name: string }[]): string {
-	if (!tools.length) return "It advertises no tools.";
-	const shown = tools
-		.slice(0, 8)
-		.map((tool) => tool.name.slice(0, 40))
-		.join(", ");
-	return `It offers ${tools.length} tool${tools.length === 1 ? "" : "s"}: ${shown}${tools.length > 8 ? ", …" : ""}.`;
 }
 
 /** The narrowest scope the server supports, preferring one it names itself. */

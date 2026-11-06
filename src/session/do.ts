@@ -8,7 +8,8 @@
  * It is a thin shell: it owns the guild's store and agent, serves the internal
  * routes the bot calls, and runs the alarm that restarts this object after a
  * deploy and wakes the host's schedule runner. It holds no Discord socket and
- * no timer of its own.
+ * no timer of its own, and closes the host when idle so Cloudflare can
+ * hibernate the object between conversations.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -23,6 +24,13 @@ import type { HostConfig } from "./host-config";
 import { buildRoutes, json } from "./routes";
 import { guildStore, type GuildStoreShape } from "./store";
 
+/** Keep a warm host briefly after the last request, then let the object hibernate. */
+const HOST_IDLE_MS = 5 * 60_000;
+/** How often to wake while a turn or schedule is still running. */
+const BUSY_POLL_MS = 20_000;
+/** How soon to try a schedule that is already due. */
+const SCHEDULE_SOON_MS = 5_000;
+
 export class BotSessionV5 extends DurableObject<Env> {
 	private readonly guildId: string;
 	private readonly rest: DiscordRest;
@@ -33,6 +41,8 @@ export class BotSessionV5 extends DurableObject<Env> {
 	private inFlight = 0;
 	/** Whether this instance has seen a newer deploy; see `alarm`. */
 	private restartPending = false;
+	/** When work last finished, so an idle host can be closed and the object can hibernate. */
+	private lastActivityAt = 0;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -48,7 +58,6 @@ export class BotSessionV5 extends DurableObject<Env> {
 			agent: this.agent,
 			loadConfig: (refresh) => this.loadConfig(refresh),
 			reconcileModel: (config) => this.reconcileModel(config),
-			armScheduleAlarm: () => this.armScheduleAlarm(),
 		});
 		log("session", `guild ${this.guildId} object created`);
 	}
@@ -66,6 +75,10 @@ export class BotSessionV5 extends DurableObject<Env> {
 			return json({ error: describeError(error) }, 500);
 		} finally {
 			this.inFlight -= 1;
+			this.lastActivityAt = Date.now();
+			await this.armAlarm().catch((error) =>
+				log("session", `could not arm the alarm: ${describeError(error)}`),
+			);
 		}
 	}
 
@@ -84,7 +97,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 		// The signal is in memory: an abort discards storage writes, so a
 		// persisted marker would survive the restart and loop.
 		if (this.restartPending) {
-			if (this.inFlight > 0 || this.scheduleBusy()) {
+			if (this.inFlight > 0 || this.busy()) {
 				// A turn is still running. Restarting now would drop the reply, so wait
 				// for it to finish and check again.
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);
@@ -96,14 +109,28 @@ export class BotSessionV5 extends DurableObject<Env> {
 			this.ctx.abort("deploy changed", { retryAlarm: true });
 			return;
 		}
-		// A schedule may have fallen due while this object was evicted. Building
-		// the host starts its runner, which fires everything overdue; the alarm is
-		// then re-armed for the next one.
+
+		const now = Date.now();
 		const due = this.scheduleDueAt();
-		if (due !== null && due <= Date.now() + 1_000) {
+		if (due !== null && due <= now + 1_000) {
+			// `runScheduleTick` leaves its own short follow-up alarm so the turn it
+			// admitted has time to start.
 			await this.runScheduleTick().catch((error) => log("session", `schedule tick failed: ${describeError(error)}`));
+			this.lastActivityAt = Date.now();
+			return;
 		}
-		await this.armScheduleAlarm();
+
+		if (this.agent.hasHost() && !this.busy() && now - this.lastActivityAt >= HOST_IDLE_MS) {
+			// The host keeps the schedule runner and event stream alive. Closing it
+			// is what lets the object hibernate between conversations.
+			await this.agent.close();
+		}
+		await this.armAlarm();
+	}
+
+	/** Whether something is still running, so the host must stay open. */
+	private busy(): boolean {
+		return this.inFlight > 0 || this.agent.busy() || this.scheduleBusy();
 	}
 
 	/** When the next active schedule is due, from the host's own SQLite. */
@@ -121,13 +148,17 @@ export class BotSessionV5 extends DurableObject<Env> {
 
 	/** Wake the host so its schedule runner fires what is due. */
 	private async runScheduleTick(): Promise<void> {
+		const config = await this.loadConfig(true);
+		if (config.connections.length === 0) {
+			// Nothing can run the schedule. Leave no alarm: the next provider
+			// change is a request, and its `armAlarm` retries the due schedule.
+			return;
+		}
 		// A fired schedule turns into a normal Session turn, which runs after this
 		// request returns. Keep a follow-up alarm in case the object is evicted
 		// before that turn settles; the next boot resumes a suspended Session.
-		await this.ctx.storage.setAlarm(Date.now() + 30_000);
-		const config = await this.loadConfig(true);
-		if (config.connections.length === 0) return;
 		await this.agent.ensureHost(config);
+		await this.ctx.storage.setAlarm(Date.now() + 30_000);
 		// Give the admitted turn time to start before deciding when to wake next.
 		await new Promise((resolve) => setTimeout(resolve, 8_000));
 	}
@@ -149,24 +180,28 @@ export class BotSessionV5 extends DurableObject<Env> {
 	}
 
 	/**
-	 * Wake this object when the next schedule falls due.
+	 * Arm the one alarm this object uses for all deferred work.
 	 *
-	 * The runner only ticks while the object is in memory, and a Durable Object
-	 * can be evicted between turns, so the due time is an alarm rather than a
-	 * timer. A schedule that is already due wakes it shortly.
+	 * The next event is whichever comes first: a schedule falling due, another
+	 * look at a running turn, or the idle deadline that closes the host so the
+	 * object can hibernate.
 	 */
-	private async armScheduleAlarm(): Promise<void> {
+	private async armAlarm(): Promise<void> {
 		if (this.restartPending) return;
+		const now = Date.now();
+		const candidates: number[] = [];
 		const due = this.scheduleDueAt();
-		if (due !== null) {
-			await this.ctx.storage.setAlarm(Math.max(due, Date.now() + 5_000));
+		if (due !== null) candidates.push(Math.max(due, now + SCHEDULE_SOON_MS));
+		const busy = this.busy();
+		if (busy) candidates.push(now + BUSY_POLL_MS);
+		if (this.agent.hasHost()) candidates.push(this.lastActivityAt + HOST_IDLE_MS);
+
+		if (candidates.length === 0) {
+			await this.ctx.storage.deleteAlarm().catch(() => undefined);
 			return;
 		}
-		if (this.scheduleBusy()) {
-			await this.ctx.storage.setAlarm(Date.now() + 20_000);
-			return;
-		}
-		await this.ctx.storage.deleteAlarm().catch(() => undefined);
+		const at = Math.min(...candidates);
+		await this.ctx.storage.setAlarm(Math.max(at, now + 1_000));
 	}
 
 	/** Everything the host needs, read once from this guild's own storage. */

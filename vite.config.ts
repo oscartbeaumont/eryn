@@ -4,8 +4,10 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-	// The Cloudflare plugin builds the Worker from cloudflare.config.ts. There is
-	// no separate client bundle any more: the bot's whole UI is Discord.
+	// `assets/` is the public directory. Vite emits its files as static assets
+	// alongside the Worker; the bot's UI itself is still entirely Discord.
+	publicDir: "assets",
+	// The Cloudflare plugin builds the Worker from cloudflare.config.ts.
 	plugins: [cloudflare()],
 	resolve: {
 		alias: {

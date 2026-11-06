@@ -4,8 +4,8 @@ import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 /**
  * One Worker: the Discord bot.
  *
- * `src/index.ts` is the entrypoint; the bot's two Durable Objects are the whole
- * deployment. There is no console, MCP endpoint, or static asset bundle.
+ * `src/index.ts` is the entrypoint and the bot's two Durable Objects are the
+ * whole deployment; the only static files are the brand images in `assets/`.
  */
 export default defineConfig({
 	worker: {
@@ -15,6 +15,11 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
+		// `assets/` is the public directory. Only the brand paths are routed to
+		// the Worker; every other matching file is served directly by Cloudflare.
+		assets: {
+			runWorkerFirst: ["/brand/*", "/favicon.ico"],
+		},
 		observability: {
 			enabled: true,
 			// OAuth codes and state live in the query string, so keep them out of
@@ -28,6 +33,9 @@ export default defineConfig({
 		// mechanism; running this every minute would pay for a request for nothing.
 		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
 		env: {
+			// Static files from `assets/`, served through `brandAsset`.
+			ASSETS: bindings.assets(),
+
 			// The bot: the singleton Discord socket, and one session per guild.
 			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV5" }),
 			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV5" }),

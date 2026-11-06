@@ -12,6 +12,9 @@ importers:
 
   .:
     dependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.3.1
+        version: 2.3.1
       '@opencode/client':
         specifier: 2.2.5
         version: 2.2.5(effect@4.0.6)

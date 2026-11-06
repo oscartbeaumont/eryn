@@ -11,13 +11,14 @@ import { env } from "cloudflare:workers";
 
 import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
+import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { log } from "./config";
+import { log, publicOrigin } from "./config";
 import { landingPage } from "./landing";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
-import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/links";
+import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
 import { BotSessionV5 } from "./session/do";
 
 export { BotGatewayV5, BotSessionV5 };
@@ -68,8 +69,11 @@ export async function wake(env: Env): Promise<WakeState | undefined> {
  */
 export async function handle(request: Request): Promise<Response | undefined> {
 	const url = new URL(request.url);
+	// Brand images and the favicon are static assets; the Worker owns these
+	// paths so it can add the long-lived cache headers.
+	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
 	// The public origin is a landing page, since the bot's whole UI is Discord.
-	if (url.pathname === "/" && isRead(request)) return landingPage();
+	if (url.pathname === "/" && isRead(request)) return landingPage(publicOrigin(env));
 	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
 	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
 
@@ -178,6 +182,11 @@ function page(title: string, message: string, status = 200): Response {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#08080a">
+<link rel="icon" href="${BRAND.favicon}" sizes="any">
+<link rel="icon" type="image/png" href="${BRAND.icon}" sizes="64x64">
+<link rel="apple-touch-icon" href="${BRAND.appleIcon}">
 <title>${escapeHtml(title)} · Eryn</title>
 <style>
 :root { color-scheme: dark; }

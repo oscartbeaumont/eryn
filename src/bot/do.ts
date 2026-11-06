@@ -7,6 +7,11 @@
  * per-guild session object. It deliberately hosts no OpenCode work and no
  * database, so it is the only part of the bot that has to stay resident.
  *
+ * That residency is unavoidable: Discord needs an outbound gateway WebSocket,
+ * and outbound WebSockets cannot hibernate. The per-guild session objects are
+ * the ones that should sleep between conversations; this object only keeps the
+ * socket and its reconnect alarm alive.
+ *
  * Clearing `DISCORD_BOT_TOKEN` stops the gateway entirely (the object returns
  * without connecting), which is the switch for "run nothing at all".
  *
