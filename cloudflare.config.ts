@@ -29,10 +29,11 @@ export default defineConfig({
 			traces: { enabled: true, persist: true },
 			issues: { enabled: true },
 		},
-		// A safety net for the bot's gateway object. Its own alarm is the real
-		// mechanism; this only covers the case where that alarm was never armed,
-		// so it is deliberately slower and cheaper than the alarm interval.
-		triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
+		// A watchdog for the bot's gateway object, not a keepalive. The object
+		// re-arms its own alarm (every two minutes) and a deploy restart now
+		// retries that alarm, so this only covers the case where the alarm chain
+		// is lost entirely — a slow poke is enough for that.
+		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
 		env: {
 			// Static files from `assets/`, served through `brandAsset`.
 			ASSETS: bindings.assets(),

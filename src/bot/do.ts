@@ -138,7 +138,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);
 				return;
 			}
-			this.ctx.abort("deploy changed", { retryAlarm: false });
+			// Retry this alarm on the replacement instance: it starts with no
+			// timers, and re-running the keepalive is what reconnects the socket
+			// straight after a deploy. Cancelling it (retryAlarm: false) leaves a
+			// silent object that only an external poke can revive.
+			this.ctx.abort("deploy changed");
 			return;
 		}
 		await this.keepAlive();
