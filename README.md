@@ -128,11 +128,27 @@ Objects:
 
 | Object | Scope | Responsibility |
 | --- | --- | --- |
-| `BotGatewayV5` | `bot` | Discord gateway socket, slash commands, threads, install messages |
+| `BotGatewayV5` | `bot` | Discord gateway socket, interaction dispatch, threads, install messages |
 | `BotSessionV5` | guild id | OpenCode host, provider credentials, MCP links, virtual filesystem |
 
 Each guild's credentials and MCP tokens are sealed with AES-GCM under
 `ENCRYPTION_KEY` and stay in that guild's session object.
+
+### Interactions
+
+Discord delivers slash commands, buttons, and modals to the Worker over HTTP,
+not over the gateway socket. `POST /interactions` verifies the Ed25519
+signature against the application's public key (`APPLICATION_PUBLIC_KEY`),
+answers the signed `PING` Discord uses to validate the endpoint, and forwards
+the interaction to `BotGatewayV5`, which acknowledges through the interaction
+callback endpoint and returns `202` straight away. A command therefore works
+even while the gateway socket is reconnecting or the bot object is cold.
+
+The bot object sets the application's interactions endpoint
+(`<PUBLIC_ORIGIN>/interactions`) itself on start. Discord validates that URL
+before switching delivery, so a failed attempt leaves gateway delivery in
+place and is retried on the next start. The gateway is then only needed for
+messages, joins, and thread events, where a short gap is harmless.
 
 ### Source layout
 
@@ -187,4 +203,4 @@ landing page and the sign-in pages use the favicon, and
 | `DISCORD_BOT_TOKEN` | Discord bot token for the socket, commands, and messages |
 | `ENCRYPTION_KEY` | Base64url 32-byte key for sealing stored credentials |
 | `SESSION_SECRET` | Signs MCP sign-in state and callback links |
-| `PUBLIC_ORIGIN` | Origin used in links and OAuth callbacks |
+| `PUBLIC_ORIGIN` | Origin used in links, OAuth callbacks, and the interactions endpoint |

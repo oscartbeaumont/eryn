@@ -20,7 +20,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { CLIENT_ID, log as botLog } from "../config";
+import { CLIENT_ID, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
 import { deployChanged } from "../deploy";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
@@ -34,6 +34,7 @@ import { DiscordLookups } from "./lookups";
 import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mentionInfo, stripMention, threadName } from "./message";
 
 const WAKE_PATH = "/wake";
+const INTERACTION_PATH = "/interaction";
 const SUBSCRIPTION_PATH = "/subscription";
 const MESSAGE_WATCH_PATH = "/message-watch";
 const THREAD_PREFIX = "thread:";
@@ -165,6 +166,18 @@ export class BotGatewayV5 extends DurableObject<Env> {
 
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
+		if (pathname === INTERACTION_PATH) {
+			await this.ensureCurrentVersion(request);
+			if (request.method !== "POST") return json({ error: "not found" }, 404);
+			const interaction = (await request.json().catch(() => undefined)) as DiscordInteraction | undefined;
+			if (!interaction || typeof interaction.id !== "string" || typeof interaction.token !== "string") {
+				return json({ error: "bad request" }, 400);
+			}
+			// The Worker already answered Discord with a 202, so this handler still
+			// acknowledges through the interaction callback endpoint.
+			await this.onInteraction(interaction);
+			return json({ ok: true });
+		}
 		if (pathname === SUBSCRIPTION_PATH) {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
@@ -257,7 +270,36 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		this.botUserId = me.id;
 		log(`signed in as ${me.username ?? me.id}`);
 		await this.syncCommands(me.id);
+		await this.syncInteractionsEndpoint();
 		this.socket.ensure();
+	}
+
+	/**
+	 * Point Discord at the Worker's HTTP interactions route.
+	 *
+	 * An interaction delivered over the gateway depends on this object holding a
+	 * live socket, so a restart leaves the bot unable to answer a slash command
+	 * at all. Once the endpoint is set, Discord POSTs each interaction to the
+	 * Worker, which forwards it here and answers even while the socket is
+	 * reconnecting.
+	 *
+	 * Discord verifies the URL with a signed PING before it accepts the setting,
+	 * so a failed attempt leaves gateway delivery in place; the next start tries
+	 * again.
+	 */
+	private async syncInteractionsEndpoint(): Promise<void> {
+		const url = `${publicOrigin(this.env)}${INTERACTIONS_PATH}`;
+		const current = await this.rest.interactionsEndpoint().catch((error) => {
+			log(`could not read the interactions endpoint: ${describeError(error)}`);
+			return undefined;
+		});
+		if (current === url) return;
+		try {
+			await this.rest.setInteractionsEndpoint(url);
+			log(`interactions are now delivered to ${url}`);
+		} catch (error) {
+			log(`could not switch interactions to ${url}, keeping the gateway: ${describeError(error)}`);
+		}
 	}
 
 	/**

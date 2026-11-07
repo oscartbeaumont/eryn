@@ -11,6 +11,18 @@ export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 /** Eryn's public Discord application id (equal to the bot user id). */
 export const CLIENT_ID = "1561290858668494959";
 
+/**
+ * The application's Ed25519 public key, which signs every interaction Discord
+ * posts to the HTTP endpoint.
+ *
+ * It is public, not a secret. It only changes if the key is reset in the
+ * developer portal, in which case this constant has to change with it.
+ */
+export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94f2a21fca6fcba23f87ba980";
+
+/** Where Discord posts interactions once the application's endpoint is set. */
+export const INTERACTIONS_PATH = "/interactions";
+
 /** Public origin used in links and OAuth flows when a binding is absent. */
 export const DEFAULT_PUBLIC_ORIGIN = "https://eryn.otbeaumont.me";
 

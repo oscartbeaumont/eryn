@@ -464,6 +464,24 @@ export function discordRest(token: string) {
 			return await request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
 		},
 
+		/** Where Discord currently posts interactions, from the application object. */
+		async interactionsEndpoint(): Promise<string | undefined> {
+			const result = await request<{ interactions_endpoint_url?: unknown }>("GET", "/applications/@me");
+			return typeof result?.interactions_endpoint_url === "string"
+				? result.interactions_endpoint_url
+				: undefined;
+		},
+
+		/**
+		 * Point Discord's interactions at a URL.
+		 *
+		 * Discord verifies the URL with a signed PING before accepting it, so a
+		 * rejected endpoint leaves gateway delivery untouched.
+		 */
+		async setInteractionsEndpoint(url: string): Promise<void> {
+			await request<unknown>("PATCH", "/applications/@me", { interactions_endpoint_url: url });
+		},
+
 		/** Replace the application's global commands. */
 		async overwriteCommands(applicationId: string, commands: readonly DiscordCommand[]): Promise<void> {
 			await request<unknown>("PUT", `/applications/${applicationId}/commands`, commands);

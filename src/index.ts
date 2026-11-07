@@ -1,10 +1,11 @@
 /**
  * Eryn's Cloudflare Worker entrypoint.
  *
- * The Worker is the Discord bot and nothing else. It answers the external MCP
- * sign-in callback and the models.dev catalogue a guild's embedded OpenCode host
- * asks for, exposes the two Durable Objects the bot is made of, and wakes the
- * singleton bot object from `/health` and the cron trigger.
+ * The Worker is the Discord bot and nothing else. It verifies and forwards
+ * Discord's HTTP interactions, answers the external MCP sign-in callback and
+ * the models.dev catalogue a guild's embedded OpenCode host asks for, exposes
+ * the two Durable Objects the bot is made of, and wakes the singleton bot
+ * object from `/health` and the cron trigger.
  */
 
 import { env } from "cloudflare:workers";
@@ -13,11 +14,12 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { log, publicOrigin } from "./config";
+import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log, publicOrigin } from "./config";
 import { landingPage } from "./landing";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
+import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
 import { BotSessionV5 } from "./session/do";
 
@@ -67,8 +69,11 @@ export async function wake(env: Env): Promise<WakeState | undefined> {
  * Each route handler returns `undefined` for a path it does not own, so the
  * Worker can fall through to the health check or a 404.
  */
-export async function handle(request: Request): Promise<Response | undefined> {
+export async function handle(request: Request, ctx: ExecutionContext): Promise<Response | undefined> {
 	const url = new URL(request.url);
+	// Discord posts every interaction here once the application's endpoint is
+	// set; the route verifies the signature and hands it to the bot object.
+	if (url.pathname === INTERACTIONS_PATH) return await handleInteractions(request, ctx);
 	// Brand images and the favicon are static assets; the Worker owns these
 	// paths so it can add the long-lived cache headers.
 	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
@@ -84,6 +89,90 @@ export async function handle(request: Request): Promise<Response | undefined> {
 	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) return await handleMcpStart(request, url);
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
 	return await handleMcpCallback(request, url);
+}
+
+/**
+ * Receive one interaction from Discord.
+ *
+ * Discord signs the timestamp and raw body with the application's Ed25519 key;
+ * anything that fails verification is rejected before it is parsed. The
+ * interaction itself is handed to the bot object, which owns the REST client
+ * and the guild sessions, and Discord is released immediately with a 202. The
+ * handlers acknowledge through the interaction callback endpoint, which is the
+ * documented pairing for a 202 response — and is what lets a slash command work
+ * even while the gateway socket is down.
+ */
+async function handleInteractions(request: Request, ctx: ExecutionContext): Promise<Response> {
+	if (request.method !== "POST") return new Response("Not found", { status: 404 });
+
+	const body = await request.text();
+	const signature = request.headers.get("x-signature-ed25519") ?? "";
+	const timestamp = request.headers.get("x-signature-timestamp") ?? "";
+	if (!(await signedByDiscord(signature, timestamp, body))) {
+		return new Response("invalid request signature", { status: 401 });
+	}
+
+	let interaction: DiscordInteraction | undefined;
+	try {
+		interaction = JSON.parse(body) as DiscordInteraction;
+	} catch {
+		return new Response("bad request", { status: 400 });
+	}
+
+	// Registering the endpoint sends a signed PING, which only counts as
+	// answered if it gets a PONG back.
+	if (interaction?.type === 1) return Response.json({ type: 1 });
+	if (typeof interaction?.id !== "string" || typeof interaction.token !== "string") {
+		return new Response("bad request", { status: 400 });
+	}
+
+	ctx.waitUntil(
+		env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"))
+			.fetch(
+				"https://bot.internal/interaction",
+				withDeploy(env, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body,
+				}),
+			)
+			.then((response) => {
+				if (!response.ok) log("interactions", `the bot object returned HTTP ${response.status}`);
+			})
+			.catch((error) => log("interactions", `could not deliver the interaction: ${String(error)}`)),
+	);
+	return new Response(null, { status: 202 });
+}
+
+/** Ed25519 as WebCrypto names it. */
+const ED25519 = { name: "Ed25519" } as const;
+
+/** Decode a hex string, or undefined when it is not one. */
+function hexBytes(value: string): Uint8Array | undefined {
+	if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) return undefined;
+	const bytes = new Uint8Array(value.length / 2);
+	for (let index = 0; index < bytes.length; index++) {
+		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+	}
+	return bytes;
+}
+
+/** Whether Discord signed this timestamp and body for this application. */
+async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
+	const signatureBytes = hexBytes(signature);
+	const keyBytes = hexBytes(APPLICATION_PUBLIC_KEY);
+	if (!signatureBytes || !keyBytes || !timestamp) return false;
+	try {
+		const key = await crypto.subtle.importKey("raw", keyBytes, ED25519, false, ["verify"]);
+		return await crypto.subtle.verify(
+			ED25519,
+			key,
+			signatureBytes,
+			new TextEncoder().encode(timestamp + body),
+		);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -213,8 +302,8 @@ strong { color: #ededed; }
 }
 
 export default {
-	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-		const handled = await handle(request).catch(() => undefined);
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		const handled = await handle(request, ctx).catch(() => undefined);
 		if (handled) return handled;
 
 		if (new URL(request.url).pathname === "/health") {
