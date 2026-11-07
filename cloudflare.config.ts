@@ -29,9 +29,10 @@ export default defineConfig({
 			traces: { enabled: true, persist: true },
 			issues: { enabled: true },
 		},
-		// A slow safety net for the bot's gateway object. Its own alarm is the real
-		// mechanism; running this every minute would pay for a request for nothing.
-		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
+		// A safety net for the bot's gateway object. Its own alarm is the real
+		// mechanism; this only covers the case where that alarm was never armed,
+		// so it is deliberately slower and cheaper than the alarm interval.
+		triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
 		env: {
 			// Static files from `assets/`, served through `brandAsset`.
 			ASSETS: bindings.assets(),

@@ -10,9 +10,9 @@ import { CLIENT_ID } from "./config";
 import { BRAND } from "./brand";
 
 /**
- * View Audit Log (so the install DM can find who added the bot), View Channels,
- * Send Messages, Read Message History, Create Public Threads, and Send Messages
- * in Threads.
+ * View Audit Log (so the install message can find who added the bot), View
+ * Channels, Send Messages, Read Message History, Create Public Threads, and
+ * Send Messages in Threads.
  */
 const BOT_PERMISSIONS =
 	(1n << 7n) | (1n << 10n) | (1n << 11n) | (1n << 16n) | (1n << 35n) | (1n << 38n);

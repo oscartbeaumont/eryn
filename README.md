@@ -29,8 +29,9 @@ There is no web dashboard; setup happens in Discord.
 ## Getting started
 
 1. Add Eryn to a server from the hosted instance.
-2. The person who added it gets a DM with a setup button. If that does not
-   arrive, run `/eryn setup` in the server.
+2. Eryn posts a message in the server with a **Start setup** button, mentioning
+   whoever added it. If that does not arrive, run `/eryn setup` in the server.
+   The greeting is deleted once a provider is connected.
 3. Choose **Connect provider**, connect the provider, then pick a model from the
    list Eryn shows next. OpenCode Go is available through the **OpenCode
    Console** connection; it is not a separate provider.
@@ -48,18 +49,23 @@ Server; stopping a run and reading help do not.
 
 ### Setup menu
 
-`/eryn setup` is the only configuration surface. Each screen replaces the last
-one, so nothing is left behind in the channel.
+`/eryn setup` is the only configuration surface. The flow is a series of
+ephemeral screens that replace each other, so nothing is left behind in the
+channel.
 
 | Screen | What it does |
 | --- | --- |
-| **Connect provider** | Pick a provider from the common list, browse the full catalogue, or search by name. Connect with an API key, a browser sign-in, or a device code. |
-| **Choose model** | Browse or search the models from a connected provider, or type a `provider/model` reference. Shown once a provider is connected. |
-| **Remove provider** | Choose a connected provider and confirm its removal. |
+| **Providers** | See which providers are connected, pick one from the common list, browse the full catalogue, or search by name. Connect with an API key, a browser sign-in, or a device code. **Remove provider** lives here too. |
+| **Choose model** | Shows the current model, then the models from a connected provider to browse or search, or a `provider/model` reference to type. |
 | **MCP servers** | List, link, test, and remove external MCP servers. See [MCP servers](#mcp-servers). |
 
-The install DM opens the same menu, but MCP servers and provider removal stay in
-the server because both are guild-wide.
+Every sub-screen has **Back** to return to the previous step. **Close**, on the
+menu and on finished steps, dismisses the setup message completely.
+
+The install message opens the same menu in the server, so every screen is
+available there. The menu itself is ephemeral, so only the admin who opened it
+sees the configuration, and the install message is deleted once a provider is
+connected.
 
 ### Agent tools
 
@@ -122,7 +128,7 @@ Objects:
 
 | Object | Scope | Responsibility |
 | --- | --- | --- |
-| `BotGatewayV5` | `bot` | Discord gateway socket, slash commands, threads, install DMs |
+| `BotGatewayV5` | `bot` | Discord gateway socket, slash commands, threads, install messages |
 | `BotSessionV5` | guild id | OpenCode host, provider credentials, MCP links, virtual filesystem |
 
 Each guild's credentials and MCP tokens are sealed with AES-GCM under

@@ -3,7 +3,7 @@
  *
  * This module owns channel configuration, sending and editing messages,
  * starting threads, typing indicators, interaction replies, command
- * registration, the install audit lookup, and DM channels. It never logs the
+ * registration, and the install audit lookup. It never logs the
  * bot token or a Discord response body, which can contain user messages.
  *
  * The client is created once by the object that owns the token and passed to
@@ -383,11 +383,6 @@ export function discordRest(token: string) {
 			return parsed.value.audit_log_entries?.[0];
 		},
 
-		/** Open (or reuse) a direct-message channel with a user. */
-		async openDm(userId: string): Promise<{ id: string }> {
-			return await create("/users/@me/channels", { recipient_id: userId }, "Discord did not open a DM channel");
-		},
-
 		/** Acknowledge an interaction with a message (ephemeral by default). */
 		async interactionReply(
 			interactionId: string,
@@ -447,6 +442,16 @@ export function discordRest(token: string) {
 					...(options.components ? { components: options.components } : {}),
 				},
 			});
+		},
+
+		/** Acknowledge a component interaction without touching its message, so it can be deleted. */
+		async interactionDeferUpdate(interactionId: string, interactionToken: string): Promise<void> {
+			await interactionCallback(interactionId, interactionToken, { type: 6 });
+		},
+
+		/** Delete the message an interaction responded with, including an ephemeral menu. */
+		async interactionDeleteOriginal(applicationId: string, interactionToken: string): Promise<void> {
+			await request<void>("DELETE", `/webhooks/${applicationId}/${interactionToken}/messages/@original`);
 		},
 
 		/** Open a modal in response to a component or command interaction. */

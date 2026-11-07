@@ -3,7 +3,8 @@
  *
  * Listing, linking, testing, and removing them, plus the browser sign-in a
  * server can demand before it accepts Eryn. A link is guild-wide, so this
- * screen is only reachable in the server, never from the install DM.
+ * screen is only reachable in the server, never from an install DM sent by an
+ * older build.
  */
 
 import { describeError } from "../../errors";
@@ -21,30 +22,42 @@ import type { McpLink, McpProbeResponse, PublicLink } from "../../session/models
 import { SETUP_MENU_ID, payloadId } from "../ids";
 import { guarded, responder, textInput, textModal, MAX_SELECT_OPTIONS, type InteractionRequest } from "./interaction";
 
+/** Discord rejects a link button whose URL is longer than this. */
+const MAX_LINK_URL = 512;
+
+/** The setup menu's MCP button, owned here so this screen can re-render itself. */
+export const MCP_SCREEN_ID = `${SETUP_MENU_ID}:mcp`;
+
 const SCREEN_ADD_ID = "setup:mcp:add";
 const SCREEN_TEST_ID = "setup:mcp:test";
 const SCREEN_REMOVE_ID = "setup:mcp:remove";
 const ADD_MODAL_ID = "mcp:add";
 const REMOVE_SELECT_ID = "mcp:remove";
+const REMOVE_CONFIRM_ID = payloadId("mcp:remove:confirm:");
 const TEST_ALL_ID = "mcp:test:all";
 const TEST_ID = payloadId("mcp:test:");
 const AUTH_CHECK_ID = payloadId("mcp:oauth:");
 
 function mcpAddModal(): DiscordModal {
 	return textModal(ADD_MODAL_ID, "Add an MCP server", [
-		textInput({ custom_id: "name", label: "Name", required: true, max_length: 60, placeholder: "my-mcp-server" }),
+		textInput({
+			custom_id: "name",
+			label: "Name (optional)",
+			max_length: 60,
+			placeholder: "Defaults to the server's host",
+		}),
 		textInput({
 			custom_id: "url",
-			label: "Streamable HTTP URL",
+			label: "Server URL",
 			required: true,
 			max_length: 300,
 			placeholder: "https://example.com/mcp",
 		}),
 		textInput({
 			custom_id: "token",
-			label: "Bearer token (optional)",
+			label: "Access token (optional)",
 			max_length: 500,
-			placeholder: "Leave blank to test without one",
+			placeholder: "Leave blank unless the server gave you one",
 		}),
 	]);
 }
@@ -83,6 +96,11 @@ export async function mcpComponent(
 		await guarded(request, "update", () => checkAuth(request, authCheck));
 		return true;
 	}
+	const removeConfirm = REMOVE_CONFIRM_ID.read(customId);
+	if (removeConfirm !== undefined) {
+		await guarded(request, "update", () => removeLink(request, removeConfirm));
+		return true;
+	}
 	switch (customId) {
 		case SCREEN_ADD_ID:
 			await responder(request).modal(mcpAddModal());
@@ -94,7 +112,7 @@ export async function mcpComponent(
 			await guarded(request, "update", () => promptRemoveMcp(request));
 			return true;
 		case REMOVE_SELECT_ID:
-			await guarded(request, "update", () => removeLink(request, values[0] ?? ""));
+			await guarded(request, "update", () => confirmRemoveLink(request, values[0] ?? ""));
 			return true;
 	}
 	return false;
@@ -115,11 +133,33 @@ async function promptRemoveMcp(request: InteractionRequest): Promise<void> {
 	await answer.defer();
 	const links = await request.session.links();
 	if (!links.length) {
-		await answer.reply("No MCP servers are linked to this server.");
+		await answer.reply("No MCP servers are linked to this server.", [
+			buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]),
+		]);
 		return;
 	}
-	await answer.reply("Which linked MCP server should I remove?", [
+	await answer.reply("Which MCP server should I remove?", [
 		selectRow({ type: 3, custom_id: REMOVE_SELECT_ID, placeholder: "Pick a server", options: linkOptions(links) }),
+		buttonRow([actionButton("Cancel", MCP_SCREEN_ID, 2)]),
+	]);
+}
+
+/** Removing a link throws away its token, so it is confirmed like a provider. */
+async function confirmRemoveLink(request: InteractionRequest, linkId: string): Promise<void> {
+	const answer = responder(request);
+	await answer.defer();
+	const link = (await request.session.links()).find((candidate) => candidate.id === linkId);
+	if (!link) {
+		await answer.reply("That MCP server is no longer linked.", [
+			buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]),
+		]);
+		return;
+	}
+	await answer.reply(`Remove **${link.name}**? Eryn will stop using its tools immediately.`, [
+		buttonRow([
+			actionButton("Remove", REMOVE_CONFIRM_ID.of(linkId), 4),
+			actionButton("Cancel", MCP_SCREEN_ID, 2),
+		]),
 	]);
 }
 
@@ -127,8 +167,13 @@ async function removeLink(request: InteractionRequest, linkId: string): Promise<
 	const answer = responder(request);
 	await answer.defer();
 	const link = (await request.session.links()).find((candidate) => candidate.id === linkId);
-	await request.session.removeLink(linkId);
-	await answer.update(`Removed **${link?.name ?? linkId}**.`);
+	try {
+		await request.session.removeLink(linkId);
+	} catch (error) {
+		await answer.update(`Could not remove **${link?.name ?? linkId}**: ${describeError(error)}`, [backRow()]);
+		return;
+	}
+	await answer.update(`Removed **${link?.name ?? linkId}**.`, [backRow()]);
 }
 
 /** Probe a URL, then either link it or start the sign-in it asked for. */
@@ -136,14 +181,14 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 	const answer = responder(request);
 	const url = values.url?.trim();
 	if (!url) {
-		await answer.reply("An MCP server URL is required.");
+		await answer.reply("An MCP server URL is required.", [backRow()]);
 		return;
 	}
 	let endpoint: URL;
 	try {
 		endpoint = new URL(url);
 	} catch {
-		await answer.reply("That URL is not valid.");
+		await answer.reply("That URL is not valid.", [backRow()]);
 		return;
 	}
 	const name = values.name?.trim() || endpoint.host;
@@ -160,7 +205,9 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 			await startAuth(request, name, url, probe);
 			return;
 		}
-		await answer.reply(`Could not connect to **${name}**: ${probe.error ?? "the server did not answer"}`);
+		await answer.reply(`Could not connect to **${name}**: ${probe.error ?? "the server did not answer"}`, [
+			backRow(),
+		]);
 		return;
 	}
 
@@ -173,8 +220,15 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 	};
 	await request.session.addLink(link);
 	await answer.reply(
-		`**${name} is connected.** ${describeTools(probe.tools)} Eryn will use it on the next turn.`,
-		[buttonRow([actionButton("Test", TEST_ID.of(link.id), 3)])],
+		[`**${name} is connected.**`, describeTools(probe.tools), "Eryn will use it on the next turn."]
+			.filter(Boolean)
+			.join("\n"),
+		[
+			buttonRow([
+				actionButton("Test", TEST_ID.of(link.id), 2),
+				actionButton("Back to servers", MCP_SCREEN_ID, 2),
+			]),
+		],
 	);
 }
 
@@ -200,28 +254,29 @@ async function startAuth(
 				`**${name}** needs authorisation before Eryn can use it.`,
 				started.error ?? "",
 				"",
-				"If you have a token for it, run `/eryn setup`, open MCP servers, and link it with the token.",
+				"If you have a token for it, link the server again and put the token in **Access token**.",
 			]
 				.filter(Boolean)
 				.join("\n"),
+			[backRow()],
 		);
 		return;
 	}
 	// The callback lands on the Worker, not this interaction, so the start link
 	// carries a signed attempt rather than the server's own URL.
 	const signInUrl = started.startUrl ?? started.url;
+	const buttons: DiscordButton[] = [];
+	if (signInUrl.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", signInUrl));
+	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(started.attemptId), 3));
+	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
 	await answer.reply(
 		[
 			`**${name}** needs you to sign in before Eryn can use it.`,
+			...(signInUrl.length > MAX_LINK_URL ? ["", signInUrl] : []),
 			"",
-			"Open the link, approve the access, then press **I've finished**. The sign-in finishes in your browser, so this message can stay here.",
+			"Open the link, approve the access, then press **I've finished**.",
 		].join("\n"),
-		[
-			buttonRow([
-				linkButton("Sign in", signInUrl),
-				actionButton("I've finished", AUTH_CHECK_ID.of(started.attemptId), 3),
-			]),
-		],
+		[buttonRow(buttons)],
 	);
 }
 
@@ -235,26 +290,47 @@ async function checkAuth(request: InteractionRequest, attemptId: string): Promis
 	const answer = responder(request);
 	await answer.defer();
 	const status = await request.session.mcpAuthStatus(attemptId);
-	const components = status.link ? [buttonRow([actionButton("Test", TEST_ID.of(status.link.id), 3)])] : undefined;
 
 	if (status.status === "complete") {
 		const name = status.link?.name ?? "The server";
-		await answer.update(`**${name} is connected.** Eryn will use it on the next turn.`, components);
+		await answer.update(`**${name} is connected.** Eryn will use it on the next turn.`, [
+			status.link
+				? buttonRow([
+						actionButton("Test", TEST_ID.of(status.link.id), 2),
+						actionButton("Back to servers", MCP_SCREEN_ID, 2),
+					])
+				: backRow(),
+		]);
 		return;
 	}
 	if (status.status === "failed") {
 		await answer.update(
-			`The sign-in did not complete: ${status.message ?? "the server gave no reason"}.\n\nStart again from \`/eryn setup\` under MCP servers.`,
+			`The sign-in did not complete: ${status.message ?? "the server gave no reason"}. Link the server again to retry.`,
+			[backRow()],
 		);
 		return;
 	}
 	if (status.status === "missing") {
-		await answer.update("That sign-in is no longer available. Start again from `/eryn setup` under MCP servers.");
+		await answer.update("That sign-in is no longer available. Link the server again to retry.", [backRow()]);
 		return;
 	}
-	await answer.update("Still waiting for the sign-in. Finish it in your browser, then press **I've finished** again.", [
-		buttonRow([actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3)]),
-	]);
+
+	// Still pending: keep the sign-in reachable, because replacing the message
+	// would otherwise take the link away with it.
+	const url = await request.session.mcpAuthUrl(attemptId).catch(() => undefined);
+	const buttons: DiscordButton[] = [];
+	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
+	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3));
+	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
+	await answer.update(
+		[
+			url
+				? "Still waiting for the sign-in. Finish it in your browser, then press **I've finished** again."
+				: "Still waiting for the sign-in, but its link could not be reloaded. Go **Back** and link the server again if the browser page is gone.",
+			...(url && url.length > MAX_LINK_URL ? ["", url] : []),
+		].join("\n"),
+		[buttonRow(buttons)],
+	);
 }
 
 /** Test every link, one at a time, and report each in a line. */
@@ -263,7 +339,7 @@ async function testAllLinks(request: InteractionRequest): Promise<void> {
 	await answer.defer();
 	const links = await request.session.links();
 	if (!links.length) {
-		await answer.reply("No MCP servers are linked to this server.");
+		await answer.reply("No MCP servers are linked to this server.", [backRow()]);
 		return;
 	}
 	const results: string[] = [];
@@ -273,7 +349,7 @@ async function testAllLinks(request: InteractionRequest): Promise<void> {
 	}
 	if (links.length > shown.length) results.push(`…and ${links.length - shown.length} more.`);
 	await answer.reply(clamp(["**MCP server test**", ...results].join("\n"), 1_900), [
-		buttonRow([actionButton("Test again", TEST_ALL_ID, 1)]),
+		buttonRow([actionButton("Test again", TEST_ALL_ID, 1), actionButton("Back", MCP_SCREEN_ID, 2)]),
 	]);
 }
 
@@ -283,11 +359,11 @@ async function testOneLink(request: InteractionRequest, linkId: string): Promise
 	const link = (await request.session.links()).find((candidate) => candidate.id === linkId);
 	const name = link?.name ?? "That MCP server";
 	if (!link) {
-		await answer.update(`**${name}** is no longer linked.`);
+		await answer.update(`**${name}** is no longer linked.`, [backRow()]);
 		return;
 	}
 	await answer.update(`**${name}** — ${await describeLinkTest(request, link)}`, [
-		buttonRow([actionButton("Test again", TEST_ID.of(linkId))]),
+		buttonRow([actionButton("Test again", TEST_ID.of(linkId), 2), actionButton("Back", MCP_SCREEN_ID, 2)]),
 	]);
 }
 
@@ -296,10 +372,19 @@ async function describeLinkTest(request: InteractionRequest, link: PublicLink): 
 	try {
 		const result = await request.session.testLink(link.id);
 		if (!result.ok) return clamp(`failed: ${result.error ?? "the server did not answer"}`, 240);
-		return clamp(`working — ${describeTools(result.tools)}`, 240);
+		const names = result.tools.slice(0, 6).map((tool) => tool.name).join(", ");
+		const tools = result.tools.length
+			? `${result.tools.length} tool${result.tools.length === 1 ? "" : "s"}${names ? ` (${names}${result.tools.length > 6 ? ", …" : ""})` : ""}`
+			: "no tools";
+		return clamp(`working — ${tools}`, 240);
 	} catch (error) {
 		return clamp(`failed: ${describeError(error)}`, 240);
 	}
+}
+
+/** A single Back button, for the end of a sub-flow. */
+function backRow() {
+	return buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]);
 }
 
 /** Keep a message inside Discord's limit rather than letting the send fail. */
@@ -316,11 +401,16 @@ function linkOptions(links: readonly PublicLink[]): DiscordSelectOption[] {
 }
 
 function formatLinks(links: readonly PublicLink[]): string {
-	if (!links.length) return "No MCP servers are linked to this server.";
+	if (!links.length) {
+		return [
+			"**MCP servers**",
+			"MCP servers give Eryn extra tools. Link one by its streamable HTTP URL and Eryn can use it on the next turn.",
+		].join("\n");
+	}
 	const shown = links.slice(0, 15);
 	const lines = shown.map((link) => `• **${link.name}** — ${hostOf(link.url)}`);
 	if (links.length > shown.length) lines.push(`…and ${links.length - shown.length} more.`);
-	return ["**MCP servers linked to this server:**", ...lines].join("\n");
+	return ["**MCP servers**", ...lines].join("\n");
 }
 
 /** The host of a link's URL, for display; a malformed URL is shown as-is. */

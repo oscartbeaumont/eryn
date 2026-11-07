@@ -171,8 +171,12 @@ function resolveGuild(
 	customId: string,
 ): { customId: string; guildId: string; dmGuildId?: string } | undefined {
 	const { id, dmGuildId } = unmarshalId(customId);
-	const guildId = dmGuildId ?? interaction.guild_id;
-	return guildId ? { customId: id, guildId, dmGuildId } : undefined;
+	// A guild always wins: old builds also posted their install button (which
+	// carries a guild id) in the server, and that flow should still see the full
+	// menu rather than the DM one.
+	const inGuild = interaction.guild_id;
+	const guildId = inGuild ?? dmGuildId;
+	return guildId ? { customId: id, guildId, dmGuildId: inGuild ? undefined : dmGuildId } : undefined;
 }
 
 /** Hand a component or modal to the flow that owns its id. */

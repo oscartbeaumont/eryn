@@ -1,31 +1,51 @@
 /**
  * The setup menu: what `/eryn setup` shows, and the buttons that lead from it
  * into the provider, model, and MCP screens.
+ *
+ * Every screen is ephemeral and replaces the previous one, so the flow reads as
+ * one message the admin edits in place; a modal step adds a short form and
+ * leaves the screen that opened it behind. Clicking the public install greeting
+ * opens a fresh ephemeral menu rather than editing that message.
  */
 
 import { actionButton, buttonRow, type DiscordButton } from "../../discord/components";
-import { SETUP_MENU_ID, scopedId } from "../ids";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID, scopedId } from "../ids";
+import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
 import { guarded, responder, type InteractionRequest } from "./interaction";
-import { mcpScreen } from "./mcp";
-import { modelScreen } from "./models";
-import { REMOVE_PROVIDER_ID, providerScreen } from "./providers";
-
-const PROVIDER_ID = `${SETUP_MENU_ID}:provider`;
-const MODEL_ID = `${SETUP_MENU_ID}:model`;
-const MCP_ID = `${SETUP_MENU_ID}:mcp`;
+import { MODEL_SCREEN_ID } from "./models";
+import { PROVIDER_SCREEN_ID } from "./providers";
 
 export async function setupMenu(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
-	await answer.defer();
+	// Every screen is ephemeral, but a component can sit on a public message: the
+	// install greeting's Start setup button. Editing that message would show the
+	// configuration to the whole channel, so a public source opens a fresh
+	// ephemeral message instead.
+	const publicSource =
+		request.interaction.type === 3 &&
+		request.interaction.guild_id !== undefined &&
+		((request.interaction.message?.flags ?? 0) & 64) === 0;
+	if (publicSource) await answer.deferNew();
+	else await answer.defer();
+
 	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const status = await request.session.config().catch(() => undefined);
-	const providers = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";
-	const links = status?.links.length ?? 0;
-	const lines = status?.ready
+	if (!status) {
+		await answer.reply("Eryn could not read this server's setup right now. Try again in a moment.", [
+			buttonRow([actionButton("Try again", id(SETUP_MENU_ID), 1), actionButton("Close", id(SETUP_CLOSE_ID), 2)]),
+		]);
+		return;
+	}
+	// The greeting exists to lead an admin into this menu, so once the server is
+	// configured it has done its job.
+	if (status.ready) await request.ctx.dismissGreeting(request.guildId).catch(() => undefined);
+	const providers = status.providers.map((provider) => provider.integrationID).join(", ") || "none";
+	const links = status.links.length;
+	const lines = status.ready
 		? [
 				"**Eryn is ready here.**",
+				`Provider: **${providers}**`,
 				`Model: \`${status.model}\``,
-				`Providers: ${providers}`,
 				`MCP servers: ${links ? `${links} linked` : "none"}`,
 			]
 		: [
@@ -35,16 +55,14 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 			];
 	const buttons: DiscordButton[] = [
 		actionButton(
-			status?.ready ? "Change provider" : "Connect provider",
-			id(PROVIDER_ID),
-			status?.ready ? 2 : 1,
+			status.ready ? "Change provider" : "Connect provider",
+			id(PROVIDER_SCREEN_ID),
+			status.ready ? 2 : 1,
 		),
 	];
-	if (status?.ready) {
-		buttons.push(actionButton("Choose model", id(MODEL_ID), 2));
-		if (!request.dmGuildId) buttons.push(actionButton("Remove provider", REMOVE_PROVIDER_ID, 4));
-	}
-	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", id(MCP_ID), 2));
+	if (status.ready) buttons.push(actionButton("Choose model", id(MODEL_SCREEN_ID), 2));
+	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", id(MCP_SCREEN_ID), 2));
+	buttons.push(actionButton("Close", id(SETUP_CLOSE_ID), 2));
 	await answer.reply(lines.join("\n"), [buttonRow(buttons)]);
 }
 
@@ -54,23 +72,24 @@ export async function setupComponent(request: InteractionRequest, customId: stri
 		case SETUP_MENU_ID:
 			await guarded(request, "update", () => setupMenu(request));
 			return true;
-		case PROVIDER_ID:
-			await guarded(request, "update", () => providerScreen(request));
-			return true;
-		case MODEL_ID:
-			await guarded(request, "update", () => modelScreen(request));
-			return true;
-		case MCP_ID:
+		case MCP_SCREEN_ID:
 			await guarded(request, "update", () => openMcp(request));
+			return true;
+		case SETUP_CLOSE_ID:
+			// Closing is best effort: if Discord has already dropped the menu there
+			// is nothing left to delete.
+			await responder(request).close().catch(() => undefined);
 			return true;
 	}
 	return false;
 }
 
-/** Links belong to the server, so a DM hands the admin off to the guild. */
+/** Links belong to the server, so an install DM from an older build hands the admin off to the guild. */
 async function openMcp(request: InteractionRequest): Promise<void> {
 	if (request.dmGuildId) {
-		await responder(request).update("Manage MCP servers from the server with `/eryn setup`.");
+		await responder(request).update("Manage MCP servers from the server with `/eryn setup`.", [
+			buttonRow([actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2)]),
+		]);
 		return;
 	}
 	await mcpScreen(request);

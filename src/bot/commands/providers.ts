@@ -19,7 +19,7 @@ import {
 	type DiscordModal,
 } from "../../discord/components";
 import type { IntegrationOption } from "../../session/models";
-import { SETUP_MENU_ID, payloadId, scopedId } from "../ids";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID, payloadId, scopedId } from "../ids";
 import {
 	guarded,
 	responder,
@@ -30,7 +30,10 @@ import {
 } from "./interaction";
 import { modelScreen } from "./models";
 
-/** The "Remove provider" button on the setup menu. */
+/** The setup menu's provider button, owned here so this module can re-render itself. */
+export const PROVIDER_SCREEN_ID = `${SETUP_MENU_ID}:provider`;
+
+/** The "Remove provider" button on the provider screen. */
 export const REMOVE_PROVIDER_ID = "setup:provider:remove";
 
 const SELECT_ID = "setup:provider";
@@ -127,9 +130,35 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 	const answer = responder(request);
 	await answer.defer();
 	const id = (base: string) => scopedId(base, request.dmGuildId);
+	// Connections come from the status, not the catalogue: a connected provider
+	// still has to be removable when the catalogue is empty or slow.
+	const status = await request.session.config().catch(() => undefined);
+	if (!status) {
+		await answer.reply("Eryn could not read this server's providers right now. Try again in a moment.", [
+			buttonRow([actionButton("Back", id(SETUP_MENU_ID), 2)]),
+		]);
+		return;
+	}
+	const connected = status.providers.map((provider) => provider.integrationID);
+	const navigation: DiscordButton[] = [];
+	// Provider removal is guild-wide, so the install DM still sends admins here.
+	if (connected.length && !request.dmGuildId) navigation.push(actionButton("Remove provider", REMOVE_PROVIDER_ID, 4));
+	navigation.push(actionButton("Back", id(SETUP_MENU_ID), 2));
+
 	const providers = connectable(await request.session.providers());
 	if (!providers.length) {
-		await answer.reply("No provider this deployment can connect is available right now.");
+		await answer.reply(
+			[
+				"**Providers**",
+				connected.length
+					? `Connected: **${connected.join("**, **")}**`
+					: "No provider is connected yet — Eryn needs one to answer.",
+				connected.length
+					? "This deployment has no other provider it can connect right now."
+					: "Eryn cannot connect any inference provider in this deployment right now.",
+			].join("\n"),
+			[buttonRow(navigation)],
+		);
 		return;
 	}
 	const recommended = PREFERRED_PROVIDERS.map((wanted) => providers.find((provider) => provider.id === wanted))
@@ -147,12 +176,19 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 		selectRow({ type: 3, custom_id: id(SELECT_ID), placeholder: "Browse all providers", options: providerOptions(providers) }),
 		buttonRow([actionButton("Search all providers", id(SEARCH_ID), 2)]),
 	);
+	components.push(buttonRow(navigation));
+
 	await answer.reply(
 		[
-			"Which provider should this server use for inference?",
-			recommended.length ? "Pick a common provider below, or browse the full list." : "Browse the list or search for a provider.",
+			"**Providers**",
+			connected.length
+				? `Connected: **${connected.join("**, **")}**`
+				: "No provider is connected yet — Eryn needs one to answer.",
+			connected.length
+				? "Pick another to add it, or a connected one to replace its credentials."
+				: "Pick a provider below.",
 			...(providers.length > MAX_SELECT_OPTIONS
-				? [`Showing ${MAX_SELECT_OPTIONS} of ${providers.length} in the list; use Search all providers for the rest.`]
+				? [`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search all providers** for the rest.`]
 				: []),
 			...(providers.some((provider) => provider.id === "opencode")
 				? ["OpenCode Go models are included with the OpenCode Console connection."]
@@ -166,6 +202,7 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 async function searchProviders(request: InteractionRequest, query: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
+	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const needle = query.trim().toLowerCase();
 	const goQuery = /^(oc|opencode)\s*go$/.test(needle) || needle === "ocgo";
 	const matches = connectable(await request.session.providers())
@@ -182,22 +219,24 @@ async function searchProviders(request: InteractionRequest, query: string): Prom
 			`No provider matches “${query.trim()}”. Try a shorter search.${
 				goQuery ? " OpenCode Go is included with OpenCode Console, not a separate provider." : ""
 			}`,
+			[buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)])],
 		);
 		return;
 	}
 	await answer.reply(
 		goQuery
 			? "OpenCode Go is included with **OpenCode Console**. Pick that connection below."
-			: matches.length === MAX_SELECT_OPTIONS
-				? `Providers matching “${query.trim()}” (showing the first ${MAX_SELECT_OPTIONS})`
-				: `Providers matching “${query.trim()}”`,
+			: matches.length >= MAX_SELECT_OPTIONS
+				? `**Providers matching “${query.trim()}”** (showing the first ${MAX_SELECT_OPTIONS})`
+				: `**Providers matching “${query.trim()}”**`,
 		[
 			selectRow({
 				type: 3,
-				custom_id: scopedId(SELECT_ID, request.dmGuildId),
+				custom_id: id(SELECT_ID),
 				placeholder: "Pick a provider",
 				options: providerOptions(matches),
 			}),
+			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
 		],
 	);
 }
@@ -210,12 +249,16 @@ async function pickProviderMethod(request: InteractionRequest, integrationID: st
 	const providers = await request.session.providers();
 	const provider = providers.find((candidate) => candidate.id === integrationID);
 	if (!provider) {
-		await answer.reply("That provider is no longer available.");
+		await answer.reply("That provider is no longer available.", [
+			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+		]);
 		return;
 	}
 	const methods = provider.methods.filter((method) => method.supported);
 	if (!methods.length) {
-		await answer.reply(`**${provider.name}** has no way to be connected in this deployment.`);
+		await answer.reply(`**${provider.name}** has no way to be connected in this deployment.`, [
+			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+		]);
 		return;
 	}
 	if (methods.length === 1) {
@@ -228,20 +271,26 @@ async function pickProviderMethod(request: InteractionRequest, integrationID: st
 		return;
 	}
 	await answer.defer();
-	await answer.update(`How should **${provider.name}** be connected?`, [
-		buttonRow(
-			methods.slice(0, 5).map((method, index) =>
-				actionButton(
-					method.label,
-					METHOD_ID.of(
-						`${integrationID}:${method.type === "key" ? "key" : (method.id ?? "key")}`,
-						request.dmGuildId,
+	await answer.update(
+		provider.connected
+			? `**${provider.name}** is connected. How should it be reconnected?`
+			: `How should **${provider.name}** be connected?`,
+		[
+			buttonRow(
+				methods.slice(0, 5).map((method, index) =>
+					actionButton(
+						method.label,
+						METHOD_ID.of(
+							`${integrationID}:${method.type === "key" ? "key" : (method.id ?? "key")}`,
+							request.dmGuildId,
+						),
+						index === 0 ? 1 : 2,
 					),
-					index === 0 ? 1 : 2,
 				),
 			),
-		),
-	]);
+			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+		],
+	);
 }
 
 /** Begin a sign-in, or open the key modal; the method's type decides which. */
@@ -263,7 +312,9 @@ async function startProviderMethod(
 		answer: {},
 	});
 	if (result.error || !result.url || !result.attemptID) {
-		await answer.update(`Could not start the sign-in: ${result.error ?? "the provider returned no URL"}`);
+		await answer.update(`Could not start the sign-in: ${result.error ?? "the provider returned no URL"}`, [
+			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+		]);
 		return;
 	}
 	// A device-code flow shows a code to type on the provider's page rather than
@@ -272,6 +323,7 @@ async function startProviderMethod(
 		const buttons: DiscordButton[] = [];
 		if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Open sign-in page", result.url));
 		buttons.push(actionButton("Enter code", CODE_ID.of(integrationID, request.dmGuildId), 1));
+		buttons.push(actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2));
 		await answer.update(
 			[
 				`**${integrationID}** needs a code to finish signing in.`,
@@ -287,6 +339,7 @@ async function startProviderMethod(
 	const buttons: DiscordButton[] = [];
 	if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", result.url));
 	buttons.push(actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${result.attemptID}`, request.dmGuildId), 3));
+	buttons.push(actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2));
 	await answer.update(
 		[
 			`**${integrationID}** signs in through your browser.`,
@@ -309,8 +362,21 @@ async function checkSignIn(request: InteractionRequest, integrationID: string, a
 		await modelScreen(request);
 		return;
 	}
+	if (status === "failed" || status === "expired") {
+		await answer.update(
+			`The sign-in did not complete: ${result.status?.message ?? "the provider gave no reason"}. Start it again from **Providers**.`,
+			[buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)])],
+		);
+		return;
+	}
 	await answer.update(
-		`Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}`,
+		`Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}. Finish the flow, then press **I've finished** again.`,
+		[
+			buttonRow([
+				actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${attemptID}`, request.dmGuildId), 3),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		],
 	);
 }
 
@@ -320,7 +386,12 @@ async function completeSignIn(request: InteractionRequest, integrationID: string
 	await answer.defer();
 	const trimmed = code.trim();
 	if (!trimmed) {
-		await answer.reply("No code was provided.");
+		await answer.reply("No code was provided.", [
+			buttonRow([
+				actionButton("Try again", CODE_ID.of(integrationID, request.dmGuildId), 2),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
 		return;
 	}
 	const result = await request.session.providerConnect({
@@ -329,7 +400,12 @@ async function completeSignIn(request: InteractionRequest, integrationID: string
 		code: trimmed,
 	});
 	if (result.error) {
-		await answer.reply(`Could not finish **${integrationID}**: ${result.error}`);
+		await answer.reply(`Could not finish **${integrationID}**: ${result.error}`, [
+			buttonRow([
+				actionButton("Try again", CODE_ID.of(integrationID, request.dmGuildId), 2),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
 		return;
 	}
 	await modelScreen(request);
@@ -339,12 +415,25 @@ async function completeSignIn(request: InteractionRequest, integrationID: string
 async function connectWithKey(request: InteractionRequest, integrationID: string, key: string): Promise<void> {
 	const answer = responder(request);
 	if (!key) {
-		await answer.reply("No key was provided.");
+		await answer.reply("No key was provided.", [
+			buttonRow([
+				actionButton("Try again", KEY_ID.of(integrationID, request.dmGuildId), 2),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
 		return;
 	}
+	// Connecting can build the host and reconcile the model, which can outlast
+	// Discord's three second window for a modal submit.
+	await answer.defer();
 	const result = await request.session.providerConnect({ integrationID, key, methodID: "key" });
 	if (result.error) {
-		await answer.reply(`Could not connect **${integrationID}**: ${result.error}`);
+		await answer.reply(`Could not connect **${integrationID}**: ${result.error}`, [
+			buttonRow([
+				actionButton("Try again", KEY_ID.of(integrationID, request.dmGuildId), 2),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
 		return;
 	}
 	await modelScreen(request);
@@ -353,9 +442,19 @@ async function connectWithKey(request: InteractionRequest, integrationID: string
 async function promptRemoveProvider(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const providers = (await request.session.config().catch(() => undefined))?.providers ?? [];
+	const id = (base: string) => scopedId(base, request.dmGuildId);
+	const status = await request.session.config().catch(() => undefined);
+	if (!status) {
+		await answer.reply("Eryn could not read this server's providers right now. Try again in a moment.", [
+			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
+		]);
+		return;
+	}
+	const providers = status.providers;
 	if (!providers.length) {
-		await answer.reply("No providers are connected to this server.");
+		await answer.reply("No providers are connected to this server.", [
+			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
+		]);
 		return;
 	}
 	if (providers.length === 1) {
@@ -373,6 +472,7 @@ async function promptRemoveProvider(request: InteractionRequest): Promise<void> 
 				description: provider.method.slice(0, 100),
 			})),
 		}),
+		buttonRow([actionButton("Cancel", id(PROVIDER_SCREEN_ID), 2)]),
 	]);
 }
 
@@ -383,10 +483,10 @@ async function confirmProviderRemoval(request: InteractionRequest, integrationID
 		await answer.reply("No provider was selected.");
 		return;
 	}
-	await answer.reply(`Remove **${integrationID}** from this server?`, [
+	await answer.reply(`Remove **${integrationID}**? Eryn will stop using it immediately.`, [
 		buttonRow([
-			actionButton("Remove", REMOVE_CONFIRM_ID.of(integrationID), 4),
-			actionButton("Cancel", SETUP_MENU_ID, 2),
+			actionButton("Remove", REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), 4),
+			actionButton("Cancel", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
 		]),
 	]);
 }
@@ -397,13 +497,26 @@ async function removeProvider(request: InteractionRequest, integrationID: string
 	try {
 		await request.session.disconnectProvider(integrationID);
 	} catch (error) {
-		await answer.reply(`Could not remove **${integrationID}**: ${describeError(error)}`);
+		await answer.reply(`Could not remove **${integrationID}**: ${describeError(error)}`, [
+			buttonRow([
+				actionButton("Try again", REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), 4),
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
 		return;
 	}
 	const status = await request.session.config().catch(() => undefined);
 	await answer.reply(
-		`Removed **${integrationID}**.${status?.ready ? "" : " Connect a provider before Eryn can run."}`,
-		[buttonRow([actionButton("Back to setup", SETUP_MENU_ID, 1)])],
+		[
+			`Removed **${integrationID}**.`,
+			...(status?.ready === false ? ["No provider is connected now, so Eryn cannot run until you connect another."] : []),
+		].join("\n"),
+		[
+			buttonRow([
+				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
+				actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2),
+			]),
+		],
 	);
 }
 
@@ -441,7 +554,16 @@ export async function providerComponent(
 		await guarded(request, "reply", () => responder(request).modal(codeModal(request, code)));
 		return true;
 	}
+	// Likewise the "Try again" button on a failed key connection.
+	const key = KEY_ID.read(customId);
+	if (key !== undefined) {
+		await guarded(request, "reply", () => responder(request).modal(keyModal(request, key)));
+		return true;
+	}
 	switch (customId) {
+		case PROVIDER_SCREEN_ID:
+			await guarded(request, "update", () => providerScreen(request));
+			return true;
 		case SELECT_ID:
 			await guarded(request, "update", () => pickProviderMethod(request, values[0] ?? ""));
 			return true;

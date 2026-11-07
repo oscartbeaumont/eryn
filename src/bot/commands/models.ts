@@ -11,7 +11,8 @@ import {
 	type DiscordModal,
 } from "../../discord/components";
 import type { ModelOption } from "../../session/models";
-import { scopedId } from "../ids";
+import { describeError } from "../../errors";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID, scopedId } from "../ids";
 import {
 	guarded,
 	responder,
@@ -21,18 +22,26 @@ import {
 	type InteractionRequest,
 } from "./interaction";
 
+/** The setup menu's "Choose model" button, owned here so this module can re-render itself. */
+export const MODEL_SCREEN_ID = `${SETUP_MENU_ID}:model`;
+
 const SELECT_ID = "setup:model";
 const MANUAL_ID = "setup:model:manual";
 const MODAL_ID = "setup:model:modal";
 const SEARCH_ID = "setup:model:search";
 const SEARCH_MODAL_ID = "setup:model:search:modal";
 
-/** The model select's entries, in catalogue order. */
-function modelOptions(models: readonly ModelOption[]): DiscordSelectOption[] {
+/** The model select's entries, in catalogue order, with the current one preselected. */
+function modelOptions(models: readonly ModelOption[], current: string | undefined): DiscordSelectOption[] {
 	return models.slice(0, MAX_SELECT_OPTIONS).map((model) => ({
-		label: `${model.connected ? "★ " : ""}${model.name}`.slice(0, 100),
+		label: model.name.slice(0, 100),
 		value: model.id,
-		description: `${model.provider} · ${model.status}`.slice(0, 100),
+		// Status is only interesting when the model is not plain "available".
+		description: [model.provider, ["alpha", "beta"].includes(model.status) ? model.status : undefined]
+			.filter(Boolean)
+			.join(" · ")
+			.slice(0, 100),
+		...(model.id === current ? { default: true } : {}),
 	}));
 }
 
@@ -40,7 +49,7 @@ function modelModal(request: InteractionRequest): DiscordModal {
 	return textModal(scopedId(MODAL_ID, request.dmGuildId), "Choose a model", [
 		textInput({
 			custom_id: "model",
-			label: "provider/model reference",
+			label: "Model reference",
 			required: true,
 			max_length: 200,
 			placeholder: "opencode-go/deepseek-v4.1-flash",
@@ -67,26 +76,65 @@ async function connectedModels(request: InteractionRequest): Promise<ModelOption
 	return (await request.session.models()).filter((model) => model.connected);
 }
 
+/** The picker buttons shared by the catalogue, search results, and failures. */
+function searchRow(request: InteractionRequest) {
+	const id = (base: string) => scopedId(base, request.dmGuildId);
+	return buttonRow([
+		actionButton("Search models", id(SEARCH_ID), 2),
+		actionButton("Enter a model reference", id(MANUAL_ID), 2),
+		actionButton("Back", id(SETUP_MENU_ID), 2),
+	]);
+}
+
 export async function modelScreen(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const models = await connectedModels(request);
+	// A catalogue with connected models means a provider is in place, so the
+	// public install greeting has done its job. Dismiss it even if the admin
+	// wanders off before picking a model.
+	if (models.length) await request.ctx.dismissGreeting(request.guildId).catch(() => undefined);
 	if (!models.length) {
 		const status = await request.session.config().catch(() => undefined);
-		const connected = status?.providers.map((provider) => provider.integrationID).join(", ") || "none";
+		const connected = status?.providers.map((provider) => provider.integrationID) ?? [];
 		await answer.reply(
-			`I could not read a model catalogue yet. Connected providers: **${connected}**. If that looks right, try again in a moment; otherwise reconnect the provider with \`/eryn setup\`.`,
+			connected.length
+				? [
+						"**No models are available yet.**",
+						`Connected providers: **${connected.join("**, **")}**. Try again in a moment.`,
+					].join("\n")
+				: ["**No provider is connected yet.**", "Go back and connect one, then choose a model."].join("\n"),
+			[
+				buttonRow([
+					actionButton("Try again", id(MODEL_SCREEN_ID), 1),
+					actionButton("Back", id(SETUP_MENU_ID), 2),
+				]),
+			],
 		);
 		return;
 	}
-	await answer.reply("Which model should Eryn run here?", [
-		selectRow({ type: 3, custom_id: id(SELECT_ID), placeholder: "Pick a model", options: modelOptions(models) }),
-		buttonRow([
-			actionButton("Search models", id(SEARCH_ID), 2),
-			actionButton("Enter a model reference", id(MANUAL_ID), 2),
-		]),
-	]);
+	const status = await request.session.config().catch(() => undefined);
+	const current = status?.model;
+	await answer.reply(
+		[
+			"**Model**",
+			...(current ? [`Current: \`${current}\``] : []),
+			"Pick the model Eryn should run here.",
+			...(models.length > MAX_SELECT_OPTIONS
+				? [`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search models** for the rest.`]
+				: []),
+		].join("\n"),
+		[
+			selectRow({
+				type: 3,
+				custom_id: id(SELECT_ID),
+				placeholder: "Pick a model",
+				options: modelOptions(models, current),
+			}),
+			searchRow(request),
+		],
+	);
 }
 
 /** Show the connected models matching a search, as a select of at most 25. */
@@ -99,29 +147,67 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 		(model) => !needle || `${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle),
 	);
 	if (!matches.length) {
-		await answer.reply(`No models match “${query.trim()}”.`, [
-			buttonRow([actionButton("Search again", id(SEARCH_ID), 2)]),
+		await answer.reply(`No models match “${query.trim()}”. Try a shorter search.`, [
+			buttonRow([
+				actionButton("Search again", id(SEARCH_ID), 2),
+				actionButton("Back", id(MODEL_SCREEN_ID), 2),
+			]),
 		]);
 		return;
 	}
-	await answer.reply(`Models matching “${query.trim()}”`, [
-		selectRow({ type: 3, custom_id: id(SELECT_ID), placeholder: "Pick a model", options: modelOptions(matches) }),
-		buttonRow([
-			actionButton("Search again", id(SEARCH_ID), 2),
-			actionButton("Enter a model reference", id(MANUAL_ID), 2),
-		]),
-	]);
+	const current = (await request.session.config().catch(() => undefined))?.model;
+	await answer.reply(
+		matches.length >= MAX_SELECT_OPTIONS
+			? `**Models matching “${query.trim()}”** (showing the first ${MAX_SELECT_OPTIONS})`
+			: `**Models matching “${query.trim()}”**`,
+		[
+			selectRow({
+				type: 3,
+				custom_id: id(SELECT_ID),
+				placeholder: "Pick a model",
+				options: modelOptions(matches, current),
+			}),
+			buttonRow([
+				actionButton("Search again", id(SEARCH_ID), 2),
+				actionButton("Enter a model reference", id(MANUAL_ID), 2),
+				actionButton("Back", id(MODEL_SCREEN_ID), 2),
+			]),
+		],
+	);
 }
 
 async function selectModel(request: InteractionRequest, model: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	if (!model) {
-		await answer.reply("No model was selected.");
+		await answer.reply("No model was selected.", [
+			buttonRow([actionButton("Back", scopedId(MODEL_SCREEN_ID, request.dmGuildId), 2)]),
+		]);
 		return;
 	}
-	await request.session.setModel(model);
-	await answer.reply(`Model set to \`${model}\`. Mention @eryn in a channel to start.`);
+	try {
+		await request.session.setModel(model);
+	} catch (error) {
+		await answer.reply(`Could not use \`${model}\`: ${describeError(error)}`, [
+			buttonRow([
+				actionButton("Try again", scopedId(MANUAL_ID, request.dmGuildId), 2),
+				actionButton("Back", scopedId(MODEL_SCREEN_ID, request.dmGuildId), 2),
+			]),
+		]);
+		return;
+	}
+	await answer.reply(
+		[
+			`**Model set to \`${model}\`.**`,
+			"Mention Eryn in a channel to start, or run `/eryn setup` to change anything else.",
+		].join("\n"),
+		[
+			buttonRow([
+				actionButton("Back to setup", scopedId(SETUP_MENU_ID, request.dmGuildId), 2),
+				actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2),
+			]),
+		],
+	);
 }
 
 export async function modelComponent(
@@ -130,6 +216,9 @@ export async function modelComponent(
 	values: readonly string[],
 ): Promise<boolean> {
 	switch (customId) {
+		case MODEL_SCREEN_ID:
+			await guarded(request, "update", () => modelScreen(request));
+			return true;
 		case SELECT_ID:
 			await guarded(request, "update", () => selectModel(request, values[0] ?? ""));
 			return true;

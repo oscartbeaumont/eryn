@@ -7,6 +7,7 @@
  */
 
 import { describeError } from "../../errors";
+import { actionButton, buttonRow } from "../../discord/components";
 import type { DiscordRest } from "../../discord/api";
 import type {
 	DiscordComponent,
@@ -14,6 +15,7 @@ import type {
 	DiscordTextInput,
 } from "../../discord/components";
 import type { DiscordInteraction } from "../../discord/socket";
+import { SETUP_CLOSE_ID, scopedId } from "../ids";
 import type { SessionClient } from "../client";
 
 /** Discord caps a string select at 25 options. */
@@ -29,6 +31,8 @@ export interface CommandContext {
 	readonly applicationId: string;
 	readonly session: (guildId: string) => SessionClient;
 	readonly ownsConversation: (channelId: string) => Promise<boolean>;
+	/** Remove the guild's public install greeting, whose job the setup flow has finished. */
+	readonly dismissGreeting: (guildId: string) => Promise<void>;
 	readonly rest: DiscordRest;
 }
 
@@ -81,6 +85,16 @@ export function responder(request: InteractionRequest) {
 				await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
 			}
 		},
+		/**
+		 * Acknowledge with a new ephemeral message instead of editing the one the
+		 * component came from. A public message (the install greeting) must never
+		 * be edited into the setup menu, or the whole channel would see it.
+		 */
+		deferNew: async () => {
+			if (acknowledged.has(interaction)) return;
+			acknowledged.add(interaction);
+			await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
+		},
 		reply: (content: string, components?: readonly DiscordComponent[]) => {
 			if (acknowledged.has(interaction)) return edit(content, components);
 			acknowledged.add(interaction);
@@ -94,6 +108,21 @@ export function responder(request: InteractionRequest) {
 			return ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
 				components: components ?? [],
 			});
+		},
+		/**
+		 * Dismiss the menu.
+		 *
+		 * The interaction still has to be acknowledged: a component defers its
+		 * update, so the message does not flash, and then it is deleted. Every
+		 * menu is ephemeral, so nothing is left behind for anyone else.
+		 */
+		close: async () => {
+			if (!acknowledged.has(interaction)) {
+				acknowledged.add(interaction);
+				if (interaction.type === 3) await ctx.rest.interactionDeferUpdate(interaction.id, interaction.token);
+				else await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
+			}
+			await ctx.rest.interactionDeleteOriginal(ctx.applicationId, interaction.token);
 		},
 		modal: (modal: DiscordModal) => ctx.rest.interactionModal(interaction.id, interaction.token, modal),
 	};
@@ -111,7 +140,14 @@ export async function guarded(
 		request.ctx.log(`interaction failed: ${describeError(error)}`);
 		const message = `That did not work: ${describeError(error)}`;
 		const answer = responder(request);
-		await (kind === "update" ? answer.update(message) : answer.reply(message)).catch(() => undefined);
+		// Leave an escape hatch: an unexpected failure must not strand the admin on
+		// a message with no controls.
+		const components = [
+			buttonRow([actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2)]),
+		];
+		await (kind === "update" ? answer.update(message, components) : answer.reply(message, components)).catch(
+			() => undefined,
+		);
 	}
 }
 

@@ -23,8 +23,16 @@ const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
  */
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
 const RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
-/** Cloudflare stops pinning a Durable Object 15 minutes after an outbound connection opens. */
-const CONNECTION_RECYCLE_MS = 10 * 60_000;
+/**
+ * Cloudflare stops pinning a Durable Object 15 minutes after an outbound
+ * connection opens, and evicts it shortly after if nothing else pins it.
+ *
+ * Recycling a socket opens a fresh connection and restarts that window, so the
+ * alarm must reach it well inside 15 minutes. Six minutes leaves room for a
+ * late or missed alarm; getting this wrong kills the bot's only gateway socket
+ * and drops every interaction until the next wake.
+ */
+const CONNECTION_RECYCLE_MS = 6 * 60_000;
 /** Discord closes with these codes when the bot configuration itself is wrong. */
 const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 /** Discord closes with these codes when the session cannot be resumed, so re-identify instead. */
@@ -113,7 +121,7 @@ export interface DiscordInteraction {
 	member?: { user?: DiscordUser; nick?: string; permissions?: string };
 	user?: DiscordUser;
 	/** The message a component interaction came from. */
-	message?: { id: string };
+	message?: { id: string; flags?: number };
 }
 
 export interface DiscordSocketHandlers {

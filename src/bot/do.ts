@@ -29,7 +29,7 @@ import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type Disco
 import type { DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { SessionClient } from "./client";
-import { maybeAnnounceInstall } from "./install";
+import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
 import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mentionInfo, stripMention, threadName } from "./message";
 
@@ -39,7 +39,18 @@ const MESSAGE_WATCH_PATH = "/message-watch";
 const THREAD_PREFIX = "thread:";
 const CHANNEL_PREFIX = "channel:";
 const WATCH_PREFIX = "watch:";
-const KEEPALIVE_MS = 840_000;
+/**
+ * How often the keepalive alarm runs.
+ *
+ * It has two jobs: recycle the socket before Cloudflare's 15 minute in-memory
+ * cap (see `CONNECTION_RECYCLE_MS`), and bring this object back after it is
+ * evicted. Both want it short: an evicted object holds no gateway socket, so
+ * every interaction Discord sends in the meantime is lost, and Discord reports
+ * "The application did not respond". The old 14 minute interval made the
+ * recycle race the hard cap and let an eviction go unnoticed for a quarter of
+ * an hour; two minutes keeps both windows comfortably small.
+ */
+const KEEPALIVE_MS = 120_000;
 
 function log(message: string): void {
 	botLog("gateway", message);
@@ -444,6 +455,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			session: (guildId) => this.session(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),
+			dismissGreeting: (guildId) => dismissInstallGreeting(this.rest, this.ctx.storage, guildId),
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);
@@ -486,7 +498,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		await this.rest
 			.sendMessage(
 				threadId,
-				"This server has not connected a provider yet, so I cannot run inference here. A server admin can connect one with `/eryn setup provider`.",
+				"This server has not connected a provider yet, so I cannot run inference here. A server admin can connect one from `/eryn setup` with **Connect provider**.",
 			)
 			.catch(() => undefined);
 	}
