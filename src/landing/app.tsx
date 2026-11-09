@@ -28,7 +28,7 @@ const FEATURES = [
 
 const COMMANDS = [
 	{
-		command: "@eryn {query}",
+		command: "@eryn what's the weather",
 		description: "Mention Eryn with a request to start a thread. Reply in the thread to keep going.",
 		permission: "Everyone",
 	},
@@ -163,8 +163,8 @@ export function Landing() {
 
 						<div class="mt-8 border-t border-line">
 							{COMMANDS.map((entry) => (
-								<div class="grid grid-cols-[1fr_auto] items-start gap-x-6 gap-y-3 border-b border-line py-[22px] md:grid-cols-[minmax(9rem,13rem)_1fr_auto]">
-									<code class="col-start-1 row-start-1 justify-self-start rounded border border-line bg-[#101014] px-2 py-0.5 font-mono text-[13px] text-ink">
+								<div class="grid grid-cols-[1fr_auto] items-start gap-x-6 gap-y-3 border-b border-line py-[22px] md:grid-cols-[minmax(9rem,15rem)_1fr_auto]">
+									<code class="col-start-1 row-start-1 justify-self-start whitespace-nowrap rounded border border-line bg-[#101014] px-2 py-0.5 font-mono text-[13px] text-ink">
 										{entry.command}
 									</code>
 									<p class="col-span-2 row-start-2 text-sm leading-[1.55] text-muted md:col-span-1 md:col-start-2 md:row-start-1">
