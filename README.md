@@ -49,6 +49,15 @@ which owns the OpenCode host, the provider credentials, the MCP links, and a
 virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
 and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
 
+### Projects and workspace
+
+Each Discord channel gets its own OpenCode project at
+`/eryn/channels/<channel id>`. Threads in that channel share the project, so
+the project list is grouped by channel instead of being one flat list of
+conversations. The agent's files live in a separate shared virtual workspace,
+not inside that project directory, so the grouping does not stop it reading or
+writing elsewhere.
+
 ## Permissions
 
 `/eryn policy` sets per-channel and per-thread tool limits. A policy is a

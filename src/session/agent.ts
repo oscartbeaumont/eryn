@@ -22,6 +22,7 @@ import { renderConversation, renderFailure, renderUserMessage } from "../discord
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
 import type { HostInterface } from "./host";
+import { channelProjectDirectory, LOCATION } from "./locations";
 import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
 import type {
 	DiscordContext,
@@ -53,8 +54,6 @@ import { applyTurnEvent, createTurn, type Turn } from "./turn";
 
 export type { HostConfig };
 
-/** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
-const LOCATION = "/eryn";
 /** The JSON metadata boundary: stored scope arrays are readonly for readers. */
 type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 const TURN_TIMEOUT_MS = 900_000;
@@ -602,7 +601,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		// The completion signal arrives as an event, so a subscription that
 		// died since the last turn has to be replaced before this one starts.
 		this.startConsuming(host);
-		const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
+		const sessionID = await this.ensureSession(
+			host,
+			request.threadId,
+			request.title ?? DEFAULT_THREAD_NAME,
+			channelProjectDirectory(request.discord?.channel.id),
+		);
 		// A schedule may be running in this session. A prompt is delivered with
 		// `steer`, so without this the human message would join the schedule's
 		// execution and the schedule's later tool calls would read this
@@ -2059,7 +2063,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.turnFloor.delete(threadId);
 	}
 
-	private async ensureSession(host: HostInterface, threadId: string, title: string): Promise<string> {
+	private async ensureSession(
+		host: HostInterface,
+		threadId: string,
+		title: string,
+		directory: string,
+	): Promise<string> {
 		const existing = await this.sessionFor(threadId);
 		if (existing) {
 			try {
@@ -2070,7 +2079,9 @@ class GuildAgentImpl implements GuildAgentShape {
 			}
 		}
 
-		const session = await host.sessions.create({ title, location: { directory: LOCATION } });
+		// The location groups the session into the channel's project. It is not a
+		// filesystem boundary: the agent's files live in the shared workspace.
+		const session = await host.sessions.create({ title, location: { directory } });
 		this.remember(threadId, session.id);
 		await this.storage.put(KEYS.session + threadId, session.id);
 		return session.id;
