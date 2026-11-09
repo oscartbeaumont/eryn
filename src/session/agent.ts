@@ -1228,23 +1228,28 @@ class GuildAgentImpl implements GuildAgentShape {
 		}
 
 		const external = fields.find((field) => field.type === "external");
-		const content = external
-			? [`🔗 **${server} needs you to open a link**`, message, external.url ?? ""].filter(Boolean).join("\n")
-			: [
-					`📝 **${server} needs some information**`,
-					message,
-					"_Open the form and answer it to continue._",
-				]
-					.filter(Boolean)
-					.join("\n");
+		const content =
+			fields.length === 0
+				? [`✅ **${server} is ready to continue**`, message].filter(Boolean).join("\n")
+				: external
+					? [`🔗 **${server} needs you to open a link**`, message, external.url ?? ""].filter(Boolean).join("\n")
+					: [
+							`📝 **${server} needs some information**`,
+							message,
+							"_Open the form and answer it to continue._",
+						]
+							.filter(Boolean)
+							.join("\n");
 		const components = [
 			buttonRow(
-				external
-					? [
-							...(external.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
-							actionButton("Done", `form:done:${formId}`, 3),
-						]
-					: [actionButton("Open form", `form:open:${formId}`, 1)],
+				fields.length === 0
+					? [actionButton("Continue", `form:done:${formId}`, 3)]
+					: external
+						? [
+								...(external.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
+								actionButton("Done", `form:done:${formId}`, 3),
+							]
+						: [actionButton("Open form", `form:open:${formId}`, 1)],
 			),
 		];
 		const sent = await this.rest
