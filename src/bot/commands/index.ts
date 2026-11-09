@@ -10,7 +10,7 @@
 import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
 import type { DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
-import { unmarshalId } from "../ids";
+import { scopedId, unmarshalId } from "../ids";
 import {
 	canManage,
 	denyConfiguration,
@@ -110,7 +110,14 @@ function requestFor(
 	guildId: string,
 	dmGuildId?: string,
 ): InteractionRequest {
-	return { ctx, interaction, guildId, dmGuildId, session: ctx.session(guildId) };
+	return {
+		ctx,
+		interaction,
+		guildId,
+		dmGuildId,
+		session: ctx.session(guildId),
+		id: (base) => scopedId(base, dmGuildId),
+	};
 }
 
 // --- Application commands ------------------------------------------------------

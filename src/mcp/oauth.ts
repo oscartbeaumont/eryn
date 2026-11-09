@@ -38,7 +38,7 @@ import {
 } from "@modelcontextprotocol/client";
 
 import { describeError } from "../errors";
-import { fetchWithRedirects, isSecureUrl } from "../http";
+import { externalFetch, isSecureUrl } from "../http";
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
@@ -270,19 +270,11 @@ function fail(error: unknown): never {
 }
 
 /**
- * A fetch that applies the deployment's redirect and transport rules.
- *
- * Every request the OAuth library makes — discovery, registration, token
- * exchange, refresh — goes through here, so an external server cannot redirect
- * the Worker somewhere it would not otherwise call.
+ * The fetch every request the OAuth library makes uses — discovery,
+ * registration, token exchange, refresh — so an external server cannot
+ * redirect the Worker somewhere it would not otherwise call.
  */
-const fetchFn: FetchLike = async (input, init) => {
-	const url = typeof input === "string" ? new URL(input) : input;
-	return await fetchWithRedirects(url, {
-		...init,
-		signal: init?.signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-	});
-};
+const fetchFn: FetchLike = externalFetch(DISCOVERY_TIMEOUT_MS);
 
 /** OAuth endpoints carry secrets, so only https is acceptable in production. */
 function requireTransport(url: string, label: string): URL {

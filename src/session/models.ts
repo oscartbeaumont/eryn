@@ -52,7 +52,6 @@ export const McpOAuthSchema = Schema.Struct({
 	/** The RFC 8707 resource indicator, when the server asked for one. */
 	resource: Schema.optional(Schema.String),
 });
-export type McpOAuth = typeof McpOAuthSchema.Type;
 
 /**
  * One external MCP server a guild has linked.
@@ -148,7 +147,6 @@ export const McpAuthStatusSchema = Schema.Struct({
 export type McpAuthStatus = typeof McpAuthStatusSchema.Type;
 
 export const McpAuthUrlResponseSchema = Schema.Struct({ url: Schema.String });
-export type McpAuthUrlResponse = typeof McpAuthUrlResponseSchema.Type;
 
 export const McpAuthStartResponseSchema = Schema.Struct({
 	ok: Schema.optional(Schema.Boolean),
@@ -198,10 +196,9 @@ export type GuildStatus = typeof GuildStatusSchema.Type;
 
 // --- Provider catalogue --------------------------------------------------------
 
-/** One way a provider can be connected, as the host describes it. */
-export const ProviderFieldSchema = Schema.Struct({
+/** The parts of a provider form field every kind shares. */
+const ProviderFieldBase = {
 	key: Schema.String,
-	type: Schema.Literals(["string", "number", "integer", "boolean"]),
 	title: Schema.optional(Schema.String),
 	description: Schema.optional(Schema.String),
 	placeholder: Schema.optional(Schema.String),
@@ -225,8 +222,25 @@ export const ProviderFieldSchema = Schema.Struct({
 			}),
 		),
 	),
+};
+
+/** One way a provider can be connected, as the host describes it. */
+export const ProviderFieldSchema = Schema.Struct({
+	...ProviderFieldBase,
+	type: Schema.Literals(["string", "number", "integer", "boolean"]),
 });
 export type ProviderField = typeof ProviderFieldSchema.Type;
+
+/**
+ * A field as the host describes it, before this deployment decides whether a
+ * Discord modal can render it. The type is left open so an unsupported field is
+ * reported rather than making the whole method unreadable.
+ */
+export const HostProviderFieldSchema = Schema.Struct({
+	...ProviderFieldBase,
+	type: Schema.String,
+});
+export type HostProviderField = typeof HostProviderFieldSchema.Type;
 
 export const IntegrationMethodOptionSchema = Schema.Struct({
 	type: Schema.String,
@@ -291,10 +305,14 @@ export type PendingOAuth = typeof PendingOAuthSchema.Type;
 
 // --- Internal route bodies -----------------------------------------------------
 
-export const GuildRefSchema = Schema.Struct({ guildId: Schema.String });
+/** A request body that names the guild it is for, which the object verifies. */
+function guildScoped<Fields extends Schema.Struct.Fields>(fields: Fields) {
+	return Schema.Struct({ guildId: Schema.String, ...fields });
+}
 
-export const ProviderConnectRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const GuildRefSchema = guildScoped({});
+
+export const ProviderConnectRequestSchema = guildScoped({
 	integrationID: Schema.String,
 	methodID: Schema.optional(Schema.String),
 	key: Schema.optional(Schema.String),
@@ -316,20 +334,18 @@ export const ProviderConnectResponseSchema = Schema.Struct({
 });
 export type ProviderConnectResponse = typeof ProviderConnectResponseSchema.Type;
 
-export const ModelRequestSchema = Schema.Struct({ guildId: Schema.String, model: Schema.String });
+export const ModelRequestSchema = guildScoped({ model: Schema.String });
 
-export const DisconnectRequestSchema = Schema.Struct({ guildId: Schema.String, integrationID: Schema.String });
+export const DisconnectRequestSchema = guildScoped({ integrationID: Schema.String });
 
-export const LinkAddRequestSchema = Schema.Struct({ guildId: Schema.String, link: McpLinkSchema });
-export const LinkRemoveRequestSchema = Schema.Struct({ guildId: Schema.String, linkId: Schema.String });
-export const McpProbeRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const LinkAddRequestSchema = guildScoped({ link: McpLinkSchema });
+export const LinkRemoveRequestSchema = guildScoped({ linkId: Schema.String });
+export const McpProbeRequestSchema = guildScoped({
 	url: Schema.String,
 	token: Schema.optional(Schema.String),
 });
-export const McpTestRequestSchema = Schema.Struct({ guildId: Schema.String, linkId: Schema.String });
-export const McpAuthStartRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const McpTestRequestSchema = guildScoped({ linkId: Schema.String });
+export const McpAuthStartRequestSchema = guildScoped({
 	name: Schema.String,
 	url: Schema.String,
 	applicationId: Schema.optional(Schema.String),
@@ -338,12 +354,10 @@ export const McpAuthStartRequestSchema = Schema.Struct({
 	resourceMetadataUrl: Schema.optional(Schema.String),
 	scope: Schema.optional(Schema.String),
 });
-export const McpAuthAttemptRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const McpAuthAttemptRequestSchema = guildScoped({
 	attemptId: Schema.String,
 });
-export const McpAuthCompleteRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const McpAuthCompleteRequestSchema = guildScoped({
 	attemptId: Schema.String,
 	code: Schema.optional(Schema.String),
 	/** Set when the authorization server sent the browser back with an error. */
@@ -368,8 +382,7 @@ export const PromptUserSchema = Schema.Struct({
 });
 export type PromptUser = typeof PromptUserSchema.Type;
 
-export const PromptRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const PromptRequestSchema = guildScoped({
 	threadId: Schema.String,
 	title: Schema.optional(Schema.String),
 	text: Schema.String,
@@ -395,15 +408,12 @@ export type PromptRequest = typeof PromptRequestSchema.Type;
  * The gateway sends the same {@link DiscordContext} it records on prompts, so
  * the session object can correct the stored copy before the next turn.
  */
-export const ContextUpdateRequestSchema = Schema.Struct({
-	guildId: Schema.String,
+export const ContextUpdateRequestSchema = guildScoped({
 	threadId: Schema.String,
 	discord: DiscordContextSchema,
 });
-export type ContextUpdateRequest = typeof ContextUpdateRequestSchema.Type;
 
 export const InterruptRequestSchema = Schema.Struct({
 	threadId: Schema.String,
 	gone: Schema.optional(Schema.Boolean),
 });
-export type InterruptRequest = typeof InterruptRequestSchema.Type;

@@ -15,7 +15,7 @@ import type {
 	DiscordTextInput,
 } from "../../discord/components";
 import type { DiscordInteraction } from "../../discord/socket";
-import { SETUP_CLOSE_ID, scopedId } from "../ids";
+import { SETUP_CLOSE_ID } from "../ids";
 import type { SessionClient } from "../client";
 
 /** Discord caps a string select at 25 options. */
@@ -45,6 +45,33 @@ export interface InteractionRequest {
 	/** Set when the flow was opened from the install DM, which has no guild context of its own. */
 	readonly dmGuildId?: string;
 	readonly session: SessionClient;
+	/** Scope a custom id to this request's install DM, when it has one. */
+	readonly id: (base: string) => string;
+}
+
+/** A row with one Back button, scoped to the request. */
+export function backRow(request: InteractionRequest, screenId: string) {
+	return buttonRow([actionButton("Back", request.id(screenId), 2)]);
+}
+
+/** A row with one Close button, scoped to the request. */
+export function closeRow(request: InteractionRequest) {
+	return buttonRow([actionButton("Close", request.id(SETUP_CLOSE_ID), 2)]);
+}
+
+/** A row offering another attempt at one step, and a way back to its screen. */
+export function retryRow(
+	request: InteractionRequest,
+	retryId: string,
+	backId: string,
+	style: 1 | 2 | 3 | 4 = 2,
+) {
+	return buttonRow([actionButton("Try again", retryId, style), actionButton("Back", request.id(backId), 2)]);
+}
+
+/** A row confirming a removal, with a way back to the screen that offered it. */
+export function removeRow(request: InteractionRequest, removeId: string, cancelId: string) {
+	return buttonRow([actionButton("Remove", removeId, 4), actionButton("Cancel", request.id(cancelId), 2)]);
 }
 
 /**
@@ -142,13 +169,26 @@ export async function guarded(
 		const answer = responder(request);
 		// Leave an escape hatch: an unexpected failure must not strand the admin on
 		// a message with no controls.
-		const components = [
-			buttonRow([actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2)]),
-		];
+		const components = [closeRow(request)];
 		await (kind === "update" ? answer.update(message, components) : answer.reply(message, components)).catch(
 			() => undefined,
 		);
 	}
+}
+
+/**
+ * Run a flow's handler and report the id as handled.
+ *
+ * A dispatcher handler owns the id it answers, so every branch would otherwise
+ * repeat the same "guard the handler, then claim the id" pair.
+ */
+export async function claim(
+	request: InteractionRequest,
+	kind: "reply" | "update",
+	run: () => Promise<void>,
+): Promise<true> {
+	await guarded(request, kind, run);
+	return true;
 }
 
 /** Answer an interaction that cannot be served, before any guild session exists. */

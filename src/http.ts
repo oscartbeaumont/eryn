@@ -1,5 +1,6 @@
 /**
- * Fetch a URL and follow redirects ourselves.
+ * Shared HTTP plumbing: following redirects ourselves for outbound fetches,
+ * and the JSON response helper the internal APIs answer with.
  *
  * Cloudflare's `fetch` only implements `follow` and `manual` for `redirect`.
  * Following automatically would let an external MCP server bounce an HTTPS
@@ -20,6 +21,11 @@ function isLoopback(hostname: string): boolean {
 
 /** The loopback hosts a development deployment may talk to over plain HTTP. */
 export { isLoopback };
+
+/** A JSON response body with the status the caller wants. */
+export function json(body: unknown, status = 200): Response {
+	return Response.json(body, { status });
+}
 
 /**
  * Whether a URL is acceptable to talk to: HTTPS, or loopback HTTP during
@@ -71,4 +77,17 @@ export async function fetchWithRedirects(
 	}
 
 	throw new Error("Too many redirects.");
+}
+
+/**
+ * A `fetch` for calls to external services: this module's redirect policy plus
+ * an abort timeout. Every outbound client uses the same one, so "where may this
+ * request go?" has a single answer.
+ */
+export function externalFetch(timeoutMs: number) {
+	return async (input: string | URL, init: RequestInit = {}): Promise<Response> =>
+		await fetchWithRedirects(input instanceof URL ? input : new URL(input), {
+			...init,
+			signal: init.signal ?? AbortSignal.timeout(timeoutMs),
+		});
 }

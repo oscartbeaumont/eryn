@@ -12,10 +12,12 @@ import {
 } from "../../discord/components";
 import type { ModelOption } from "../../session/models";
 import { describeError } from "../../errors";
-import { SETUP_CLOSE_ID, SETUP_MENU_ID, scopedId } from "../ids";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
 import {
-	guarded,
+	claim,
 	responder,
+	backRow,
+	retryRow,
 	textInput,
 	textModal,
 	MAX_SELECT_OPTIONS,
@@ -46,7 +48,7 @@ function modelOptions(models: readonly ModelOption[], current: string | undefine
 }
 
 function modelModal(request: InteractionRequest): DiscordModal {
-	return textModal(scopedId(MODAL_ID, request.dmGuildId), "Choose a model", [
+	return textModal(request.id(MODAL_ID), "Choose a model", [
 		textInput({
 			custom_id: "model",
 			label: "Model reference",
@@ -58,7 +60,7 @@ function modelModal(request: InteractionRequest): DiscordModal {
 }
 
 function modelSearchModal(request: InteractionRequest): DiscordModal {
-	return textModal(scopedId(SEARCH_MODAL_ID, request.dmGuildId), "Search models", [
+	return textModal(request.id(SEARCH_MODAL_ID), "Search models", [
 		textInput({
 			custom_id: "query",
 			label: "Model name, id, or provider",
@@ -78,18 +80,16 @@ async function connectedModels(request: InteractionRequest): Promise<ModelOption
 
 /** The picker buttons shared by the catalogue, search results, and failures. */
 function searchRow(request: InteractionRequest) {
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	return buttonRow([
-		actionButton("Search models", id(SEARCH_ID), 2),
-		actionButton("Enter a model reference", id(MANUAL_ID), 2),
-		actionButton("Back", id(SETUP_MENU_ID), 2),
+		actionButton("Search models", request.id(SEARCH_ID), 2),
+		actionButton("Enter a model reference", request.id(MANUAL_ID), 2),
+		actionButton("Back", request.id(SETUP_MENU_ID), 2),
 	]);
 }
 
 export async function modelScreen(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const models = await connectedModels(request);
 	// A catalogue with connected models means a provider is in place, so the
 	// public install greeting has done its job. Dismiss it even if the admin
@@ -107,8 +107,8 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 				: ["**No provider is connected yet.**", "Go back and connect one, then choose a model."].join("\n"),
 			[
 				buttonRow([
-					actionButton("Try again", id(MODEL_SCREEN_ID), 1),
-					actionButton("Back", id(SETUP_MENU_ID), 2),
+					actionButton("Try again", request.id(MODEL_SCREEN_ID), 1),
+					actionButton("Back", request.id(SETUP_MENU_ID), 2),
 				]),
 			],
 		);
@@ -128,7 +128,7 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 		[
 			selectRow({
 				type: 3,
-				custom_id: id(SELECT_ID),
+				custom_id: request.id(SELECT_ID),
 				placeholder: "Pick a model",
 				options: modelOptions(models, current),
 			}),
@@ -141,7 +141,6 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 async function searchModels(request: InteractionRequest, query: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const needle = query.trim().toLowerCase();
 	const matches = (await connectedModels(request)).filter(
 		(model) => !needle || `${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle),
@@ -149,8 +148,8 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 	if (!matches.length) {
 		await answer.reply(`No models match “${query.trim()}”. Try a shorter search.`, [
 			buttonRow([
-				actionButton("Search again", id(SEARCH_ID), 2),
-				actionButton("Back", id(MODEL_SCREEN_ID), 2),
+				actionButton("Search again", request.id(SEARCH_ID), 2),
+				actionButton("Back", request.id(MODEL_SCREEN_ID), 2),
 			]),
 		]);
 		return;
@@ -163,14 +162,14 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 		[
 			selectRow({
 				type: 3,
-				custom_id: id(SELECT_ID),
+				custom_id: request.id(SELECT_ID),
 				placeholder: "Pick a model",
 				options: modelOptions(matches, current),
 			}),
 			buttonRow([
-				actionButton("Search again", id(SEARCH_ID), 2),
-				actionButton("Enter a model reference", id(MANUAL_ID), 2),
-				actionButton("Back", id(MODEL_SCREEN_ID), 2),
+				actionButton("Search again", request.id(SEARCH_ID), 2),
+				actionButton("Enter a model reference", request.id(MANUAL_ID), 2),
+				actionButton("Back", request.id(MODEL_SCREEN_ID), 2),
 			]),
 		],
 	);
@@ -180,19 +179,14 @@ async function selectModel(request: InteractionRequest, model: string): Promise<
 	const answer = responder(request);
 	await answer.defer();
 	if (!model) {
-		await answer.reply("No model was selected.", [
-			buttonRow([actionButton("Back", scopedId(MODEL_SCREEN_ID, request.dmGuildId), 2)]),
-		]);
+		await answer.reply("No model was selected.", [backRow(request, MODEL_SCREEN_ID)]);
 		return;
 	}
 	try {
 		await request.session.setModel(model);
 	} catch (error) {
 		await answer.reply(`Could not use \`${model}\`: ${describeError(error)}`, [
-			buttonRow([
-				actionButton("Try again", scopedId(MANUAL_ID, request.dmGuildId), 2),
-				actionButton("Back", scopedId(MODEL_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, request.id(MANUAL_ID), MODEL_SCREEN_ID),
 		]);
 		return;
 	}
@@ -203,8 +197,8 @@ async function selectModel(request: InteractionRequest, model: string): Promise<
 		].join("\n"),
 		[
 			buttonRow([
-				actionButton("Back to setup", scopedId(SETUP_MENU_ID, request.dmGuildId), 2),
-				actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2),
+				actionButton("Back to setup", request.id(SETUP_MENU_ID), 2),
+				actionButton("Close", request.id(SETUP_CLOSE_ID), 2),
 			]),
 		],
 	);
@@ -217,11 +211,9 @@ export async function modelComponent(
 ): Promise<boolean> {
 	switch (customId) {
 		case MODEL_SCREEN_ID:
-			await guarded(request, "update", () => modelScreen(request));
-			return true;
+			return await claim(request, "update", () => modelScreen(request));
 		case SELECT_ID:
-			await guarded(request, "update", () => selectModel(request, values[0] ?? ""));
-			return true;
+			return await claim(request, "update", () => selectModel(request, values[0] ?? ""));
 		case SEARCH_ID:
 			await responder(request).modal(modelSearchModal(request));
 			return true;
@@ -240,11 +232,9 @@ export async function modelModalSubmit(
 ): Promise<boolean> {
 	switch (customId) {
 		case SEARCH_MODAL_ID:
-			await guarded(request, "reply", () => searchModels(request, values.query ?? ""));
-			return true;
+			return await claim(request, "reply", () => searchModels(request, values.query ?? ""));
 		case MODAL_ID:
-			await guarded(request, "reply", () => selectModel(request, values.model?.trim() ?? ""));
-			return true;
+			return await claim(request, "reply", () => selectModel(request, values.model?.trim() ?? ""));
 	}
 	return false;
 }

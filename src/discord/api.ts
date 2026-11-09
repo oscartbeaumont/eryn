@@ -46,6 +46,16 @@ export interface DiscordChannelRef {
 	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
 }
 
+/** A file attached to a message, shared by the REST and gateway shapes. */
+export interface DiscordAttachment {
+	id?: string;
+	filename?: string;
+	content_type?: string;
+	size?: number;
+	url?: string;
+	proxy_url?: string;
+}
+
 /** A message as a tool needs to see it. */
 export interface DiscordMessageView {
 	id: string;
@@ -53,9 +63,9 @@ export interface DiscordMessageView {
 	content?: string;
 	timestamp?: string;
 	edited_timestamp?: string | null;
-	author?: { id?: string; username?: string; global_name?: string; bot?: boolean };
+	author?: DiscordUser;
 	mentions?: DiscordUser[];
-	attachments?: { filename?: string; url?: string; content_type?: string; size?: number }[];
+	attachments?: DiscordAttachment[];
 	referenced_message?: { id?: string } | null;
 }
 
@@ -98,25 +108,6 @@ const AuditLogSchema = Schema.Struct({
 });
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/**
- * Split a message into Discord-sized chunks, preferring line boundaries.
- * Always returns at least one chunk so callers can rely on `chunks[0]`.
- */
-export function splitMessage(message: string, limit = MAX_CONTENT): string[] {
-	const chunks: string[] = [];
-	const pattern = new RegExp(`[\\s\\S]{1,${limit}}`, "g");
-	for (const line of message.split("\n")) {
-		const parts = line.length > limit ? (line.match(pattern) ?? []) : [line];
-		for (const part of parts) {
-			const current = chunks.at(-1);
-			const next = current === undefined || current === "" ? part : `${current}\n${part}`;
-			if (current === undefined || next.length > limit) chunks.push(part);
-			else chunks[chunks.length - 1] = next;
-		}
-	}
-	return chunks.length ? chunks : [""];
-}
 
 /** Seconds Discord asked us to wait, from a 429 body. Defaults to one second. */
 function retryDelay(body: unknown): number {
@@ -184,6 +175,11 @@ function messagePath(channelId: string, messageId: string): string {
 	return `/channels/${channelId}/messages/${messageId}`;
 }
 
+/** The id a create-style response must carry. */
+function idOf(result: { id?: unknown } | undefined, failure: string): string {
+	if (!result || typeof result.id !== "string") throw new DiscordError(failure);
+	return result.id;
+}
 
 /**
  * A minimal Discord REST client. Responses are never echoed back in errors and
@@ -219,9 +215,7 @@ export function discordRest(token: string) {
 
 	/** POST a body and return the id of the resource Discord created. */
 	async function create(path: string, body: unknown, failure: string): Promise<{ id: string }> {
-		const result = await request<{ id?: unknown }>("POST", path, body);
-		if (!result || typeof result.id !== "string") throw new DiscordError(failure);
-		return { id: result.id };
+		return { id: idOf(await request<{ id?: unknown }>("POST", path, body), failure) };
 	}
 
 	async function interactionCallback(interactionId: string, interactionToken: string, payload: unknown): Promise<void> {
@@ -232,10 +226,9 @@ export function discordRest(token: string) {
 		/** The bot's own user, which also serves as the application id. */
 		async me(): Promise<DiscordUser> {
 			const result = await request<{ id?: unknown; username?: unknown }>("GET", "/users/@me");
-			if (!result || typeof result.id !== "string") throw new DiscordError("Discord did not return a bot user");
 			return {
-				id: result.id,
-				...(typeof result.username === "string" ? { username: result.username } : {}),
+				id: idOf(result, "Discord did not return a bot user"),
+				...(typeof result?.username === "string" ? { username: result.username } : {}),
 			};
 		},
 

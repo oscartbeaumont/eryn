@@ -15,13 +15,14 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { log } from "../config";
-import { deployChanged } from "../deploy";
+import { deployRestart } from "../deploy";
 import { discordRest, type DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
+import { json } from "../http";
 import { refreshLinks } from "../mcp/links";
 import { createGuildAgent, type GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
-import { buildRoutes, json } from "./routes";
+import { buildRoutes } from "./routes";
 import { guildStore, type GuildStoreShape } from "./store";
 
 /** Keep a warm host briefly after the last request, then let the object hibernate. */
@@ -88,16 +89,14 @@ export class BotSessionV5 extends DurableObject<Env> {
 	 * until it restarts; the caller tells it which deploy is current.
 	 */
 	private async ensureCurrentVersion(request: Request): Promise<void> {
-		if (!(await deployChanged(this.ctx.storage, request, this.env))) return;
-		this.restartPending = true;
-		await this.ctx.storage.setAlarm(Date.now() + 1_000);
+		if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
 	}
 
 	async alarm(): Promise<void> {
 		// The signal is in memory: an abort discards storage writes, so a
 		// persisted marker would survive the restart and loop.
 		if (this.restartPending) {
-			if (this.inFlight > 0 || this.busy()) {
+			if (this.busy()) {
 				// A turn is still running. Restarting now would drop the reply, so wait
 				// for it to finish and check again.
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);

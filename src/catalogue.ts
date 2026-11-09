@@ -23,6 +23,12 @@ const CATALOGUE_URL = "https://models.opencode.ai/experimental/v2.0/api.json?typ
 /** Long enough to spare models.dev a request per host build, short enough to stay current. */
 const CATALOGUE_TTL_SECONDS = 300;
 
+/** The headers a filtered catalogue is served and cached with. */
+const CATALOGUE_HEADERS = {
+	"content-type": "application/json",
+	"cache-control": `public, max-age=${CATALOGUE_TTL_SECONDS}`,
+};
+
 /** A provider id is safe to put in a URL and compare to a catalogue key. */
 const PROVIDER_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
@@ -185,10 +191,7 @@ async function loadCatalogue(keep: readonly string[]): Promise<string> {
 		await cache?.put(
 			key,
 			new Response(text, {
-				headers: {
-					"content-type": "application/json",
-					"cache-control": `public, max-age=${CATALOGUE_TTL_SECONDS}`,
-				},
+				headers: CATALOGUE_HEADERS,
 			}),
 		);
 	} catch {
@@ -208,10 +211,7 @@ export async function catalogueResponse(request: Request): Promise<Response> {
 	const keep = requestedProviders(new URL(request.url).pathname);
 	try {
 		return new Response(await loadCatalogue(keep), {
-			headers: {
-				"content-type": "application/json",
-				"cache-control": `public, max-age=${CATALOGUE_TTL_SECONDS}`,
-			},
+			headers: CATALOGUE_HEADERS,
 		});
 	} catch {
 		return new Response("{}", {

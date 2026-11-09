@@ -20,7 +20,16 @@ import {
 import { describeTools } from "../../mcp/describe";
 import type { McpLink, McpProbeResponse, PublicLink } from "../../session/models";
 import { SETUP_MENU_ID, payloadId } from "../ids";
-import { guarded, responder, textInput, textModal, MAX_SELECT_OPTIONS, type InteractionRequest } from "./interaction";
+import {
+	claim,
+	responder,
+	backRow,
+	removeRow,
+	textInput,
+	textModal,
+	MAX_SELECT_OPTIONS,
+	type InteractionRequest,
+} from "./interaction";
 
 /** Discord rejects a link button whose URL is longer than this. */
 const MAX_LINK_URL = 512;
@@ -83,37 +92,30 @@ export async function mcpComponent(
 	// The exact "test all" id is checked before the `mcp:test:<id>` family, whose
 	// prefix it shares.
 	if (customId === TEST_ALL_ID) {
-		await guarded(request, "update", () => testAllLinks(request));
-		return true;
+		return await claim(request, "update", () => testAllLinks(request));
 	}
 	const test = TEST_ID.read(customId);
 	if (test !== undefined) {
-		await guarded(request, "update", () => testOneLink(request, test));
-		return true;
+		return await claim(request, "update", () => testOneLink(request, test));
 	}
 	const authCheck = AUTH_CHECK_ID.read(customId);
 	if (authCheck !== undefined) {
-		await guarded(request, "update", () => checkAuth(request, authCheck));
-		return true;
+		return await claim(request, "update", () => checkAuth(request, authCheck));
 	}
 	const removeConfirm = REMOVE_CONFIRM_ID.read(customId);
 	if (removeConfirm !== undefined) {
-		await guarded(request, "update", () => removeLink(request, removeConfirm));
-		return true;
+		return await claim(request, "update", () => removeLink(request, removeConfirm));
 	}
 	switch (customId) {
 		case SCREEN_ADD_ID:
 			await responder(request).modal(mcpAddModal());
 			return true;
 		case SCREEN_TEST_ID:
-			await guarded(request, "update", () => testAllLinks(request));
-			return true;
+			return await claim(request, "update", () => testAllLinks(request));
 		case SCREEN_REMOVE_ID:
-			await guarded(request, "update", () => promptRemoveMcp(request));
-			return true;
+			return await claim(request, "update", () => promptRemoveMcp(request));
 		case REMOVE_SELECT_ID:
-			await guarded(request, "update", () => confirmRemoveLink(request, values[0] ?? ""));
-			return true;
+			return await claim(request, "update", () => confirmRemoveLink(request, values[0] ?? ""));
 	}
 	return false;
 }
@@ -124,8 +126,7 @@ export async function mcpModal(
 	values: Record<string, string>,
 ): Promise<boolean> {
 	if (customId !== ADD_MODAL_ID) return false;
-	await guarded(request, "reply", () => addLink(request, values));
-	return true;
+	return await claim(request, "reply", () => addLink(request, values));
 }
 
 async function promptRemoveMcp(request: InteractionRequest): Promise<void> {
@@ -133,9 +134,7 @@ async function promptRemoveMcp(request: InteractionRequest): Promise<void> {
 	await answer.defer();
 	const links = await request.session.links();
 	if (!links.length) {
-		await answer.reply("No MCP servers are linked to this server.", [
-			buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]),
-		]);
+		await answer.reply("No MCP servers are linked to this server.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	await answer.reply("Which MCP server should I remove?", [
@@ -150,16 +149,11 @@ async function confirmRemoveLink(request: InteractionRequest, linkId: string): P
 	await answer.defer();
 	const link = (await request.session.links()).find((candidate) => candidate.id === linkId);
 	if (!link) {
-		await answer.reply("That MCP server is no longer linked.", [
-			buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]),
-		]);
+		await answer.reply("That MCP server is no longer linked.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	await answer.reply(`Remove **${link.name}**? Eryn will stop using its tools immediately.`, [
-		buttonRow([
-			actionButton("Remove", REMOVE_CONFIRM_ID.of(linkId), 4),
-			actionButton("Cancel", MCP_SCREEN_ID, 2),
-		]),
+		removeRow(request, REMOVE_CONFIRM_ID.of(linkId), MCP_SCREEN_ID),
 	]);
 }
 
@@ -170,10 +164,13 @@ async function removeLink(request: InteractionRequest, linkId: string): Promise<
 	try {
 		await request.session.removeLink(linkId);
 	} catch (error) {
-		await answer.update(`Could not remove **${link?.name ?? linkId}**: ${describeError(error)}`, [backRow()]);
+		await answer.update(
+			`Could not remove **${link?.name ?? linkId}**: ${describeError(error)}`,
+			[backRow(request, MCP_SCREEN_ID)],
+		);
 		return;
 	}
-	await answer.update(`Removed **${link?.name ?? linkId}**.`, [backRow()]);
+	await answer.update(`Removed **${link?.name ?? linkId}**.`, [backRow(request, MCP_SCREEN_ID)]);
 }
 
 /** Probe a URL, then either link it or start the sign-in it asked for. */
@@ -181,14 +178,14 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 	const answer = responder(request);
 	const url = values.url?.trim();
 	if (!url) {
-		await answer.reply("An MCP server URL is required.", [backRow()]);
+		await answer.reply("An MCP server URL is required.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	let endpoint: URL;
 	try {
 		endpoint = new URL(url);
 	} catch {
-		await answer.reply("That URL is not valid.", [backRow()]);
+		await answer.reply("That URL is not valid.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	const name = values.name?.trim() || endpoint.host;
@@ -206,7 +203,7 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 			return;
 		}
 		await answer.reply(`Could not connect to **${name}**: ${probe.error ?? "the server did not answer"}`, [
-			backRow(),
+			backRow(request, MCP_SCREEN_ID),
 		]);
 		return;
 	}
@@ -230,6 +227,15 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 			]),
 		],
 	);
+}
+
+/** The buttons kept on a message while a browser sign-in is in progress. */
+function signInRow(attemptId: string, url?: string) {
+	const buttons: DiscordButton[] = [];
+	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
+	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3));
+	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
+	return buttonRow(buttons);
 }
 
 /** Send the admin to the server's sign-in page, or explain why one cannot start. */
@@ -258,17 +264,13 @@ async function startAuth(
 			]
 				.filter(Boolean)
 				.join("\n"),
-			[backRow()],
+			[backRow(request, MCP_SCREEN_ID)],
 		);
 		return;
 	}
 	// The callback lands on the Worker, not this interaction, so the start link
 	// carries a signed attempt rather than the server's own URL.
 	const signInUrl = started.startUrl ?? started.url;
-	const buttons: DiscordButton[] = [];
-	if (signInUrl.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", signInUrl));
-	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(started.attemptId), 3));
-	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
 	await answer.reply(
 		[
 			`**${name}** needs you to sign in before Eryn can use it.`,
@@ -276,7 +278,7 @@ async function startAuth(
 			"",
 			"Open the link, approve the access, then press **I've finished**.",
 		].join("\n"),
-		[buttonRow(buttons)],
+		[signInRow(started.attemptId, signInUrl)],
 	);
 }
 
@@ -299,29 +301,27 @@ async function checkAuth(request: InteractionRequest, attemptId: string): Promis
 						actionButton("Test", TEST_ID.of(status.link.id), 2),
 						actionButton("Back to servers", MCP_SCREEN_ID, 2),
 					])
-				: backRow(),
+				: backRow(request, MCP_SCREEN_ID),
 		]);
 		return;
 	}
 	if (status.status === "failed") {
 		await answer.update(
 			`The sign-in did not complete: ${status.message ?? "the server gave no reason"}. Link the server again to retry.`,
-			[backRow()],
+			[backRow(request, MCP_SCREEN_ID)],
 		);
 		return;
 	}
 	if (status.status === "missing") {
-		await answer.update("That sign-in is no longer available. Link the server again to retry.", [backRow()]);
+		await answer.update("That sign-in is no longer available. Link the server again to retry.", [
+			backRow(request, MCP_SCREEN_ID),
+		]);
 		return;
 	}
 
 	// Still pending: keep the sign-in reachable, because replacing the message
 	// would otherwise take the link away with it.
 	const url = await request.session.mcpAuthUrl(attemptId).catch(() => undefined);
-	const buttons: DiscordButton[] = [];
-	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
-	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3));
-	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
 	await answer.update(
 		[
 			url
@@ -329,7 +329,7 @@ async function checkAuth(request: InteractionRequest, attemptId: string): Promis
 				: "Still waiting for the sign-in, but its link could not be reloaded. Go **Back** and link the server again if the browser page is gone.",
 			...(url && url.length > MAX_LINK_URL ? ["", url] : []),
 		].join("\n"),
-		[buttonRow(buttons)],
+		[signInRow(attemptId, url)],
 	);
 }
 
@@ -339,7 +339,7 @@ async function testAllLinks(request: InteractionRequest): Promise<void> {
 	await answer.defer();
 	const links = await request.session.links();
 	if (!links.length) {
-		await answer.reply("No MCP servers are linked to this server.", [backRow()]);
+		await answer.reply("No MCP servers are linked to this server.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	const results: string[] = [];
@@ -359,7 +359,7 @@ async function testOneLink(request: InteractionRequest, linkId: string): Promise
 	const link = (await request.session.links()).find((candidate) => candidate.id === linkId);
 	const name = link?.name ?? "That MCP server";
 	if (!link) {
-		await answer.update(`**${name}** is no longer linked.`, [backRow()]);
+		await answer.update(`**${name}** is no longer linked.`, [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	await answer.update(`**${name}** — ${await describeLinkTest(request, link)}`, [
@@ -380,11 +380,6 @@ async function describeLinkTest(request: InteractionRequest, link: PublicLink): 
 	} catch (error) {
 		return clamp(`failed: ${describeError(error)}`, 240);
 	}
-}
-
-/** A single Back button, for the end of a sub-flow. */
-function backRow() {
-	return buttonRow([actionButton("Back", MCP_SCREEN_ID, 2)]);
 }
 
 /** Keep a message inside Discord's limit rather than letting the send fail. */

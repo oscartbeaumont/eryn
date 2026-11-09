@@ -12,6 +12,7 @@ import { Schema } from "effect";
 import { isValidModel, log } from "../config";
 import type { DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
+import { json } from "../http";
 import { describeTools } from "../mcp/describe";
 import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "../mcp/links";
 import { AUTH_TTL_MS } from "../mcp/paths";
@@ -50,10 +51,6 @@ export interface RouteContext {
 	reconcileModel(config: HostConfig): Promise<HostConfig>;
 }
 
-export function json(body: unknown, status = 200): Response {
-	return Response.json(body, { status });
-}
-
 /** The secrets a link carries are the bearer and, for OAuth, the refresh pair. */
 function publicLink(link: McpLink): PublicLink {
 	const { token: _token, oauth: _oauth, ...rest } = link;
@@ -83,6 +80,7 @@ interface Route {
 
 const internalFailure = (error: unknown) => json({ error: describeError(error) }, 500);
 const badGateway = (error: unknown) => json({ error: describeError(error) }, 502);
+const probeFailure = (error: unknown) => json({ ok: false, tools: [], error: describeError(error) }, 502);
 
 /** A route whose body names the guild, so it must match this object. */
 function route<S extends Schema.ConstraintDecoder<unknown>>(
@@ -258,7 +256,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		[ROUTES.linkProbe]: route(
 			McpProbeRequestSchema,
 			async (body) => json(await probeServer({ url: body.url, ...(body.token ? { token: body.token } : {}) })),
-			(error) => json({ ok: false, tools: [], error: describeError(error) }, 502),
+			probeFailure,
 		),
 
 		/** Test a link that is already stored, refreshing its token first. */
@@ -269,7 +267,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 				if (!link) return json({ ok: false, tools: [], error: "That MCP server is no longer linked." }, 404);
 				return json(await testLink(await refreshLink(store, link)));
 			},
-			(error) => json({ ok: false, tools: [], error: describeError(error) }, 502),
+			probeFailure,
 		),
 
 		/** Start a sign-in: discover, register, and return the URL to open. */

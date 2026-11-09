@@ -9,52 +9,28 @@
 
 import { Option, Schema } from "effect";
 
-import type { IntegrationMethodOption, ModelOption, ProviderField } from "./models";
+import {
+	HostProviderFieldSchema,
+	type HostProviderField,
+	type IntegrationMethodOption,
+	type ModelOption,
+	type ProviderField,
+} from "./models";
 
 /**
- * One field of a provider's sign-in form, as the host describes it.
+ * One way a provider can be connected, as far as this deployment can use it.
  *
  * Only the kinds a Discord modal can render are recognised. The union is
  * decoded rather than trusted, and a flow with any other field is reported as
  * unavailable instead of being offered and then failing.
  */
-const HostFieldSchema = Schema.Struct({
-	key: Schema.String,
-	type: Schema.String,
-	title: Schema.optional(Schema.String),
-	description: Schema.optional(Schema.String),
-	placeholder: Schema.optional(Schema.String),
-	required: Schema.optional(Schema.Boolean),
-	default: Schema.optional(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
-	options: Schema.optional(
-		Schema.Array(
-			Schema.Struct({
-				value: Schema.String,
-				label: Schema.String,
-				description: Schema.optional(Schema.String),
-			}),
-		),
-	),
-	when: Schema.optional(
-		Schema.Array(
-			Schema.Struct({
-				key: Schema.String,
-				op: Schema.Literals(["eq", "neq"]),
-				value: Schema.Union([Schema.String, Schema.Number, Schema.Boolean]),
-			}),
-		),
-	),
-});
-type HostField = typeof HostFieldSchema.Type;
-
-/** One way a provider can be connected, as far as this deployment can use it. */
 const HostMethodSchema = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("key"), label: Schema.optional(Schema.String) }),
 	Schema.Struct({
 		type: Schema.Literal("oauth"),
 		id: Schema.String,
 		label: Schema.String,
-		form: Schema.optional(Schema.Array(HostFieldSchema)),
+		form: Schema.optional(Schema.Array(HostProviderFieldSchema)),
 	}),
 	Schema.Struct({ type: Schema.Literal("env"), names: Schema.Array(Schema.String) }),
 	Schema.Struct({ type: Schema.Literal("command"), id: Schema.String, label: Schema.String }),
@@ -62,8 +38,23 @@ const HostMethodSchema = Schema.Union([
 ]);
 type HostMethod = typeof HostMethodSchema.Type;
 
+/** The field kinds a Discord modal can render, or `undefined` for the rest. */
+function renderableType(type: string): ProviderField["type"] | undefined {
+	switch (type) {
+		case "string":
+		case "number":
+		case "integer":
+		case "boolean":
+			return type;
+		default:
+			return undefined;
+	}
+}
+
 /** Project one form field, or `undefined` when a modal cannot render its kind. */
-function describeField(field: HostField): ProviderField | undefined {
+function describeField(field: HostProviderField): ProviderField | undefined {
+	const type = renderableType(field.type);
+	if (!type) return undefined;
 	const common = {
 		key: field.key,
 		...(field.title ? { title: field.title } : {}),
@@ -71,22 +62,16 @@ function describeField(field: HostField): ProviderField | undefined {
 		...(field.required ? { required: true } : {}),
 		...(field.when ? { when: field.when } : {}),
 	};
-	switch (field.type) {
-		case "string":
-			return {
-				...common,
-				type: "string",
-				...(field.placeholder ? { placeholder: field.placeholder } : {}),
-				...(typeof field.default === "string" ? { default: field.default } : {}),
-				...(field.options ? { options: field.options } : {}),
-			};
-		case "number":
-		case "integer":
-		case "boolean":
-			return { ...common, type: field.type, ...(field.default === undefined ? {} : { default: field.default }) };
-		default:
-			return undefined;
+	if (type !== "string") {
+		return { ...common, type, ...(field.default === undefined ? {} : { default: field.default }) };
 	}
+	return {
+		...common,
+		type,
+		...(field.placeholder ? { placeholder: field.placeholder } : {}),
+		...(typeof field.default === "string" ? { default: field.default } : {}),
+		...(field.options ? { options: field.options } : {}),
+	};
 }
 
 /**

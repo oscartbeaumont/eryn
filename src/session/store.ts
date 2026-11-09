@@ -27,27 +27,7 @@ import {
 	type ProviderConnection,
 } from "./models";
 
-/** The Durable Object storage layout, one method per concern. */
-export interface GuildStoreShape {
-	settings(): Promise<GuildSettings>;
-	putSettings(settings: GuildSettings): Promise<void>;
-	providers(): Promise<ProviderConnection[]>;
-	putProvider(connection: ProviderConnection): Promise<void>;
-	removeProvider(integrationID: string): Promise<void>;
-	links(): Promise<McpLink[]>;
-	getLink(id: string): Promise<McpLink | undefined>;
-	putLink(link: McpLink): Promise<void>;
-	removeLink(id: string): Promise<void>;
-	authAttempts(): Promise<PendingMcpAuth[]>;
-	getAuthAttempt(id: string): Promise<PendingMcpAuth | undefined>;
-	putAuthAttempt(attempt: PendingMcpAuth): Promise<void>;
-	removeAuthAttempt(id: string): Promise<void>;
-	putPendingOAuth(pending: PendingOAuth): Promise<void>;
-	pendingOAuth(): Promise<PendingOAuth | undefined>;
-	clearPendingOAuth(): Promise<void>;
-}
-
-class GuildStoreImpl implements GuildStoreShape {
+class GuildStoreImpl {
 	constructor(
 		private readonly storage: DurableObjectStorage,
 		private readonly secret: string | undefined,
@@ -78,12 +58,25 @@ class GuildStoreImpl implements GuildStoreShape {
 		return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(value));
 	}
 
-	private async sealedList<S extends Schema.ConstraintDecoder<unknown>>(prefix: string, schema: S): Promise<S["Type"][]> {
+	/**
+	 * Read every sealed entry under a prefix, mapping its key and value.
+	 *
+	 * A listing already carries the sealed values, so a mapper that has to act
+	 * on a record's key — such as deleting a legacy link — needs no second read.
+	 */
+	private async readSealed<T>(
+		prefix: string,
+		read: (key: string, sealed: Sealed) => Promise<T | undefined>,
+	): Promise<T[]> {
 		const entries = await this.storage.list<Sealed>({ prefix });
-		const values = await Promise.all([...entries].map(([, sealed]) => this.open(sealed, schema)));
-		const found: S["Type"][] = [];
+		const values = await Promise.all([...entries].map(([key, sealed]) => read(key, sealed)));
+		const found: T[] = [];
 		for (const value of values) if (value !== undefined) found.push(value);
 		return found;
+	}
+
+	private async sealedList<S extends Schema.ConstraintDecoder<unknown>>(prefix: string, schema: S): Promise<S["Type"][]> {
+		return await this.readSealed(prefix, (_key, sealed) => this.open(sealed, schema));
 	}
 
 	private async sealedGet<S extends Schema.ConstraintDecoder<unknown>>(
@@ -123,25 +116,22 @@ class GuildStoreImpl implements GuildStoreShape {
 	 * longer hosts. Such a link names an endpoint that does not exist, so it is
 	 * deleted rather than carried forward.
 	 */
-	private async readLink(key: string): Promise<McpLink | undefined> {
-		const link = await this.sealedGet(key, McpLinkSchema);
+	private async readLink(key: string, sealed: Sealed): Promise<McpLink | undefined> {
+		const link = await this.open(sealed, McpLinkSchema);
 		if (link?.kind !== "eryn") return link;
 		await this.storage.delete(key);
 		return undefined;
 	}
 
 	async links(): Promise<McpLink[]> {
-		const entries = await this.storage.list<Sealed>({ prefix: KEYS.link });
-		const links: McpLink[] = [];
-		for (const [key] of entries) {
-			const link = await this.readLink(key);
-			if (link) links.push(link);
-		}
+		const links = await this.readSealed(KEYS.link, (key, sealed) => this.readLink(key, sealed));
 		return links.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
 	async getLink(id: string): Promise<McpLink | undefined> {
-		return await this.readLink(KEYS.link + id);
+		const key = KEYS.link + id;
+		const sealed = await this.storage.get<Sealed>(key);
+		return sealed ? await this.readLink(key, sealed) : undefined;
 	}
 
 	async putLink(link: McpLink): Promise<void> {
@@ -183,6 +173,9 @@ class GuildStoreImpl implements GuildStoreShape {
 }
 
 /** Build the guild's durable state over a Durable Object's storage. */
-export function guildStore(storage: DurableObjectStorage, secret: string | undefined): GuildStoreShape {
+export function guildStore(storage: DurableObjectStorage, secret: string | undefined) {
 	return new GuildStoreImpl(storage, secret);
 }
+
+/** The guild's durable state, as the routes and the object see it. */
+export type GuildStoreShape = ReturnType<typeof guildStore>;

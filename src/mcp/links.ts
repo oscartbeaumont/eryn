@@ -36,6 +36,11 @@ export interface LinkStore {
 const REFRESH_SKEW_MS = 60_000;
 const DEFAULT_TOKEN_TTL_SECONDS = 3_600;
 
+/** When a token pair obtained now should be considered expired. */
+function expiresAt(tokens: McpTokens): number {
+	return Date.now() + (tokens.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS) * 1_000;
+}
+
 /** The redirect URI this deployment registers with an external authorization server. */
 export function mcpRedirectUri(env: Env): string {
 	return `${publicOrigin(env)}${MCP_CALLBACK_PATH}`;
@@ -173,7 +178,7 @@ export async function finishAuthorization(
 			clientId: pending.clientId,
 			...(pending.clientSecret ? { clientSecret: pending.clientSecret } : {}),
 			tokenEndpoint: pending.tokenEndpoint,
-			expiresAt: Date.now() + (tokens.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS) * 1_000,
+			expiresAt: expiresAt(tokens),
 			...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
 			...(scope ? { scope } : {}),
 			...(pending.resource ? { resource: pending.resource } : {}),
@@ -235,7 +240,7 @@ async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink
 			oauth: {
 				...oauth,
 				refreshToken: tokens.refreshToken ?? oauth.refreshToken,
-				expiresAt: Date.now() + (tokens.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS) * 1_000,
+				expiresAt: expiresAt(tokens),
 				...(tokens.scope ? { scope: tokens.scope } : {}),
 			},
 		};

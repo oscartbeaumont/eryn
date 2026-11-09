@@ -59,6 +59,20 @@ type RemoteMcpServer = {
 	oauth: false;
 };
 
+/** POST one internal body to the bot gateway, throwing when it refuses. */
+async function postToGateway(env: Env, path: string, body: Record<string, unknown>): Promise<void> {
+	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
+	const response = await stub.fetch(
+		`https://bot.internal${path}`,
+		withDeploy(env, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		}),
+	);
+	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
+}
+
 /** Add or remove the bot gateway's marker for a subscribed conversation. */
 async function setSubscription(
 	env: Env,
@@ -67,16 +81,7 @@ async function setSubscription(
 	id: string,
 	subscribed: boolean,
 ): Promise<void> {
-	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
-	const response = await stub.fetch(
-		"https://bot.internal/subscription",
-		withDeploy(env, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ guildId, kind, id, subscribed }),
-		}),
-	);
-	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
+	await postToGateway(env, "/subscription", { guildId, kind, id, subscribed });
 }
 
 /** Add or remove the bot gateway's watch for a message that may grow a thread. */
@@ -92,16 +97,7 @@ async function setMessageSubscription(
 	},
 	subscribed: boolean,
 ): Promise<void> {
-	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
-	const response = await stub.fetch(
-		"https://bot.internal/message-watch",
-		withDeploy(env, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ guildId, ...watch, subscribed }),
-		}),
-	);
-	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
+	await postToGateway(env, "/message-watch", { guildId, ...watch, subscribed });
 }
 
 function mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {

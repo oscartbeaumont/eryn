@@ -57,17 +57,23 @@ export class SessionClient {
 		return this.env.BOT_SESSION.get(this.env.BOT_SESSION.idFromName(this.guildId));
 	}
 
+	/**
+	 * Send one internal request, scoped to this guild.
+	 *
+	 * A route that names its guild rejects a body that names another, so the id
+	 * is added here rather than repeated in every method body.
+	 */
 	private async call<S extends Schema.ConstraintDecoder<unknown>>(
 		path: string,
 		schema: S,
-		body: unknown,
+		body: Record<string, unknown> = {},
 	): Promise<S["Type"]> {
 		const response = await this.stub().fetch(
 			`https://bot.internal${path}`,
 			withDeploy(this.env, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify(body),
+				body: JSON.stringify({ ...body, guildId: this.guildId }),
 			}),
 		);
 		const payload = (await response.json().catch(() => undefined)) as unknown;
@@ -82,45 +88,44 @@ export class SessionClient {
 	}
 
 	config(): Promise<GuildStatus> {
-		return this.call(ROUTES.config, GuildStatusSchema, { guildId: this.guildId });
+		return this.call(ROUTES.config, GuildStatusSchema);
 	}
 
 	providers(): Promise<IntegrationOption[]> {
-		return this.call(ROUTES.providers, ProviderListSchema, { guildId: this.guildId }).then((parsed) => [...parsed.integrations]);
+		return this.call(ROUTES.providers, ProviderListSchema).then((parsed) => [...parsed.integrations]);
 	}
 
 	models(): Promise<ModelOption[]> {
-		return this.call(ROUTES.models, ModelListSchema, { guildId: this.guildId }).then((parsed) => [...parsed.models]);
+		return this.call(ROUTES.models, ModelListSchema).then((parsed) => [...parsed.models]);
 	}
 
 	providerConnect(request: Omit<ProviderConnectRequest, "guildId">): Promise<ProviderConnectResponse> {
-		return this.call(ROUTES.providerConnect, ProviderConnectResponseSchema, { ...request, guildId: this.guildId });
+		return this.call(ROUTES.providerConnect, ProviderConnectResponseSchema, request);
 	}
 
 	async disconnectProvider(integrationID: string): Promise<void> {
-		await this.call(ROUTES.disconnect, Schema.Unknown, { guildId: this.guildId, integrationID });
+		await this.call(ROUTES.disconnect, Schema.Unknown, { integrationID });
 	}
 
 	async setModel(model: string): Promise<void> {
-		await this.call(ROUTES.model, Schema.Unknown, { guildId: this.guildId, model });
+		await this.call(ROUTES.model, Schema.Unknown, { model });
 	}
 
 	links(): Promise<PublicLink[]> {
-		return this.call(ROUTES.links, LinkListSchema, { guildId: this.guildId }).then((parsed) => [...parsed.links]);
+		return this.call(ROUTES.links, LinkListSchema).then((parsed) => [...parsed.links]);
 	}
 
 	async addLink(link: McpLink): Promise<void> {
-		await this.call(ROUTES.linkAdd, Schema.Unknown, { guildId: this.guildId, link });
+		await this.call(ROUTES.linkAdd, Schema.Unknown, { link });
 	}
 
 	async removeLink(linkId: string): Promise<void> {
-		await this.call(ROUTES.linkRemove, Schema.Unknown, { guildId: this.guildId, linkId });
+		await this.call(ROUTES.linkRemove, Schema.Unknown, { linkId });
 	}
 
 	/** Ask a URL what it offers before it is linked, and how it wants to be authed. */
 	probe(url: string, token?: string): Promise<McpProbeResponse> {
 		return this.call(ROUTES.linkProbe, McpProbeResponseSchema, {
-			guildId: this.guildId,
 			url,
 			...(token ? { token } : {}),
 		});
@@ -128,7 +133,7 @@ export class SessionClient {
 
 	/** Test a link that is already stored, refreshing its token if needed. */
 	testLink(linkId: string): Promise<McpProbeResponse> {
-		return this.call(ROUTES.linkTest, McpProbeResponseSchema, { guildId: this.guildId, linkId });
+		return this.call(ROUTES.linkTest, McpProbeResponseSchema, { linkId });
 	}
 
 	/** Start an OAuth sign-in with an external MCP server. */
@@ -140,25 +145,21 @@ export class SessionClient {
 		resourceMetadataUrl?: string;
 		scope?: string;
 	}): Promise<McpAuthStartResponse> {
-		return this.call(ROUTES.linkOauthStart, McpAuthStartResponseSchema, { guildId: this.guildId, ...input });
+		return this.call(ROUTES.linkOauthStart, McpAuthStartResponseSchema, input);
 	}
 
 	mcpAuthStatus(attemptId: string): Promise<McpAuthStatus> {
-		return this.call(ROUTES.linkOauthStatus, McpAuthStatusSchema, { guildId: this.guildId, attemptId });
+		return this.call(ROUTES.linkOauthStatus, McpAuthStatusSchema, { attemptId });
 	}
 
 	async mcpAuthUrl(attemptId: string): Promise<string> {
-		const response = await this.call(ROUTES.linkOauthUrl, McpAuthUrlResponseSchema, {
-			guildId: this.guildId,
-			attemptId,
-		});
+		const response = await this.call(ROUTES.linkOauthUrl, McpAuthUrlResponseSchema, { attemptId });
 		return response.url;
 	}
 
 	/** Finish a sign-in from the browser callback or the "I've finished" button. */
 	mcpAuthComplete(attemptId: string, code?: string, error?: string): Promise<McpAuthCompleteResponse> {
 		return this.call(ROUTES.linkOauthComplete, McpAuthCompleteResponseSchema, {
-			guildId: this.guildId,
 			attemptId,
 			...(code ? { code } : {}),
 			...(error ? { error } : {}),
@@ -166,7 +167,7 @@ export class SessionClient {
 	}
 
 	async prompt(body: Omit<PromptRequest, "guildId">): Promise<void> {
-		await this.call(ROUTES.prompt, Schema.Unknown, { ...body, guildId: this.guildId });
+		await this.call(ROUTES.prompt, Schema.Unknown, body);
 	}
 
 	/**
@@ -176,7 +177,7 @@ export class SessionClient {
 	 * when no message follows the rename.
 	 */
 	async updateContext(threadId: string, discord: DiscordContext): Promise<void> {
-		await this.call(ROUTES.context, Schema.Unknown, { guildId: this.guildId, threadId, discord });
+		await this.call(ROUTES.context, Schema.Unknown, { threadId, discord });
 	}
 
 	async interrupt(threadId: string, gone: boolean): Promise<boolean> {

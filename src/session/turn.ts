@@ -14,7 +14,6 @@ export interface Turn {
 	/** Set once the host reports that work has begun. */
 	started: boolean;
 	done: boolean;
-	interrupted: boolean;
 	/** Set when the conversation was deleted, so there is nowhere to reply. */
 	gone: boolean;
 	error?: string;
@@ -32,7 +31,6 @@ export function createTurn(threadId: string): Turn {
 		createdAt: Date.now(),
 		started: false,
 		done: false,
-		interrupted: false,
 		gone: false,
 		resolve,
 		completed,
@@ -77,7 +75,6 @@ export function applyTurnEvent(turn: Turn, type: string, data: Record<string, un
 			turn.error ??= errorDetail(data.error);
 			return;
 		case "session.execution.interrupted":
-			turn.interrupted = true;
 			complete(turn);
 			return;
 		case "session.execution.succeeded":

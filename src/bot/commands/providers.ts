@@ -19,10 +19,13 @@ import {
 	type DiscordModal,
 } from "../../discord/components";
 import type { IntegrationOption } from "../../session/models";
-import { SETUP_CLOSE_ID, SETUP_MENU_ID, payloadId, scopedId } from "../ids";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID, payloadId } from "../ids";
 import {
-	guarded,
+	claim,
 	responder,
+	backRow,
+	removeRow,
+	retryRow,
 	textInput,
 	textModal,
 	MAX_SELECT_OPTIONS,
@@ -48,6 +51,9 @@ const REMOVE_CONFIRM_ID = payloadId("setup:provider:remove:confirm:");
 
 /** Discord rejects a link button whose URL is longer than this. */
 const MAX_LINK_URL = 512;
+
+/** The reply when the server's status cannot be read at all. */
+const PROVIDERS_UNAVAILABLE = "Eryn could not read this server's providers right now. Try again in a moment.";
 
 /**
  * Providers worth showing first.
@@ -102,7 +108,7 @@ function providerOptions(providers: readonly IntegrationOption[]): DiscordSelect
 }
 
 function providerSearchModal(request: InteractionRequest): DiscordModal {
-	return textModal(scopedId(SEARCH_ID, request.dmGuildId), "Search providers", [
+	return textModal(request.id(SEARCH_ID), "Search providers", [
 		textInput({
 			custom_id: "query",
 			label: "Provider name or id",
@@ -125,25 +131,33 @@ function codeModal(request: InteractionRequest, integrationID: string): DiscordM
 	]);
 }
 
+/** The buttons kept on a message while a browser sign-in is in progress. */
+function signInRow(request: InteractionRequest, integrationID: string, attemptID: string, url?: string) {
+	const buttons: DiscordButton[] = [];
+	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
+	buttons.push(
+		actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${attemptID}`, request.dmGuildId), 3),
+	);
+	buttons.push(actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
+	return buttonRow(buttons);
+}
+
 /** The provider list, with a select for the full set and buttons for the common ones. */
 export async function providerScreen(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	// Connections come from the status, not the catalogue: a connected provider
 	// still has to be removable when the catalogue is empty or slow.
 	const status = await request.session.config().catch(() => undefined);
 	if (!status) {
-		await answer.reply("Eryn could not read this server's providers right now. Try again in a moment.", [
-			buttonRow([actionButton("Back", id(SETUP_MENU_ID), 2)]),
-		]);
+		await answer.reply(PROVIDERS_UNAVAILABLE, [backRow(request, SETUP_MENU_ID)]);
 		return;
 	}
 	const connected = status.providers.map((provider) => provider.integrationID);
 	const navigation: DiscordButton[] = [];
 	// Provider removal is guild-wide, so the install DM still sends admins here.
 	if (connected.length && !request.dmGuildId) navigation.push(actionButton("Remove provider", REMOVE_PROVIDER_ID, 4));
-	navigation.push(actionButton("Back", id(SETUP_MENU_ID), 2));
+	navigation.push(actionButton("Back", request.id(SETUP_MENU_ID), 2));
 
 	const providers = connectable(await request.session.providers());
 	if (!providers.length) {
@@ -173,8 +187,13 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 		);
 	}
 	components.push(
-		selectRow({ type: 3, custom_id: id(SELECT_ID), placeholder: "Browse all providers", options: providerOptions(providers) }),
-		buttonRow([actionButton("Search all providers", id(SEARCH_ID), 2)]),
+		selectRow({
+			type: 3,
+			custom_id: request.id(SELECT_ID),
+			placeholder: "Browse all providers",
+			options: providerOptions(providers),
+		}),
+		buttonRow([actionButton("Search all providers", request.id(SEARCH_ID), 2)]),
 	);
 	components.push(buttonRow(navigation));
 
@@ -202,7 +221,6 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 async function searchProviders(request: InteractionRequest, query: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const needle = query.trim().toLowerCase();
 	const goQuery = /^(oc|opencode)\s*go$/.test(needle) || needle === "ocgo";
 	const matches = connectable(await request.session.providers())
@@ -219,7 +237,7 @@ async function searchProviders(request: InteractionRequest, query: string): Prom
 			`No provider matches “${query.trim()}”. Try a shorter search.${
 				goQuery ? " OpenCode Go is included with OpenCode Console, not a separate provider." : ""
 			}`,
-			[buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)])],
+			[backRow(request, PROVIDER_SCREEN_ID)],
 		);
 		return;
 	}
@@ -232,11 +250,11 @@ async function searchProviders(request: InteractionRequest, query: string): Prom
 		[
 			selectRow({
 				type: 3,
-				custom_id: id(SELECT_ID),
+				custom_id: request.id(SELECT_ID),
 				placeholder: "Pick a provider",
 				options: providerOptions(matches),
 			}),
-			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		],
 	);
 }
@@ -250,14 +268,14 @@ async function pickProviderMethod(request: InteractionRequest, integrationID: st
 	const provider = providers.find((candidate) => candidate.id === integrationID);
 	if (!provider) {
 		await answer.reply("That provider is no longer available.", [
-			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
 	const methods = provider.methods.filter((method) => method.supported);
 	if (!methods.length) {
 		await answer.reply(`**${provider.name}** has no way to be connected in this deployment.`, [
-			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -288,7 +306,7 @@ async function pickProviderMethod(request: InteractionRequest, integrationID: st
 					),
 				),
 			),
-			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		],
 	);
 }
@@ -313,7 +331,7 @@ async function startProviderMethod(
 	});
 	if (result.error || !result.url || !result.attemptID) {
 		await answer.update(`Could not start the sign-in: ${result.error ?? "the provider returned no URL"}`, [
-			buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -323,7 +341,7 @@ async function startProviderMethod(
 		const buttons: DiscordButton[] = [];
 		if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Open sign-in page", result.url));
 		buttons.push(actionButton("Enter code", CODE_ID.of(integrationID, request.dmGuildId), 1));
-		buttons.push(actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2));
+		buttons.push(actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
 		await answer.update(
 			[
 				`**${integrationID}** needs a code to finish signing in.`,
@@ -336,10 +354,6 @@ async function startProviderMethod(
 		);
 		return;
 	}
-	const buttons: DiscordButton[] = [];
-	if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", result.url));
-	buttons.push(actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${result.attemptID}`, request.dmGuildId), 3));
-	buttons.push(actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2));
 	await answer.update(
 		[
 			`**${integrationID}** signs in through your browser.`,
@@ -348,7 +362,7 @@ async function startProviderMethod(
 			"",
 			"Finish the flow, then confirm here.",
 		].join("\n"),
-		[buttonRow(buttons)],
+		[signInRow(request, integrationID, result.attemptID, result.url)],
 	);
 }
 
@@ -365,18 +379,13 @@ async function checkSignIn(request: InteractionRequest, integrationID: string, a
 	if (status === "failed" || status === "expired") {
 		await answer.update(
 			`The sign-in did not complete: ${result.status?.message ?? "the provider gave no reason"}. Start it again from **Providers**.`,
-			[buttonRow([actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2)])],
+			[backRow(request, PROVIDER_SCREEN_ID)],
 		);
 		return;
 	}
 	await answer.update(
 		`Sign-in status: **${status}**${result.status?.message ? ` — ${result.status.message}` : ""}. Finish the flow, then press **I've finished** again.`,
-		[
-			buttonRow([
-				actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${attemptID}`, request.dmGuildId), 3),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
-		],
+		[signInRow(request, integrationID, attemptID)],
 	);
 }
 
@@ -387,10 +396,7 @@ async function completeSignIn(request: InteractionRequest, integrationID: string
 	const trimmed = code.trim();
 	if (!trimmed) {
 		await answer.reply("No code was provided.", [
-			buttonRow([
-				actionButton("Try again", CODE_ID.of(integrationID, request.dmGuildId), 2),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, CODE_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -401,10 +407,7 @@ async function completeSignIn(request: InteractionRequest, integrationID: string
 	});
 	if (result.error) {
 		await answer.reply(`Could not finish **${integrationID}**: ${result.error}`, [
-			buttonRow([
-				actionButton("Try again", CODE_ID.of(integrationID, request.dmGuildId), 2),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, CODE_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -416,10 +419,7 @@ async function connectWithKey(request: InteractionRequest, integrationID: string
 	const answer = responder(request);
 	if (!key) {
 		await answer.reply("No key was provided.", [
-			buttonRow([
-				actionButton("Try again", KEY_ID.of(integrationID, request.dmGuildId), 2),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, KEY_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -429,10 +429,7 @@ async function connectWithKey(request: InteractionRequest, integrationID: string
 	const result = await request.session.providerConnect({ integrationID, key, methodID: "key" });
 	if (result.error) {
 		await answer.reply(`Could not connect **${integrationID}**: ${result.error}`, [
-			buttonRow([
-				actionButton("Try again", KEY_ID.of(integrationID, request.dmGuildId), 2),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, KEY_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -442,18 +439,15 @@ async function connectWithKey(request: InteractionRequest, integrationID: string
 async function promptRemoveProvider(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const status = await request.session.config().catch(() => undefined);
 	if (!status) {
-		await answer.reply("Eryn could not read this server's providers right now. Try again in a moment.", [
-			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
-		]);
+		await answer.reply(PROVIDERS_UNAVAILABLE, [backRow(request, PROVIDER_SCREEN_ID)]);
 		return;
 	}
 	const providers = status.providers;
 	if (!providers.length) {
 		await answer.reply("No providers are connected to this server.", [
-			buttonRow([actionButton("Back", id(PROVIDER_SCREEN_ID), 2)]),
+			backRow(request, PROVIDER_SCREEN_ID),
 		]);
 		return;
 	}
@@ -472,7 +466,7 @@ async function promptRemoveProvider(request: InteractionRequest): Promise<void> 
 				description: provider.method.slice(0, 100),
 			})),
 		}),
-		buttonRow([actionButton("Cancel", id(PROVIDER_SCREEN_ID), 2)]),
+		buttonRow([actionButton("Cancel", request.id(PROVIDER_SCREEN_ID), 2)]),
 	]);
 }
 
@@ -484,10 +478,7 @@ async function confirmProviderRemoval(request: InteractionRequest, integrationID
 		return;
 	}
 	await answer.reply(`Remove **${integrationID}**? Eryn will stop using it immediately.`, [
-		buttonRow([
-			actionButton("Remove", REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), 4),
-			actionButton("Cancel", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-		]),
+		removeRow(request, REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID),
 	]);
 }
 
@@ -498,10 +489,7 @@ async function removeProvider(request: InteractionRequest, integrationID: string
 		await request.session.disconnectProvider(integrationID);
 	} catch (error) {
 		await answer.reply(`Could not remove **${integrationID}**: ${describeError(error)}`, [
-			buttonRow([
-				actionButton("Try again", REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), 4),
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-			]),
+			retryRow(request, REMOVE_CONFIRM_ID.of(integrationID, request.dmGuildId), PROVIDER_SCREEN_ID, 4),
 		]);
 		return;
 	}
@@ -513,8 +501,8 @@ async function removeProvider(request: InteractionRequest, integrationID: string
 		].join("\n"),
 		[
 			buttonRow([
-				actionButton("Back", scopedId(PROVIDER_SCREEN_ID, request.dmGuildId), 2),
-				actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2),
+				actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2),
+				actionButton("Close", request.id(SETUP_CLOSE_ID), 2),
 			]),
 		],
 	);
@@ -527,55 +515,44 @@ export async function providerComponent(
 ): Promise<boolean> {
 	const pick = PICK_ID.read(customId);
 	if (pick !== undefined) {
-		await guarded(request, "update", () => pickProviderMethod(request, pick));
-		return true;
+		return await claim(request, "update", () => pickProviderMethod(request, pick));
 	}
 	const removeConfirm = REMOVE_CONFIRM_ID.read(customId);
 	if (removeConfirm !== undefined) {
-		await guarded(request, "update", () => removeProvider(request, removeConfirm));
-		return true;
+		return await claim(request, "update", () => removeProvider(request, removeConfirm));
 	}
 	const method = METHOD_ID.read(customId);
 	if (method !== undefined) {
 		const [integrationID, methodID] = method.split(":");
-		await guarded(request, "update", () => startProviderMethod(request, integrationID ?? "", methodID ?? "key"));
-		return true;
+		return await claim(request, "update", () => startProviderMethod(request, integrationID ?? "", methodID ?? "key"));
 	}
 	const oauthCheck = OAUTH_CHECK_ID.read(customId);
 	if (oauthCheck !== undefined) {
 		const [integrationID, attemptID] = oauthCheck.split(":");
-		await guarded(request, "update", () => checkSignIn(request, integrationID ?? "", attemptID ?? ""));
-		return true;
+		return await claim(request, "update", () => checkSignIn(request, integrationID ?? "", attemptID ?? ""));
 	}
 	// The "Enter code" button carries the same id as the modal it opens, so the
 	// same codec addresses both the click and the submit.
 	const code = CODE_ID.read(customId);
 	if (code !== undefined) {
-		await guarded(request, "reply", () => responder(request).modal(codeModal(request, code)));
-		return true;
+		return await claim(request, "reply", () => responder(request).modal(codeModal(request, code)));
 	}
 	// Likewise the "Try again" button on a failed key connection.
 	const key = KEY_ID.read(customId);
 	if (key !== undefined) {
-		await guarded(request, "reply", () => responder(request).modal(keyModal(request, key)));
-		return true;
+		return await claim(request, "reply", () => responder(request).modal(keyModal(request, key)));
 	}
 	switch (customId) {
 		case PROVIDER_SCREEN_ID:
-			await guarded(request, "update", () => providerScreen(request));
-			return true;
+			return await claim(request, "update", () => providerScreen(request));
 		case SELECT_ID:
-			await guarded(request, "update", () => pickProviderMethod(request, values[0] ?? ""));
-			return true;
+			return await claim(request, "update", () => pickProviderMethod(request, values[0] ?? ""));
 		case SEARCH_ID:
-			await guarded(request, "reply", () => responder(request).modal(providerSearchModal(request)));
-			return true;
+			return await claim(request, "reply", () => responder(request).modal(providerSearchModal(request)));
 		case REMOVE_PROVIDER_ID:
-			await guarded(request, "update", () => promptRemoveProvider(request));
-			return true;
+			return await claim(request, "update", () => promptRemoveProvider(request));
 		case REMOVE_SELECT_ID:
-			await guarded(request, "update", () => confirmProviderRemoval(request, values[0] ?? ""));
-			return true;
+			return await claim(request, "update", () => confirmProviderRemoval(request, values[0] ?? ""));
 	}
 	return false;
 }
@@ -587,17 +564,14 @@ export async function providerModal(
 ): Promise<boolean> {
 	const key = KEY_ID.read(customId);
 	if (key !== undefined) {
-		await guarded(request, "reply", () => connectWithKey(request, key, values.key?.trim() ?? ""));
-		return true;
+		return await claim(request, "reply", () => connectWithKey(request, key, values.key?.trim() ?? ""));
 	}
 	const code = CODE_ID.read(customId);
 	if (code !== undefined) {
-		await guarded(request, "reply", () => completeSignIn(request, code, values.code ?? ""));
-		return true;
+		return await claim(request, "reply", () => completeSignIn(request, code, values.code ?? ""));
 	}
 	if (customId === SEARCH_ID) {
-		await guarded(request, "reply", () => searchProviders(request, values.query ?? ""));
-		return true;
+		return await claim(request, "reply", () => searchProviders(request, values.query ?? ""));
 	}
 	return false;
 }

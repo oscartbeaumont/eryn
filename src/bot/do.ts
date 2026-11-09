@@ -21,8 +21,9 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { CLIENT_ID, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
-import { deployChanged } from "../deploy";
+import { deployRestart } from "../deploy";
 import { describeError } from "../errors";
+import { json } from "../http";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
 import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
 import {
@@ -88,10 +89,6 @@ interface RenameNotice {
 	readonly kind: "thread" | "channel";
 	readonly name: string;
 	readonly previousName?: string;
-}
-
-function json(body: unknown, status = 200): Response {
-	return Response.json(body, { status });
 }
 
 export class BotGatewayV5 extends DurableObject<Env> {
@@ -192,9 +189,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	 * this request has finished.
 	 */
 	private async ensureCurrentVersion(request: Request): Promise<void> {
-		if (!(await deployChanged(this.ctx.storage, request, this.env))) return;
-		this.restartPending = true;
-		await this.ctx.storage.setAlarm(Date.now() + 1_000);
+		if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -439,28 +434,16 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		// A message inside a thread we own goes straight to that thread's session.
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) return;
-			const text = stripMention(message.content ?? "", this.botUserId, roleId);
-			if (!text && attachmentsOf(message).length === 0) return;
-			if (isStopText(text)) {
-				await this.stopThread(guildId, channel.id);
-				return;
-			}
-			if (!(await this.guildReady(guildId))) {
-				await this.requireSetup(channel.id);
-				return;
-			}
 			// The agent is told about the channel the request came from, which for a
 			// message inside a thread is the thread's parent — the thread is where
 			// the reply goes, the parent is the room it belongs to.
 			const parent = channel.parent_id ? await this.lookups.channel(channel.parent_id) : undefined;
-			await this.forward(
+			await this.handleOwned(
 				guildId,
-				channel.id,
-				threadName(text),
-				text,
+				channel,
 				message,
+				roleId,
 				await this.lookups.context(guildId, parent, channel),
-				await this.takeRenameNotice(channel.id),
 			);
 			return;
 		}
@@ -468,24 +451,12 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		// A message in a subscribed channel is a request too, even without a
 		// mention; the reply lands in the channel rather than in a new thread.
 		if (await this.ownsChannel(channel.id)) {
-			const text = stripMention(message.content ?? "", this.botUserId, roleId);
-			if (!text && attachmentsOf(message).length === 0) return;
-			if (isStopText(text)) {
-				await this.stopThread(guildId, channel.id);
-				return;
-			}
-			if (!(await this.guildReady(guildId))) {
-				await this.requireSetup(channel.id);
-				return;
-			}
-			await this.forward(
+			await this.handleOwned(
 				guildId,
-				channel.id,
-				threadName(text),
-				text,
+				channel,
 				message,
+				roleId,
 				await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel"),
-				await this.takeRenameNotice(channel.id),
 			);
 			return;
 		}
@@ -584,7 +555,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
 		const ctx: CommandContext = {
 			env: this.env,
-			log: (message) => log(message),
+			log,
 			applicationId: this.botUserId ?? CLIENT_ID,
 			session: (guildId) => this.session(guildId),
 			ownsConversation: async (channelId) =>
@@ -612,8 +583,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (guildId === undefined || !ref?.name || previous === undefined || previous === ref.name) return;
 
 		const isThread = THREAD_TYPES.has(ref.type);
-		const owned = isThread ? await this.ownsThread(ref.id) : await this.ownsChannel(ref.id);
-		if (!owned) return;
+		if (!(await this.owns(ref))) return;
 
 		const kind = isThread ? "thread" : "channel";
 		await this.ctx.storage.put<RenameNotice>(RENAME_PREFIX + ref.id, {
@@ -638,8 +608,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		const guildId = channel.guild_id;
 		if (guildId === undefined) return;
 		const isThread = THREAD_TYPES.has(channel.type ?? 0);
-		const owned = isThread ? await this.ownsThread(channel.id) : await this.ownsChannel(channel.id);
-		if (!owned) return;
+		if (!(await this.owns(channel))) return;
 		await this.stopThread(guildId, channel.id, true).catch((error) =>
 			log(`could not stop the turn in deleted ${isThread ? "thread" : "channel"} ${channel.id}: ${describeError(error)}`),
 		);
@@ -671,6 +640,39 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				"This server has not connected a provider yet, so I cannot run inference here. A server admin can connect one from `/eryn setup` with **Connect provider**.",
 			)
 			.catch(() => undefined);
+	}
+
+	/**
+	 * Handle a message in a conversation Eryn owns, whether a thread or a
+	 * subscribed channel. Both forms read the request, honour stop words, and
+	 * forward it to the same session.
+	 */
+	private async handleOwned(
+		guildId: string,
+		channel: DiscordChannel,
+		message: DiscordMessage,
+		roleId: string | undefined,
+		context: DiscordContext,
+	): Promise<void> {
+		const text = stripMention(message.content ?? "", this.botUserId, roleId);
+		if (!text && attachmentsOf(message).length === 0) return;
+		if (isStopText(text)) {
+			await this.stopThread(guildId, channel.id);
+			return;
+		}
+		if (!(await this.guildReady(guildId))) {
+			await this.requireSetup(channel.id);
+			return;
+		}
+		await this.forward(
+			guildId,
+			channel.id,
+			threadName(text),
+			text,
+			message,
+			context,
+			await this.takeRenameNotice(channel.id),
+		);
 	}
 
 	/**
@@ -736,6 +738,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		await this.session(guildId).interrupt(threadId, gone).catch((error) => {
 			log(`could not interrupt ${threadId}: ${describeError(error)}`);
 		});
+	}
+
+	/** Whether Eryn owns this conversation, which may be a thread or a channel. */
+	private owns(channel: { id: string; type?: number }): Promise<boolean> {
+		return THREAD_TYPES.has(channel.type ?? 0) ? this.ownsThread(channel.id) : this.ownsChannel(channel.id);
 	}
 
 	private ownsThread(threadId: string): Promise<boolean> {

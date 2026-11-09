@@ -17,7 +17,7 @@
  */
 
 import { describeError } from "../errors";
-import type { DiscordUser } from "./api";
+import type { DiscordAttachment, DiscordUser } from "./api";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/";
 /**
@@ -68,14 +68,7 @@ export interface DiscordMessage {
 	mention_roles?: string[];
 	thread?: { id: string; parent_id?: string };
 	/** Files the message carries. The URL is signed by Discord and short-lived. */
-	attachments?: {
-		id?: string;
-		filename?: string;
-		content_type?: string;
-		size?: number;
-		url?: string;
-		proxy_url?: string;
-	}[];
+	attachments?: DiscordAttachment[];
 }
 
 /**
@@ -156,6 +149,62 @@ export interface DiscordSocketHandlers {
 	/** A channel or thread was deleted. Threads are channels, so both arrive here. */
 	onChannelDelete(channel: DiscordChannel): void;
 }
+
+type DiscordEventHandler = (data: unknown, handlers: DiscordSocketHandlers) => void;
+
+/** A dispatch payload that is a channel, or `undefined` when it is not one. */
+function asChannel(data: unknown): DiscordChannel | undefined {
+	const channel = data as DiscordChannel | undefined;
+	return channel && typeof channel.id === "string" ? channel : undefined;
+}
+
+function dispatchChannelUpdate(data: unknown, handlers: DiscordSocketHandlers): void {
+	const channel = asChannel(data);
+	if (channel) handlers.onChannelUpdate(channel);
+}
+
+function dispatchChannelDelete(data: unknown, handlers: DiscordSocketHandlers): void {
+	const channel = asChannel(data);
+	if (channel) handlers.onChannelDelete(channel);
+}
+
+/**
+ * The gateway dispatch events this bot acts on, keyed by Discord's event name.
+ * Each handler ignores a payload that is not the shape its event promises.
+ */
+const DISCORD_EVENTS: Record<string, DiscordEventHandler> = {
+	MESSAGE_CREATE(data, handlers) {
+		const message = data as DiscordMessage | undefined;
+		if (message && typeof message.id === "string" && typeof message.channel_id === "string") {
+			handlers.onMessage(message);
+		}
+	},
+	INTERACTION_CREATE(data, handlers) {
+		const interaction = data as DiscordInteraction | undefined;
+		if (interaction && typeof interaction.id === "string" && typeof interaction.token === "string") {
+			handlers.onInteraction(interaction);
+		}
+	},
+	GUILD_CREATE(data, handlers) {
+		const guild = data as DiscordGuildCreate | undefined;
+		if (guild && typeof guild.id === "string") handlers.onGuild(guild);
+	},
+	GUILD_UPDATE(data, handlers) {
+		const guild = data as DiscordGuildCreate | undefined;
+		if (guild && typeof guild.id === "string") handlers.onGuildUpdate(guild);
+	},
+	THREAD_CREATE(data, handlers) {
+		const thread = data as DiscordChannel | undefined;
+		if (thread && typeof thread.id === "string") handlers.onThreadCreate(thread);
+	},
+	// A thread is a channel: Discord names a thread update THREAD_UPDATE, but
+	// other updates can arrive as CHANNEL_UPDATE, so both go to the same place.
+	CHANNEL_UPDATE: dispatchChannelUpdate,
+	THREAD_UPDATE: dispatchChannelUpdate,
+	// A thread's own deletion can arrive as THREAD_DELETE or CHANNEL_DELETE.
+	CHANNEL_DELETE: dispatchChannelDelete,
+	THREAD_DELETE: dispatchChannelDelete,
+};
 
 interface GatewayPayload {
 	op: number;
@@ -374,43 +423,8 @@ class DiscordShard {
 				} else if (payload.t === "RESUMED") {
 					this.attempt = 0;
 					this.log(this.say("gateway resumed"));
-				} else if (payload.t === "MESSAGE_CREATE") {
-					const message = payload.d as DiscordMessage | undefined;
-					if (message && typeof message.id === "string" && typeof message.channel_id === "string") {
-						this.handlers.onMessage(message);
-					}
-				} else if (payload.t === "INTERACTION_CREATE") {
-					const interaction = payload.d as DiscordInteraction | undefined;
-					if (interaction && typeof interaction.id === "string" && typeof interaction.token === "string") {
-						this.handlers.onInteraction(interaction);
-					}
-				} else if (payload.t === "GUILD_CREATE") {
-					const guild = payload.d as DiscordGuildCreate | undefined;
-					if (guild && typeof guild.id === "string") this.handlers.onGuild(guild);
-				} else if (payload.t === "GUILD_UPDATE") {
-					const guild = payload.d as DiscordGuildCreate | undefined;
-					if (guild && typeof guild.id === "string") this.handlers.onGuildUpdate(guild);
-				} else if (payload.t === "THREAD_CREATE") {
-					const thread = payload.d as DiscordChannel | undefined;
-					if (thread && typeof thread.id === "string") {
-						this.handlers.onThreadCreate(thread);
-					}
-				} else if (payload.t === "CHANNEL_UPDATE" || payload.t === "THREAD_UPDATE") {
-					// Discord names a thread update THREAD_UPDATE, but a thread is a
-					// channel and other updates can arrive as CHANNEL_UPDATE. Both are
-					// passed on; the update is idempotent.
-					const channel = payload.d as DiscordChannel | undefined;
-					if (channel && typeof channel.id === "string") {
-						this.handlers.onChannelUpdate(channel);
-					}
-				} else if (payload.t === "THREAD_DELETE" || payload.t === "CHANNEL_DELETE") {
-					// A thread is a channel: Discord names the thread's own deletion
-					// THREAD_DELETE but can also report it as CHANNEL_DELETE, so both
-					// are passed on and the channel's type decides what to do.
-					const channel = payload.d as DiscordChannel | undefined;
-					if (channel && typeof channel.id === "string") {
-						this.handlers.onChannelDelete(channel);
-					}
+				} else if (payload.t) {
+					DISCORD_EVENTS[payload.t]?.(payload.d, this.handlers);
 				}
 				break;
 			}

@@ -9,9 +9,9 @@
  */
 
 import { actionButton, buttonRow, type DiscordButton } from "../../discord/components";
-import { SETUP_CLOSE_ID, SETUP_MENU_ID, scopedId } from "../ids";
+import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
 import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
-import { guarded, responder, type InteractionRequest } from "./interaction";
+import { claim, responder, closeRow, type InteractionRequest } from "./interaction";
 import { MODEL_SCREEN_ID } from "./models";
 import { PROVIDER_SCREEN_ID } from "./providers";
 
@@ -28,11 +28,13 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	if (publicSource) await answer.deferNew();
 	else await answer.defer();
 
-	const id = (base: string) => scopedId(base, request.dmGuildId);
 	const status = await request.session.config().catch(() => undefined);
 	if (!status) {
 		await answer.reply("Eryn could not read this server's setup right now. Try again in a moment.", [
-			buttonRow([actionButton("Try again", id(SETUP_MENU_ID), 1), actionButton("Close", id(SETUP_CLOSE_ID), 2)]),
+			buttonRow([
+				actionButton("Try again", request.id(SETUP_MENU_ID), 1),
+				actionButton("Close", request.id(SETUP_CLOSE_ID), 2),
+			]),
 		]);
 		return;
 	}
@@ -56,13 +58,13 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	const buttons: DiscordButton[] = [
 		actionButton(
 			status.ready ? "Change provider" : "Connect provider",
-			id(PROVIDER_SCREEN_ID),
+			request.id(PROVIDER_SCREEN_ID),
 			status.ready ? 2 : 1,
 		),
 	];
-	if (status.ready) buttons.push(actionButton("Choose model", id(MODEL_SCREEN_ID), 2));
-	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", id(MCP_SCREEN_ID), 2));
-	buttons.push(actionButton("Close", id(SETUP_CLOSE_ID), 2));
+	if (status.ready) buttons.push(actionButton("Choose model", request.id(MODEL_SCREEN_ID), 2));
+	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2));
+	buttons.push(actionButton("Close", request.id(SETUP_CLOSE_ID), 2));
 	await answer.reply(lines.join("\n"), [buttonRow(buttons)]);
 }
 
@@ -70,11 +72,9 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 export async function setupComponent(request: InteractionRequest, customId: string): Promise<boolean> {
 	switch (customId) {
 		case SETUP_MENU_ID:
-			await guarded(request, "update", () => setupMenu(request));
-			return true;
+			return await claim(request, "update", () => setupMenu(request));
 		case MCP_SCREEN_ID:
-			await guarded(request, "update", () => openMcp(request));
-			return true;
+			return await claim(request, "update", () => openMcp(request));
 		case SETUP_CLOSE_ID:
 			// Closing is best effort: if Discord has already dropped the menu there
 			// is nothing left to delete.
@@ -88,7 +88,7 @@ export async function setupComponent(request: InteractionRequest, customId: stri
 async function openMcp(request: InteractionRequest): Promise<void> {
 	if (request.dmGuildId) {
 		await responder(request).update("Manage MCP servers from the server with `/eryn setup`.", [
-			buttonRow([actionButton("Close", scopedId(SETUP_CLOSE_ID, request.dmGuildId), 2)]),
+			closeRow(request),
 		]);
 		return;
 	}

@@ -19,7 +19,7 @@ import {
 } from "@modelcontextprotocol/client";
 
 import { describeError } from "../errors";
-import { fetchWithRedirects, isSecureUrl } from "../http";
+import { externalFetch, isSecureUrl } from "../http";
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -81,13 +81,7 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		},
 	};
 
-	const fetchFn: FetchLike = async (input, init) => {
-		const url = typeof input === "string" ? new URL(input) : input;
-		return await fetchWithRedirects(url, {
-			...init,
-			signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
-		});
-	};
+	const fetchFn: FetchLike = externalFetch(timeoutMs);
 
 	const transport = new StreamableHTTPClientTransport(endpoint, {
 		authProvider,

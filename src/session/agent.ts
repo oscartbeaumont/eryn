@@ -244,28 +244,6 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * marks it unavailable.
 	 */
 	async models(config: HostConfig): Promise<ModelOption[]> {
-		return this.listModels(config);
-	}
-
-	/**
-	 * The model a turn should use.
-	 *
-	 * The stored choice may name a provider this guild has not connected, in
-	 * which case the turn would produce nothing. `resolveModelChoice` falls back
-	 * to a model that can actually run; the switch is logged because it changes
-	 * what the next turn uses.
-	 */
-	async resolveModel(config: HostConfig): Promise<string> {
-		const provider = config.model.split("/")[0] ?? "";
-		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
-		const model = await resolveModelChoice(config.model, directlyConnected, () =>
-			this.listModels(config).catch(() => [] as ModelOption[]),
-		);
-		if (model !== config.model) log("session", `using ${model} instead of ${config.model}`);
-		return model;
-	}
-
-	private async listModels(config: HostConfig): Promise<ModelOption[]> {
 		const host = await this.hostFor(config);
 		// An empty catalogue is not an answer worth caching: a host built just
 		// after a credential is connected can snapshot the provider registry before
@@ -304,6 +282,24 @@ class GuildAgentImpl implements GuildAgentShape {
 					a.name.localeCompare(b.name),
 			);
 		return this.modelCache;
+	}
+
+	/**
+	 * The model a turn should use.
+	 *
+	 * The stored choice may name a provider this guild has not connected, in
+	 * which case the turn would produce nothing. `resolveModelChoice` falls back
+	 * to a model that can actually run; the switch is logged because it changes
+	 * what the next turn uses.
+	 */
+	async resolveModel(config: HostConfig): Promise<string> {
+		const provider = config.model.split("/")[0] ?? "";
+		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
+		const model = await resolveModelChoice(config.model, directlyConnected, () =>
+			this.models(config).catch(() => [] as ModelOption[]),
+		);
+		if (model !== config.model) log("session", `using ${model} instead of ${config.model}`);
+		return model;
 	}
 
 	/**
@@ -411,64 +407,89 @@ class GuildAgentImpl implements GuildAgentShape {
 	// --- A turn ---------------------------------------------------------------
 
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
-		const turn = this.beginTurn(request.threadId);
+		await this.runTurn(
+			request.threadId,
+			"prompt",
+			async () => {
+				const host = await this.hostFor(config, request.threadId);
+				// The completion signal arrives as an event, so a subscription that
+				// died since the last turn has to be replaced before this one starts.
+				this.startConsuming(host);
+				const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
+				// A rename is not replayed to the agent, and the gateway's copy can
+				// predate it, so re-read the conversation rather than trusting it.
+				const discord = request.discord ? await this.refreshContext(request.discord) : undefined;
+				await this.applyDiscord(host, request.threadId, sessionID, discord);
+				await this.applyModel(host, request.threadId, sessionID, config.model);
+
+				const attached = await fetchAttachmentFiles(request.attachments);
+				const message = renderUserMessage(
+					request.author,
+					request.mentions ?? [],
+					request.text.trim() || "(attached files)",
+				);
+				// The message carries the channel and (when there is one) the thread
+				// it came from. The agent posts its reply with a Discord tool, so
+				// these ids are what tell it where the reply belongs.
+				const conversation = discord ? renderConversation(discord) : undefined;
+				const body = [conversation, request.notice, message].filter(Boolean).join("\n\n");
+				const text =
+					attached.notes.length > 0
+						? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
+						: body;
+				await host.sessions.prompt({
+					sessionID,
+					text,
+					...(attached.files.length > 0 ? { files: attached.files } : {}),
+				});
+				// The assistant's own text is deliberately ignored: the reply is
+				// whatever it posted through discord_send_message.
+			},
+			() => this.interrupt(request.threadId, false).catch(() => undefined),
+		);
+	}
+
+	/**
+	 * Run one turn from typing indicator to failure report.
+	 *
+	 * Both a prompt and a turn adopted from a schedule need the same lifecycle:
+	 * show typing, wait for the completion event, stop a turn that outlives its
+	 * deadline, release the conversation, and report any failure where the turn
+	 * was triggered. `start` does the work that begins the turn.
+	 */
+	private async runTurn(
+		threadId: string,
+		label: string,
+		start: () => Promise<void>,
+		onTimeout: () => Promise<unknown>,
+	): Promise<void> {
+		const turn = this.beginTurn(threadId);
 		let failure: string | undefined;
 
 		let stopTyping: () => void = () => undefined;
 		try {
-			stopTyping = this.startTyping(request.threadId);
-
-			const host = await this.hostFor(config, request.threadId);
-			// The completion signal arrives as an event, so a subscription that
-			// died since the last turn has to be replaced before this one starts.
-			this.startConsuming(host);
-			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
-			// A rename is not replayed to the agent, and the gateway's copy can
-			// predate it, so re-read the conversation rather than trusting it.
-			const discord = request.discord ? await this.refreshContext(request.discord) : undefined;
-			await this.applyDiscord(host, request.threadId, sessionID, discord);
-			await this.applyModel(host, request.threadId, sessionID, config.model);
-
-			const attached = await fetchAttachmentFiles(request.attachments);
-			const message = renderUserMessage(request.author, request.mentions ?? [], request.text.trim() || "(attached files)");
-			// The message carries the channel and (when there is one) the thread
-			// it came from. The agent posts its reply with a Discord tool, so
-			// these ids are what tell it where the reply belongs.
-			const conversation = discord ? renderConversation(discord) : undefined;
-			const body = [conversation, request.notice, message].filter(Boolean).join("\n\n");
-			const text =
-				attached.notes.length > 0
-					? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
-					: body;
-			await host.sessions.prompt({
-				sessionID,
-				text,
-				...(attached.files.length > 0 ? { files: attached.files } : {}),
-			});
-			const finished = await this.wait(turn);
-			if (!finished) {
-				await this.interrupt(request.threadId, false).catch(() => undefined);
+			stopTyping = this.startTyping(threadId);
+			await start();
+			if (!(await this.wait(turn))) {
+				await onTimeout();
 				failure = "The turn timed out before it finished.";
 			}
 			if (turn.error) {
 				failure = turn.error;
-				log("session", `turn in ${request.threadId} failed: ${turn.error}`);
+				log("session", `${label} failed: ${turn.error}`);
 			}
-
-			// The assistant's own text is deliberately ignored: the reply is
-			// whatever it posted through discord_send_message.
 		} catch (error) {
 			failure = describeError(error);
-			log("session", `prompt failed: ${failure}`);
+			log("session", `${label} failed: ${failure}`);
 		} finally {
 			stopTyping();
-			this.endTurn(request.threadId, turn);
-			if (turn.gone) await this.discardThread(request.threadId);
+			this.endTurn(threadId, turn);
+			if (turn.gone) await this.discardThread(threadId);
 		}
 
 		// Report the failure where the turn was triggered, once the run itself
 		// has been released.
-		if (failure && !turn.gone) await this.postFailure(request.threadId, failure);
+		if (failure && !turn.gone) await this.postFailure(threadId, failure);
 	}
 
 	/** Send a turn failure to the conversation that triggered it. */
@@ -533,15 +554,28 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (this.appliedContext.get(threadId) === signature) return;
 		try {
 			const session = await host.sessions.get({ sessionID });
-			await host.sessions.update({
-				sessionID,
-				// Merged, so a context write cannot drop metadata another plugin put there.
-				metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: discord },
-			});
+			await this.saveDiscordContext(host, sessionID, session.metadata, discord);
 			this.appliedContext.set(threadId, signature);
 		} catch (error) {
 			log("session", `could not record the Discord context for ${threadId}: ${describeError(error)}`);
 		}
+	}
+
+	/**
+	 * Write a conversation's Discord context into its session metadata.
+	 *
+	 * Merged, so a context write cannot drop metadata another plugin put there.
+	 */
+	private async saveDiscordContext(
+		host: HostInterface,
+		sessionID: string,
+		metadata: Record<string, unknown> | undefined,
+		discord: DiscordContext,
+	): Promise<void> {
+		await host.sessions.update({
+			sessionID,
+			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord },
+		});
 	}
 
 	/**
@@ -561,11 +595,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			return undefined;
 		});
 		if (!session) return;
-		await host.sessions.update({
-			sessionID,
-			// Merged, so a rename cannot drop metadata another plugin put there.
-			metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: discord },
-		});
+		await this.saveDiscordContext(host, sessionID, session.metadata, discord);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
 		// value cannot make the next prompt skip a needed write.
 		this.appliedContext.delete(threadId);
@@ -758,37 +788,18 @@ class GuildAgentImpl implements GuildAgentShape {
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn) return;
 				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
-					await host.sessions
-						.update({
-							sessionID,
-							metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: context },
-						})
-						.catch((error) =>
-							log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`),
-						);
+					await this.saveDiscordContext(host, sessionID, session.metadata, context).catch((error) =>
+						log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`),
+					);
 				}
 
 				this.remember(threadId, sessionID);
-				const turn = this.beginTurn(threadId);
-				let failure: string | undefined;
-
-				let stopTyping: () => void = () => undefined;
-				try {
-					stopTyping = this.startTyping(threadId);
-					if (!(await this.wait(turn))) {
-						turn.interrupted = true;
-						await host.sessions.interrupt({ sessionID }).catch(() => undefined);
-						failure = "The turn timed out before it finished.";
-					}
-					if (turn.error) {
-						failure = turn.error;
-						log("session", `scheduled turn for ${sessionID} failed: ${turn.error}`);
-					}
-				} finally {
-					stopTyping();
-					this.endTurn(threadId, turn);
-				}
-				if (failure && !turn.gone) await this.postFailure(threadId, failure);
+				await this.runTurn(
+					threadId,
+					`scheduled turn for ${sessionID}`,
+					async () => undefined,
+					() => host.sessions.interrupt({ sessionID }).catch(() => undefined),
+				);
 			} catch (error) {
 				log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
 			} finally {
