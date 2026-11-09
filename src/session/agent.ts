@@ -842,12 +842,12 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	private policyCardText(state: PolicyState): string {
-		const links = state.mcpServers;
-		return [
+		const text = [
 			`🔒 **Permissions here: ${policyTitle(state.effective)}**`,
-			summaryLines(state.effective, links).join(" · "),
+			summaryLines(state.effective, state.mcpServers).join(" · "),
 			"`/eryn policy` to change this.",
 		].join("\n");
+		return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 	}
 
 	// --- Approval cards -------------------------------------------------------

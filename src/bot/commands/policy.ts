@@ -95,7 +95,7 @@ export async function policyMenu(request: InteractionRequest): Promise<void> {
 
 function renderMenu(state: PolicyState, target: Target): string {
 	const own = state.own !== undefined;
-	return [
+	const text = [
 		`**Permissions in ${target.label}**`,
 		`${own ? "This scope overrides its parent." : "This scope inherits from its parent."} Currently: **${policyTitle(state.effective)}**.`,
 		"",
@@ -105,6 +105,7 @@ function renderMenu(state: PolicyState, target: Target): string {
 			.map((preset) => `**${PRESET_LABELS[preset]}**`)
 			.join(" · ")}`,
 	].join("\n");
+	return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 }
 
 function menuRows(request: InteractionRequest, state: PolicyState) {
