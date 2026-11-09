@@ -28,14 +28,14 @@ const FEATURES = [
 
 const COMMANDS = [
 	{
-		command: "@eryn what's the weather",
-		description: "Mention Eryn with a request to start a thread. Reply in the thread to keep going.",
-		permission: "Everyone",
-	},
-	{
 		command: "/eryn setup",
 		description: "Connect a provider, choose a model, and link MCP servers.",
 		permission: "Manage Server",
+	},
+	{
+		command: "@eryn what's the weather",
+		description: "Mention Eryn with a request to start a thread. Reply in the thread to keep going.",
+		permission: "Everyone",
 	},
 	{
 		command: "/eryn stop",
