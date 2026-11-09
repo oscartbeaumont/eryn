@@ -1,6 +1,7 @@
 import type { JSX } from "@solidjs/web";
 
 import { BRAND, installUrl } from "../public";
+import "./styles.css";
 
 const REPOSITORY = "https://github.com/oscartbeaumont/eryn";
 
@@ -237,3 +238,5 @@ export function Landing() {
 		</div>
 	);
 }
+
+export default Landing;

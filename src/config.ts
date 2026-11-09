@@ -5,10 +5,12 @@
  * gateway object and every guild session agree on.
  */
 
+import { DEFAULT_PUBLIC_ORIGIN } from "./public";
+
 /** The default model when a guild does not choose one. */
 export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
-export { CLIENT_ID } from "./public";
+export { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public";
 
 /**
  * The application's Ed25519 public key, which signs every interaction Discord
@@ -21,9 +23,6 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
 
 /** Where Discord posts interactions once the application's endpoint is set. */
 export const INTERACTIONS_PATH = "/interactions";
-
-/** Public origin used in links and OAuth flows when a binding is absent. */
-export const DEFAULT_PUBLIC_ORIGIN = "https://eryn.otbeaumont.me";
 
 /** Prefix on every log line this package emits. */
 export const LOG_PREFIX = "eryn:bot";

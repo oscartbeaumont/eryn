@@ -1,16 +1,18 @@
 /**
  * Eryn's Cloudflare Worker entrypoint.
  *
- * The Worker is the Discord bot and nothing else. It verifies and forwards
- * Discord's HTTP interactions, answers the external MCP sign-in callback and
- * the models.dev catalogue a guild's embedded OpenCode host asks for, exposes
- * the two Durable Objects the bot is made of, and wakes the singleton bot
- * object from `/health` and the cron trigger.
+ * The Worker serves the public site and the Discord bot. It renders `/` through
+ * Solid's SSR handler, verifies and forwards Discord's HTTP interactions,
+ * answers the external MCP sign-in callback and the models.dev catalogue a
+ * guild's embedded OpenCode host asks for, exposes the two Durable Objects the
+ * bot is made of, and wakes the singleton bot object from `/health` and the
+ * cron trigger.
  */
 
 import { env } from "cloudflare:workers";
 import { Result } from "effect";
 import { Hex } from "effect/encoding";
+import solidHandler from "virtual:solid-ssr-handler";
 
 import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
@@ -85,6 +87,11 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	// Brand images and the favicon are static assets; the Worker owns these
 	// paths so it can add the long-lived cache headers.
 	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
+	if (url.pathname === "/" && isRead(request)) {
+		const response = await solidHandler.fetch(request);
+		response.headers.set("cache-control", "public, max-age=300");
+		return response;
+	}
 	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
 	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
 

@@ -1,5 +1,5 @@
 /**
- * Public values shared by the Worker and the prerendered landing page.
+ * Public values shared by the Worker and the server-rendered landing page.
  *
  * The landing page is built outside the Worker, so anything both sides need
  * lives here rather than behind a Worker-only module.
@@ -7,6 +7,9 @@
 
 /** Eryn's public Discord application id (equal to the bot user id). */
 export const CLIENT_ID = "1561290858668494959";
+
+/** The public origin used in absolute links when no binding overrides it. */
+export const DEFAULT_PUBLIC_ORIGIN = "https://eryn.otbeaumont.me";
 
 /**
  * View Audit Log (so the install message can find who added the bot), View

@@ -7,10 +7,9 @@
   },
   "packageManager": "pnpm@10.33.1",
   "scripts": {
-    "dev": "pnpm prerender && cf dev",
-    "prerender": "node scripts/prerender.mjs",
-    "build": "pnpm prerender && cf build",
-    "deploy": "pnpm prerender && cf deploy",
+    "dev": "cf dev",
+    "build": "cf build",
+    "deploy": "cf deploy",
     "typecheck": "cf workers types && tsc && tsc -p tsconfig.landing.json",
     "check": "pnpm typecheck && pnpm build"
   },

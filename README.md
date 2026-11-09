@@ -121,10 +121,10 @@ Only servers an admin has explicitly linked are available to the agent.
 
 ## Technical details
 
-Eryn is a single Cloudflare Worker. The Worker serves the health check, the
-filtered models.dev catalogue used by the embedded agent, and the external MCP
-sign-in callback. The landing page is a prerendered static asset. The bot itself
-is made of two Durable Objects:
+Eryn is a single Cloudflare Worker. The Worker serves the landing page, the
+health check, the filtered models.dev catalogue used by the embedded agent, and
+the external MCP sign-in callback. The bot itself is made of two Durable
+Objects:
 
 | Object | Scope | Responsibility |
 | --- | --- | --- |
@@ -159,11 +159,10 @@ messages, joins, and thread events, where a short gap is harmless.
 ### Source layout
 
 ```
-assets/          public images and the prerendered landing page
-scripts/         the landing-page prerender entry
+assets/          public images served by Cloudflare static assets
 src/
-├─ index.ts       Worker entrypoint: health, MCP callback, bot routes
-├─ landing/       SolidJS + Tailwind landing page, rendered at build time
+├─ index.ts       Worker entrypoint: landing, health, MCP callback, bot routes
+├─ landing/       Solid 2 + Tailwind landing page, server-rendered by the Worker
 ├─ public.ts      brand paths, install URL, and constants shared with the page
 ├─ bot/           bot gateway object, slash commands, install flow
 ├─ session/       per-guild Durable Object, OpenCode agent, storage
@@ -173,20 +172,18 @@ src/
 ```
 
 The landing page is a Solid 2 component tree in `src/landing/`, compiled with
-`@solidjs/vite-plugin` and styled with Tailwind. `scripts/prerender.mjs` loads
-the SSR entry through Vite and writes a complete `assets/index.html`; Cloudflare
-then serves it directly, so the page ships no client-side JavaScript.
-`vite.landing.config.ts` and `tsconfig.landing.json` are separate from the
-Worker's Vite and TypeScript configuration so Solid and Tailwind never
-participate in bundling the Worker.
+`@solidjs/vite-plugin` and styled with Tailwind. Solid start mode supplies
+`virtual:solid-ssr-handler` and the client bundle; `src/index.ts` stays the
+Worker entry so the Durable Objects, scheduled handler, and API routes live
+beside the page. `tsconfig.landing.json` typechecks the JSX separately from the
+Worker's runtime types.
 
 ### Development
 
 ```sh
 pnpm install
 cp .dev.vars.example .dev.vars
-pnpm dev          # prerender the landing page, then cf dev
-pnpm prerender    # regenerate assets/index.html only
+pnpm dev          # cf dev
 pnpm typecheck    # cf workers types && tsc && tsc -p tsconfig.landing.json
 pnpm run check    # typecheck + build
 ```
@@ -212,12 +209,8 @@ static assets; `/brand/*` and `/favicon.ico` are routed through the Worker's
 `ASSETS` binding so they keep the long-lived cache and `nosniff` headers. The
 landing page and the sign-in pages use the favicon, and
 `/brand/banner.webp` is the social preview image. Add or replace images in
-`assets/` and deploy.
-
-`assets/index.html` is generated from `src/landing/` and ignored by git; edit the
-Solid components and Tailwind classes there, then run `pnpm prerender` (or let
-`pnpm dev`, `pnpm build`, and `pnpm deploy` do it). Do not edit the generated
-HTML by hand.
+`assets/` and deploy. The Solid client bundle and Tailwind CSS are emitted into
+the same static asset output by the Cloudflare Vite build.
 
 ### Configuration
 
