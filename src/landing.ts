@@ -106,17 +106,6 @@ code {
 	letter-spacing: -0.02em;
 }
 .brand img { width: 1.65rem; height: 1.65rem; border-radius: 4px; }
-.site-header nav { display: flex; align-items: center; gap: 1.25rem; font-size: 0.9rem; }
-.site-header nav a { color: var(--muted); text-decoration: none; }
-.site-header nav a:hover { color: var(--fg); }
-.nav-cta {
-	padding: 0.45rem 0.8rem;
-	border: 1px solid var(--line);
-	border-radius: 4px;
-	color: var(--fg) !important;
-	background: rgba(255, 255, 255, 0.04);
-}
-.nav-cta:hover { border-color: #3a3a42; }
 
 .hero { padding-block: clamp(4rem, 12vw, 7.5rem) 0; }
 .eyebrow {
@@ -274,11 +263,6 @@ footer {
 @media (max-width: 760px) {
 	.features { grid-template-columns: 1fr; }
 	.command { grid-template-columns: 1fr auto; grid-template-areas: "command permission" "description description"; }
-	.site-header nav { gap: 0.9rem; }
-	.site-header nav a.nav-github { display: none; }
-}
-@media (max-width: 430px) {
-	.site-header nav a:not(.nav-cta) { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
 	html { scroll-behavior: auto; }
@@ -293,7 +277,7 @@ export function landingPage(origin: string): Response {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>eryn — an OpenCode agent for Discord</title>
+<title>eryn — your personal agent in Discord</title>
 <meta name="description" content="Mention @eryn in Discord and it opens a thread, runs the request through an OpenCode agent, and streams the reply.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#08080a">
@@ -302,7 +286,7 @@ export function landingPage(origin: string): Response {
 <link rel="apple-touch-icon" href="${BRAND.appleIcon}">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="eryn">
-<meta property="og:title" content="eryn — an OpenCode agent for Discord">
+<meta property="og:title" content="eryn — your personal agent in Discord">
 <meta property="og:description" content="Mention @eryn in Discord and it opens a thread, runs the request through an OpenCode agent, and streams the reply.">
 <meta property="og:url" content="${origin}/">
 <meta property="og:image" content="${banner}">
@@ -317,26 +301,21 @@ export function landingPage(origin: string): Response {
 <a class="skip" href="#main">Skip to content</a>
 <header class="site-header wrap">
 <a class="brand" href="/"><img src="${BRAND.icon}" alt="" width="26" height="26">eryn</a>
-<nav>
-<a href="#commands">Commands</a>
-<a class="nav-github" href="${REPOSITORY}">GitHub</a>
-<a class="nav-cta" href="${installUrl()}" rel="noreferrer">Add to Discord</a>
-</nav>
 </header>
 <main id="main" class="wrap">
 <section class="hero">
-<p class="eyebrow">An OpenCode agent for Discord</p>
+<p class="eyebrow">Your personal agent in Discord</p>
 <h1 class="wordmark">eryn</h1>
 <p class="lead">Mention <strong>@eryn</strong> in a server and it opens a thread, works the request through an OpenCode agent, and streams the answer back. Reply in the thread and it keeps going in the same session.</p>
 <p class="lead secondary">Every server connects its own inference provider and model. The server pays for its own inference; nothing is billed to the operator.</p>
 <div class="actions">
 <a class="button primary" href="${installUrl()}" rel="noreferrer">Add to Discord</a>
-<a class="button" href="${REPOSITORY}#readme">Read the docs</a>
+<a class="button" href="${REPOSITORY}">GitHub</a>
 </div>
 <ul class="facts">
 <li>Per-server setup</li>
 <li>Bring your own model</li>
-<li>No web dashboard</li>
+<li>Connect with MCPs</li>
 </ul>
 </section>
 <figure class="brand-art">
@@ -388,7 +367,7 @@ export function landingPage(origin: string): Response {
 </main>
 <footer>
 <div class="footer-inner wrap">
-<span>An OpenCode agent for Discord.</span>
+<span>Created by <a href="https://otbeaumont.me">Oscar Beaumont</a></span>
 <nav>
 <a href="/terms">Terms</a>
 <a href="/privacy">Privacy</a>
