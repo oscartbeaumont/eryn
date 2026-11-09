@@ -876,21 +876,29 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
 
 		if (input.decision !== "once") {
-			const effect: PolicyEffect = input.decision === "always" ? "allow" : "block";
-			const links = this.currentConfig?.links ?? (await this.store.links());
-			const key = this.scopeKey(pending.kind === "thread" ? "thread" : "channel", pending.channelId, pending.threadId);
-			const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect, links));
-			await this.store.putPolicy(key, patch);
-			await this.reapplyScope({
-				scope: pending.kind === "thread" ? "thread" : "channel",
-				channelId: pending.channelId,
-				...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
-			});
-			await this.syncCard({
-				scope: pending.kind === "thread" ? "thread" : "channel",
-				channelId: pending.channelId,
-				...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
-			});
+			try {
+				const effect: PolicyEffect = input.decision === "always" ? "allow" : "block";
+				const links = this.currentConfig?.links ?? (await this.store.links());
+				const key = this.scopeKey(
+					pending.kind === "thread" ? "thread" : "channel",
+					pending.channelId,
+					pending.threadId,
+				);
+				const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect, links));
+				await this.store.putPolicy(key, patch);
+				await this.reapplyScope({
+					scope: pending.kind === "thread" ? "thread" : "channel",
+					channelId: pending.channelId,
+					...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
+				});
+				await this.syncCard({
+					scope: pending.kind === "thread" ? "thread" : "channel",
+					channelId: pending.channelId,
+					...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
+				});
+			} catch (error) {
+				return { ok: false, message: `Could not change the policy: ${describeError(error)}` };
+			}
 		}
 
 		try {
@@ -901,6 +909,8 @@ class GuildAgentImpl implements GuildAgentShape {
 				...(input.decision === "block" ? { message: "Blocked by a manager in this conversation." } : {}),
 			});
 		} catch (error) {
+			this.pendingApprovals.delete(pending.requestId);
+			clearTimeout(pending.timer);
 			this.settleApproval(pending, `Could not answer: ${describeError(error)}`);
 			return { ok: false, message: "That request is no longer waiting." };
 		}

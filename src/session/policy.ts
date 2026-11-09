@@ -293,11 +293,14 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	];
 }
 
+const BUILTIN_ACTIONS = new Set(Object.values(GROUP_TOOLS).flat());
+
 /** Where a rule lives, so an approval can write the smallest possible override. */
 export function overrideFor(action: string, effect: PolicyEffect, links: readonly McpLink[]): {
 	tools?: Record<string, PolicyEffect>;
 	mcp?: Record<string, PolicyEffect>;
 } {
+	if (BUILTIN_ACTIONS.has(action)) return { tools: { [action]: effect } };
 	for (const link of links) {
 		if (action.startsWith(mcpActionPrefix(link.name).slice(0, -1))) return { mcp: { [link.name]: effect } };
 	}
