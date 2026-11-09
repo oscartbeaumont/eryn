@@ -5,24 +5,33 @@ import "./styles.css";
 
 const REPOSITORY = "https://github.com/oscartbeaumont/eryn";
 
-const FACTS = ["Per-server setup", "Bring your own model", "Connect with MCPs"];
+const FACTS = [
+	"Agent always online",
+	"Connect your own inference",
+	"Integrate your other apps via MCP",
+];
 
 const FEATURES = [
 	{
 		title: "Threads, not tabs",
-		body: "Each request gets a thread with a persistent session, so follow-ups carry the context instead of starting over.",
+		body: "Each request gets a thread with a persistent session, so follow-ups carry the context instead of starting over. You can ask Eryn to subscribe to a channel if you want.",
 	},
 	{
 		title: "Your models, your bill",
-		body: "Connect your own inference provider and pick the model per server. The server pays for its own inference.",
+		body: "Connect your own inference provider and pick the model per server. Use any provider that OpenCode supports.",
 	},
 	{
 		title: "Tools that do the work",
-		body: "A virtual filesystem, a sandboxed shell, Discord itself, and any external MCP server an admin links.",
+		body: "We give the agent a virtual filesystem and cutback shell for basic uses. Connect external services via MCP.",
 	},
 ];
 
 const COMMANDS = [
+	{
+		command: "@eryn {query}",
+		description: "Mention Eryn with a request to start a thread. Reply in the thread to keep going.",
+		permission: "Everyone",
+	},
 	{
 		command: "/eryn setup",
 		description: "Connect a provider, choose a model, and link MCP servers.",
@@ -149,12 +158,8 @@ export function Landing() {
 					<Container>
 						<Eyebrow>Commands</Eyebrow>
 						<h2 class="mt-4 text-[clamp(2rem,4vw,2.5rem)] font-semibold leading-[1.1] tracking-[-0.04em] text-ink">
-							Everything is a slash command.
+							Start with a mention.
 						</h2>
-						<p class="mt-4 max-w-[640px] text-[16px] leading-[1.6] text-muted">
-							There is no dashboard. Configuration needs Manage Server, while stopping a run and
-							reading help are open to everyone.
-						</p>
 
 						<div class="mt-8 border-t border-line">
 							{COMMANDS.map((entry) => (
@@ -178,7 +183,7 @@ export function Landing() {
 					<Container>
 						<div class="rounded-lg border border-line bg-panel px-6 py-14 text-center sm:px-16">
 							<h2 class="text-[clamp(1.75rem,3.5vw,2.125rem)] font-semibold tracking-[-0.035em] text-ink">
-								Setup happens in Discord.
+								Connect Eryn to your server
 							</h2>
 							<p class="mx-auto mt-4 max-w-[560px] text-[16px] leading-[1.6] text-muted">
 								Add Eryn, run <code class="font-mono text-[0.9em] text-ink">/eryn setup</code>,
