@@ -1,0 +1,31 @@
+// Metadata for Cloudflare's Deploy to Cloudflare button and Workers Builds.
+//
+// The project itself is configured by `cloudflare.config.ts` and built by
+// `cf`, which ignores this file. The deploy button reads a Wrangler
+// configuration to discover the Worker's name, bindings, and required
+// resources; without one it would try to generate that configuration itself.
+{
+	"name": "eryn",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-06",
+	"compatibility_flags": ["nodejs_compat"],
+	"assets": {
+		"directory": "./assets",
+		"run_worker_first": ["/brand/*", "/favicon.ico"]
+	},
+	"durable_objects": {
+		"bindings": [
+			{ "name": "BOT_GATEWAY", "class_name": "BotGatewayV5" },
+			{ "name": "BOT_SESSION", "class_name": "BotSessionV5" }
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v5",
+			"new_sqlite_classes": ["BotGatewayV5", "BotSessionV5"]
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}

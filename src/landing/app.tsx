@@ -1,6 +1,6 @@
 import type { JSX } from "@solidjs/web";
 
-import { BRAND, installUrl } from "../public";
+import { BRAND } from "../public";
 import "./styles.css";
 
 const REPOSITORY = "https://github.com/oscartbeaumont/eryn";
@@ -112,7 +112,7 @@ export function Landing() {
 							Reply in the thread and it keeps going.
 						</p>
 						<div class="flex flex-wrap items-center gap-3">
-							<Action href={installUrl()} primary>
+							<Action href="/install" primary>
 								Add to Discord
 							</Action>
 							<Action href={REPOSITORY}>GitHub</Action>
@@ -190,7 +190,7 @@ export function Landing() {
 								connect a provider, and choose a model. Then mention it anywhere.
 							</p>
 							<div class="mt-7 flex justify-center">
-								<Action href={installUrl()} primary>
+								<Action href="/install" primary>
 									Add to Discord
 								</Action>
 							</div>

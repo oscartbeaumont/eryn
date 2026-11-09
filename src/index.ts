@@ -18,12 +18,13 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log } from "./config";
+import { applicationPublicKey, clientId, INTERACTIONS_PATH, log } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
 import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
+import { installUrl } from "./public";
 import { BotSessionV5 } from "./session/do";
 
 export { BotGatewayV5, BotSessionV5 };
@@ -87,6 +88,11 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	// Brand images and the favicon are static assets; the Worker owns these
 	// paths so it can add the long-lived cache headers.
 	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
+	// The landing page's buttons point here so a self-hosted deployment installs
+	// its own application instead of the hosted one.
+	if (isRead(request) && url.pathname === "/install") {
+		return Response.redirect(installUrl(clientId(env)), 302);
+	}
 	if (url.pathname === "/" && isRead(request)) {
 		const response = await solidHandler.fetch(request);
 		response.headers.set("cache-control", "public, max-age=300");
@@ -169,7 +175,7 @@ function hexBytes(value: string): Uint8Array | undefined {
 /** Whether Discord signed this timestamp and body for this application. */
 async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
 	const signatureBytes = hexBytes(signature);
-	const keyBytes = hexBytes(APPLICATION_PUBLIC_KEY);
+	const keyBytes = hexBytes(applicationPublicKey(env));
 	if (!signatureBytes || !keyBytes || !timestamp) return false;
 	try {
 		const key = await crypto.subtle.importKey("raw", keyBytes, ED25519, false, ["verify"]);

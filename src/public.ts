@@ -20,9 +20,9 @@ const BOT_PERMISSIONS =
 	(1n << 7n) | (1n << 10n) | (1n << 11n) | (1n << 16n) | (1n << 35n) | (1n << 38n);
 
 /** The Discord authorization screen that installs the bot into a server. */
-export function installUrl(): string {
+export function installUrl(clientId: string): string {
 	const params = new URLSearchParams({
-		client_id: CLIENT_ID,
+		client_id: clientId,
 		scope: "bot applications.commands",
 		permissions: BOT_PERMISSIONS.toString(),
 	});

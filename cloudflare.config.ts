@@ -2,6 +2,22 @@ import { bindings, defineConfig, exports, triggers } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 /**
+ * The hosted deployment, and a fork of it.
+ *
+ * `cf deploy` from this repository publishes eryn.otbeaumont.me. A fork made by
+ * the Deploy to Cloudflare button builds in Workers Builds, where that domain
+ * belongs to someone else's account, so those deployments publish on
+ * workers.dev instead. `ERYN_DOMAIN` attaches an explicit domain either way.
+ */
+const SELF_HOSTED = process.env.WORKERS_CI === "1";
+const DOMAIN =
+	process.env.ERYN_DOMAIN !== undefined
+		? process.env.ERYN_DOMAIN.trim() || undefined
+		: SELF_HOSTED
+			? undefined
+			: "eryn.otbeaumont.me";
+
+/**
  * One Worker: the Discord bot.
  *
  * `src/index.ts` is the entrypoint and the bot's two Durable Objects are the
@@ -14,11 +30,13 @@ export default defineConfig({
 		// The embedded OpenCode SDK targets workerd through the `workerd` condition.
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
-		domains: ["eryn.otbeaumont.me"],
-		// A string domain serves production traffic only, and both workers.dev
+		// A string domain serves production traffic only, and version preview
 		// URLs are off: neither `eryn.<subdomain>.workers.dev` nor a
-		// `<version>-eryn.<subdomain>.workers.dev` Preview URL is published.
-		workersDev: false,
+		// `<version>-eryn.<subdomain>.workers.dev` URL is published by the hosted
+		// deployment. A self-hosted fork has no domain of its own, so it gets the
+		// workers.dev route.
+		domains: DOMAIN ? [DOMAIN] : [],
+		workersDev: DOMAIN === undefined,
 		previewUrls: false,
 		// `assets/` is the public directory. Only the brand paths are routed to
 		// the Worker; every other matching file is served directly by Cloudflare.
@@ -55,8 +73,10 @@ export default defineConfig({
 			// Signs external MCP sign-in state and callback links.
 			SESSION_SECRET: bindings.secret(),
 
-			// Public origin used in links and OAuth callbacks.
-			PUBLIC_ORIGIN: bindings.text("https://eryn.otbeaumont.me"),
+			// Public origin used in links and OAuth callbacks. The hosted deploy
+			// knows its own domain; a self-hosted one sets PUBLIC_ORIGIN as a
+			// variable once it knows its URL, so the binding is left unset here.
+			...(DOMAIN ? { PUBLIC_ORIGIN: bindings.text(`https://${DOMAIN}`) } : {}),
 
 			// The deploy this Worker is serving. A deploy does not restart a live
 			// object, and an object's own copy of this binding is pinned to the

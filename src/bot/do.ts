@@ -22,7 +22,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Option, Schema } from "effect";
 
-import { CLIENT_ID, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
+import { clientId, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
 import { deployRestart } from "../deploy";
 import { describeError } from "../errors";
 import { json } from "../http";
@@ -565,7 +565,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
-			applicationId: this.botUserId ?? CLIENT_ID,
+			applicationId: this.botUserId ?? clientId(this.env),
 			session: (guildId) => this.session(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),

@@ -5,12 +5,12 @@
  * gateway object and every guild session agree on.
  */
 
-import { DEFAULT_PUBLIC_ORIGIN } from "./public";
+import { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public";
 
 /** The default model when a guild does not choose one. */
 export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
-export { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public";
+export { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN };
 
 /**
  * The application's Ed25519 public key, which signs every interaction Discord
@@ -20,6 +20,28 @@ export { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public";
  * developer portal, in which case this constant has to change with it.
  */
 export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94f2a21fca6fcba23f87ba980";
+
+/**
+ * A value a deployment can set that the hosted build does not bind.
+ *
+ * A self-hosted Eryn runs its own Discord application, so it supplies its id
+ * and public key; the hosted Worker has no such variables and uses the
+ * constants above.
+ */
+function optional(env: Env, name: string): string | undefined {
+	const value = (env as unknown as Record<string, unknown>)[name];
+	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+/** The Discord application id, which is also the bot's user id. */
+export function clientId(env: Env): string {
+	return optional(env, "DISCORD_CLIENT_ID") ?? CLIENT_ID;
+}
+
+/** The key Discord signs this application's interactions with. */
+export function applicationPublicKey(env: Env): string {
+	return optional(env, "DISCORD_PUBLIC_KEY") ?? APPLICATION_PUBLIC_KEY;
+}
 
 /** Where Discord posts interactions once the application's endpoint is set. */
 export const INTERACTIONS_PATH = "/interactions";

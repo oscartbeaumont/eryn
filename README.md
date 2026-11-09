@@ -4,263 +4,141 @@
 
 # eryn
 
-Eryn is a Discord bot that runs an [OpenCode](https://opencode.ai) agent inside a
-thread. Mention `@eryn` in a server and it opens a thread for the request, works
-through it, and posts the reply. Replies in the thread continue the same
-session. Eryn can also subscribe to a channel, where it answers every message
-in the channel itself and keeps one session for that channel.
+Eryn is a Discord bot that runs an [OpenCode](https://opencode.ai) agent in
+Discord. The hosted instance is at
+[eryn.otbeaumont.me](https://eryn.otbeaumont.me), which covers what it does and
+how to use it. This repository is its source, and the same Worker can be
+deployed into your own Cloudflare account.
 
-The hosted instance is at [eryn.otbeaumont.me](https://eryn.otbeaumont.me).
-There is no web dashboard; setup happens in Discord.
+## How it works
 
-## What it does
+```mermaid
+flowchart LR
+    subgraph Discord
+        member[Server member]
+        gateway[Gateway]
+    end
 
-- Gives each request its own thread, with a persistent session for follow-ups.
-- Can be subscribed to a channel, where it replies to every message in the
-  channel without needing a mention and keeps one session per channel.
-- Lets every Discord server connect its own inference provider and choose its
-  own model. The server pays for its own inference.
-- Gives the agent a virtual filesystem and a sandboxed shell for working through
-  a task.
-- Links external MCP servers, with OAuth or a bearer token, and keeps their
-  tokens fresh.
-- Stops a running turn with `/eryn stop`.
+    worker["Worker<br/>src/index.ts"]
+    bot["BotGatewayV5<br/>one for the bot"]
+    session["BotSessionV5<br/>one per server"]
+    agent[OpenCode agent]
+    provider[Inference provider]
+    mcp[Linked MCP servers]
 
-## Getting started
-
-1. Add Eryn to a server from the hosted instance.
-2. Eryn posts a message in the server with a **Start setup** button, mentioning
-   whoever added it. If that does not arrive, run `/eryn setup` in the server.
-   The greeting is deleted once a provider is connected.
-3. Choose **Connect provider**, connect the provider, then pick a model from the
-   list Eryn shows next. OpenCode Go is available through the **OpenCode
-   Console** connection; it is not a separate provider.
-4. Mention `@eryn` in a channel to start a thread. To make Eryn answer in a
-   channel directly, ask it in a thread to join that channel.
-
-Everything is a slash command under `/eryn`. Configuration requires Manage
-Server; stopping a run and reading help do not.
-
-| Command | Permission | Purpose |
-| --- | --- | --- |
-| `/eryn setup` | Manage Server | Open the setup menu: connect or remove a provider, choose a model, manage MCP servers, and see whether the server is ready |
-| `/eryn policy` | Manage Server | Restrict tools and MCP servers in this channel or thread |
-| `/eryn stop` | Everyone | Stop the run in the current thread; the session stays intact for the next message |
-| `/eryn help` | Everyone | Show the commands and where setup lives |
-
-### Setup menu
-
-`/eryn setup` is the only configuration surface. The flow is a series of
-ephemeral screens that replace each other, so nothing is left behind in the
-channel.
-
-| Screen | What it does |
-| --- | --- |
-| **Providers** | See which providers are connected, pick one from the common list, browse the full catalogue, or search by name. Connect with an API key, a browser sign-in, or a device code. **Remove provider** lives here too. |
-| **Choose model** | Shows the current model, then the models from a connected provider to browse or search, or a `provider/model` reference to type. |
-| **MCP servers** | List, link, test, and remove external MCP servers. See [MCP servers](#mcp-servers). |
-
-Every sub-screen has **Back** to return to the previous step. **Close**, on the
-menu and on finished steps, dismisses the setup message completely.
-
-The install message opens the same menu in the server, so every screen is
-available there. The menu itself is ephemeral, so only the admin who opened it
-sees the configuration, and the install message is deleted once a provider is
-connected.
-
-### Permissions
-
-`/eryn policy`, run in a channel or thread, sets what Eryn may do there. Threads
-inherit their channel, and channels inherit the server default, so an admin can
-lock down one conversation without touching the rest.
-
-Four presets cover the common cases:
-
-| Preset | What it allows |
-| --- | --- |
-| **Full** | Everything Eryn can do |
-| **Chat** | Discord messages and threads; no workspace, shell, or MCP |
-| **Read-only** | Read the workspace and reply; no edits, shell, or MCP |
-| **Locked** | Only reply; every other tool is hidden |
-
-**Customise** overrides one group at a time: workspace reads, workspace edits,
-shell, Discord replies, Discord threads, channel subscriptions, message
-management, or one MCP server. Each group can be **allowed**, **ask**, or
-**blocked**. A blocked tool is not offered to the model at all; an allowed tool
-runs; an asked tool posts a card in the conversation before it runs.
-
-A non-default channel or thread gets one card explaining the restriction, with
-a **Change** button. The card is the only public surface; the editor itself is
-ephemeral, exactly like `/eryn setup`.
-
-Approvals are per conversation:
-
-- **Allow once** runs this call.
-- **Always here** writes an allow rule for this conversation's policy.
-- **Block here** writes a deny rule and rejects the call.
-
-Changing a conversation's policy requires Manage Server. The person who asked,
-or someone with Manage Server, can approve a single call, so a thread's
-requester is not stuck waiting for an admin. Requests expire after 90 seconds
-instead of hanging the turn.
-
-### Agent tools
-
-The model can call these during a turn. They are not typed by users.
-
-| Tool | What it does |
-| --- | --- |
-| `read` | Read a file from the virtual workspace, with line numbers |
-| `write` | Create or overwrite a file in the workspace |
-| `edit` | Replace text in a file; fails if the target is absent or ambiguous |
-| `list` | List files in the workspace |
-| `bash` | Run a sandboxed shell command (`ls`, `cat`, `grep`, `sed`, `find`, `mkdir`, `mv`, `rm`, …) |
-| `discord_list_channels` | List channels and active threads, with ids, names, and parent ids |
-| `discord_list_threads` | List the server's active threads |
-| `discord_read_messages` | Read recent messages from a channel or thread, newest first |
-| `discord_send_message` | Send a message, optionally as a reply; this is how the agent answers |
-| `discord_create_thread` | Create a public thread, optionally attached to a message |
-| `discord_subscribe_message` | Watch a message so Eryn joins the thread created from it |
-| `discord_unsubscribe_message` | Stop watching a message for a new thread |
-| `discord_archive_thread` | Archive or close a thread, optionally locking it |
-| `discord_join_thread` | Join a thread and answer its messages without a mention |
-| `discord_leave_thread` | Leave a thread and stop answering it |
-| `discord_join_channel` | Subscribe Eryn to a channel and answer every message there |
-| `discord_leave_channel` | Unsubscribe Eryn from a channel |
-| `discord_react` | Add or remove an emoji reaction |
-| `discord_edit_message` | Edit a message the bot is allowed to edit |
-| `discord_delete_message` | Delete a message the bot is allowed to delete |
-| `discord_pin_message` | Pin or unpin a message |
-
-## MCP servers
-
-Open the setup menu with `/eryn setup` and choose **MCP servers**. Linking
-accepts an external MCP server's streamable HTTP URL. Eryn tests it before
-saving it: it calls `initialize` and `tools/list`, reports the tools it found,
-and lets you repeat the test later.
-
-If the server asks for OAuth, Eryn handles the sign-in and stores the access and
-refresh tokens with the link. A server that wants a static bearer token can be
-added with one instead. Tokens are refreshed as they expire.
-
-Only servers an admin has explicitly linked are available to the agent.
-
-When linking, **Approvals** chooses where a server's confirmation or form goes:
-`discord` renders it as a card or modal in the conversation, `browser` posts a
-link for the user to complete, `agent` lets the model relay it, and `off`
-cancels requests. For an Executor MCP endpoint these map to `elicitation_mode=native`,
-`browser`, and `model`; the mode is written into the URL when the server is
-linked, because Executor fixes it in the grant.
-
-## Limits
-
-- Local stdio MCP servers are not supported; a Worker has no local process.
-- External MCP servers must use HTTPS. HTTP loopback is allowed for local
-  development.
-- An MCP server that only supports an authorization-code flow without dynamic
-  client registration must be added with a bearer token.
-- The agent's filesystem lives in the guild's Durable Object, not in a real
-  machine.
-- Eryn works in Discord servers only. DMs are ignored.
-
-## Technical details
-
-Eryn is a single Cloudflare Worker. The Worker serves the landing page, the
-health check, the filtered models.dev catalogue used by the embedded agent, and
-the external MCP sign-in callback. The bot itself is made of two Durable
-Objects:
-
-| Object | Scope | Responsibility |
-| --- | --- | --- |
-| `BotGatewayV5` | `bot` | Discord gateway sockets (one per shard), interaction dispatch, threads, install messages |
-| `BotSessionV5` | guild id | OpenCode host, provider credentials, MCP links, virtual filesystem |
-
-The gateway object opens one connection per shard. Discord requires a shard for
-every 2,500 guilds and reports the recommended count from `/gateway/bot`; the
-count is remembered in the object and each shard identifies a few seconds apart
-to stay inside Discord's identify budget. Every shard delivers the same event
-kinds to the same handlers, so nothing else in the bot is shard-aware.
-
-Each guild's credentials and MCP tokens are sealed with AES-GCM under
-`ENCRYPTION_KEY` and stay in that guild's session object.
-
-### Interactions
-
-Discord delivers slash commands, buttons, and modals to the Worker over HTTP,
-not over the gateway socket. `POST /interactions` verifies the Ed25519
-signature against the application's public key (`APPLICATION_PUBLIC_KEY`),
-answers the signed `PING` Discord uses to validate the endpoint, and forwards
-the interaction to `BotGatewayV5`, which acknowledges through the interaction
-callback endpoint and returns `202` straight away. A command therefore works
-even while the gateway socket is reconnecting or the bot object is cold.
-
-The bot object sets the application's interactions endpoint
-(`<PUBLIC_ORIGIN>/interactions`) itself on start. Discord validates that URL
-before switching delivery, so a failed attempt leaves gateway delivery in
-place and is retried on the next start. The gateway is then only needed for
-messages, joins, and thread events, where a short gap is harmless.
-
-### Source layout
-
-```
-assets/          public images served by Cloudflare static assets
-src/
-├─ index.ts       Worker entrypoint: landing, health, MCP callback, bot routes
-├─ landing/       Solid 2 + Tailwind landing page, server-rendered by the Worker
-├─ public.ts      brand paths, install URL, and constants shared with the page
-├─ bot/           bot gateway object, slash commands, install flow
-├─ session/       per-guild Durable Object, OpenCode agent, storage
-├─ discord/       Discord REST and gateway socket
-├─ mcp/           external MCP probe, linking, OAuth
-└─ plugins/       OpenCode plugins, one self-contained directory each
+    member -->|slash commands, buttons| worker
+    worker -->|verified interaction| bot
+    gateway <-->|socket: messages, threads, installs| bot
+    bot --> session
+    session --> agent
+    agent --> provider
+    agent --> mcp
+    session -.-> store[(Virtual filesystem<br/>sealed credentials)]
+    worker -.->|landing page, brand images| member
 ```
 
-The landing page is a Solid 2 component tree in `src/landing/`, compiled with
-`@solidjs/vite-plugin` and styled with Tailwind. Solid start mode supplies
-`virtual:solid-ssr-handler` and the client bundle; `src/index.ts` stays the
-Worker entry so the Durable Objects, scheduled handler, and API routes live
-beside the page. `tsconfig.landing.json` typechecks the JSX separately from the
-Worker's runtime types.
+Eryn is one Cloudflare Worker and two Durable Objects. The Worker answers
+`/interactions`, which Discord signs with the application's Ed25519 key, and
+serves the landing page, the install redirect, the MCP sign-in callback, the
+models.dev catalogue, and the health check.
 
-### Development
+`BotGatewayV5` is the single bot: it holds the Discord gateway socket (one
+connection per shard), registers the global commands, and dispatches
+interactions. It forwards each guild's work to that guild's `BotSessionV5`,
+which owns the OpenCode host, the provider credentials, the MCP links, and a
+virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
+and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
+
+## Self-hosting
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/oscartbeaumont/eryn)
+
+The button forks the repository into your GitHub account, creates the Worker
+and its two Durable Objects, and serves the result on
+`<worker>.<subdomain>.workers.dev`.
+
+### 1. Create the Discord application
+
+In the [Discord developer portal](https://discord.com/developers/applications):
+
+1. Create an application. Under **General Information**, copy the
+   **Application ID** and **Public Key**.
+2. Under **Bot**, reset and copy the token, then enable **Message Content
+   Intent**. Eryn reads messages in threads and subscribed channels, so this
+   privileged intent is required.
+3. Under **Installation**, keep the `bot` and `applications.commands` scopes.
+   The landing page's **Add to Discord** button installs the bot with exactly
+   those scopes once `DISCORD_CLIENT_ID` is set.
+
+### 2. Deploy
+
+Click the button and fill in the secrets it asks for:
+
+| Secret | Value |
+| --- | --- |
+| `DISCORD_BOT_TOKEN` | The bot token from the portal |
+| `DISCORD_CLIENT_ID` | The application id |
+| `DISCORD_PUBLIC_KEY` | The application's public key |
+| `ENCRYPTION_KEY` | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
+| `SESSION_SECRET` | `openssl rand -hex 32` |
+
+### 3. Point Eryn at its own URL
+
+Copy the Worker's `workers.dev` URL, then set it as a `PUBLIC_ORIGIN` variable
+under **Settings → Variables and Secrets** and redeploy. Eryn builds every
+outbound link from it, and sets the application's interactions endpoint to
+`<PUBLIC_ORIGIN>/interactions` itself when the bot object starts.
+
+### 4. Connect the server
+
+Open the Worker's URL, choose **Add to Discord**, and pick a server. Run
+`/eryn setup` in that server and connect an inference provider.
+
+### Deploying without the button
 
 ```sh
 pnpm install
-cp .dev.vars.example .dev.vars
-pnpm dev          # cf dev
-pnpm typecheck    # cf workers types && tsc && tsc -p tsconfig.landing.json
-pnpm run check    # typecheck + build
+pnpm run deploy
 ```
 
-`pnpm run deploy` deploys the Worker. Use `pnpm run deploy` rather than
-`pnpm deploy`, which is pnpm's own deploy command.
+Set `ERYN_DOMAIN=eryn.example.com` to attach a custom domain. A deploy from a
+fork has no domain of its own, so it publishes on `workers.dev`; pass an empty
+`ERYN_DOMAIN=` to do the same from any other deploy.
+
+## Development
+
+```sh
+pnpm install
+cp .dev.vars.example .dev.vars   # fill in the Discord app and generated keys
+pnpm dev                         # cf dev
+pnpm run check                   # typecheck + build
+```
+
+`pnpm run deploy` deploys the Worker; `pnpm deploy` is pnpm's own command and
+does not work here.
 
 A deploy replaces the Worker but not a running Durable Object. The Worker sends
-its deploy id to each object; when an object sees a new id it waits for any
-in-flight work to finish and restarts on the new code. The health endpoint
-reports both ids so you can confirm the deployment has taken effect:
+its deploy id to each object, and an object that sees a new id waits for any
+in-flight work and restarts on the new code. The health endpoint reports both
+ids:
 
 ```sh
 curl -s https://eryn.otbeaumont.me/health
 # {"ok":true,"service":"eryn","deploy":"<worker deploy>","bot":{"connected":true,"shards":{"total":1,"open":1},"deploy":"<bot object deploy>","restart":false}}
 ```
 
-### Brand assets
+`wrangler.jsonc` exists only so Cloudflare's deploy button and Workers Builds
+can see the Worker's name, bindings, and resources. The project itself is
+configured by `cloudflare.config.ts`, and `cf` ignores the Wrangler file.
 
-`assets/` is both the source directory and the Worker's public directory. The
-favicon, square mark, apple touch icon, and wide banner are served as Cloudflare
-static assets; `/brand/*` and `/favicon.ico` are routed through the Worker's
-`ASSETS` binding so they keep the long-lived cache and `nosniff` headers. The
-landing page and the sign-in pages use the favicon, and
-`/brand/banner.webp` is the social preview image. Add or replace images in
-`assets/` and deploy. The Solid client bundle and Tailwind CSS are emitted into
-the same static asset output by the Cloudflare Vite build.
+## Configuration
 
-### Configuration
-
-| Variable | Purpose |
-| --- | --- |
-| `DISCORD_BOT_TOKEN` | Discord bot token for the socket, commands, and messages |
-| `ENCRYPTION_KEY` | Base64url 32-byte key for sealing stored credentials |
-| `SESSION_SECRET` | Signs MCP sign-in state and callback links |
-| `PUBLIC_ORIGIN` | Origin used in links, OAuth callbacks, and the interactions endpoint |
+| Variable | Type | Purpose |
+| --- | --- | --- |
+| `DISCORD_BOT_TOKEN` | secret | Gateway socket, REST calls, and command registration |
+| `DISCORD_CLIENT_ID` | secret | Application id for the install link; defaults to the hosted application |
+| `DISCORD_PUBLIC_KEY` | secret | Verifies interaction signatures; defaults to the hosted application |
+| `ENCRYPTION_KEY` | secret | Base64url 32-byte key for sealing stored credentials |
+| `SESSION_SECRET` | secret | Signs MCP sign-in state and callback links |
+| `PUBLIC_ORIGIN` | var | Origin for links, OAuth callbacks, and the interactions endpoint |
+| `ERYN_DOMAIN` | build | Custom domain attached by `cf deploy`; unset on Workers Builds |
