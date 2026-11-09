@@ -92,19 +92,6 @@ export function Landing() {
 				/>
 				<div aria-hidden="true" class="cover-scrim absolute inset-0" />
 				<div class="relative mx-auto flex min-h-[640px] w-full max-w-[1440px] flex-col px-6 pb-16 pt-6 sm:min-h-[720px] sm:px-10 lg:min-h-[840px] lg:px-16 lg:pb-24 lg:pt-7">
-					<a class="inline-flex w-fit items-center gap-3.5" href="/">
-						<img
-							alt=""
-							class="h-11 w-11 rounded-[10px] border border-white/10 sm:h-12 sm:w-12 sm:rounded-[11px]"
-							height="48"
-							src={BRAND.icon}
-							width="48"
-						/>
-						<span class="text-[26px] font-semibold tracking-[-0.033em] sm:text-[30px]">
-							eryn
-						</span>
-					</a>
-
 					<div class="mt-20 flex max-w-[780px] flex-col gap-6 lg:mt-[174px]">
 						<Eyebrow>Your personal agent in Discord</Eyebrow>
 						<h1 class="text-[clamp(4.5rem,15vw,9.75rem)] font-semibold leading-[0.86] tracking-[-0.055em] text-ink">
