@@ -28,6 +28,8 @@ export { BotGatewayV5, BotSessionV5 };
 /** What the bot object reports about itself, as `/health` passes it on. */
 interface WakeState {
 	connected?: boolean;
+	/** Gateway shard connections: how many exist, and how many are open. */
+	shards?: { total?: number; open?: number };
 	deploy?: string | null;
 	restart?: boolean;
 }
@@ -60,7 +62,12 @@ export async function wake(env: Env): Promise<WakeState | undefined> {
 		state = (await call().catch(() => undefined)) ?? state;
 	}
 	if (!state) return undefined;
-	return { connected: state.connected, deploy: state.deploy ?? null, restart: state.restart === true };
+	return {
+		connected: state.connected,
+		shards: state.shards,
+		deploy: state.deploy ?? null,
+		restart: state.restart === true,
+	};
 }
 
 /**

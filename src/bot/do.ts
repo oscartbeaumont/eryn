@@ -1,11 +1,11 @@
 /**
  * The bot gateway object.
  *
- * It holds exactly one Discord gateway connection (a singleton named "bot"),
- * turns mentions into threads, remembers which threads it owns, dispatches the
- * slash commands, announces fresh installs, and forwards prompts to the
- * per-guild session object. It deliberately hosts no OpenCode work and no
- * database, so it is the only part of the bot that has to stay resident.
+ * It holds the Discord gateway connections (a singleton named "bot"), one per
+ * shard, turns mentions into threads, remembers which threads it owns,
+ * dispatches the slash commands, announces fresh installs, and forwards prompts
+ * to the per-guild session object. It deliberately hosts no OpenCode work and
+ * no database, so it is the only part of the bot that has to stay resident.
  *
  * That residency is unavoidable: Discord needs an outbound gateway WebSocket,
  * and outbound WebSockets cannot hibernate. The per-guild session objects are
@@ -25,7 +25,14 @@ import { deployChanged } from "../deploy";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
 import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
-import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
+import {
+	DiscordSocket,
+	type DiscordChannel,
+	type DiscordGuildCreate,
+	type DiscordInteraction,
+	type DiscordMessage,
+	type DiscordSocketHandlers,
+} from "../discord/socket";
 import type { DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { SessionClient } from "./client";
@@ -90,7 +97,12 @@ function json(body: unknown, status = 200): Response {
 export class BotGatewayV5 extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
-	private readonly socket: DiscordSocket;
+	/**
+	 * The gateway connections, one per shard. Undefined until the shard count is
+	 * known, which takes a Discord call, so it is built during initialization
+	 * rather than in the constructor.
+	 */
+	private gateway: DiscordSocket | undefined;
 	private readonly lookups: DiscordLookups;
 	private readonly keepAliveMs = KEEPALIVE_MS;
 	private readonly locks = new Map<string, Promise<void>>();
@@ -115,25 +127,27 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		this.token = env.DISCORD_BOT_TOKEN?.trim() ?? "";
 		this.rest = discordRest(this.token);
 		this.lookups = new DiscordLookups(this.rest);
-		this.socket = new DiscordSocket(this.token, log, {
-			onMessage: (message) => this.track(() => this.onMessage(message), "message handling failed"),
-			onInteraction: (interaction) =>
-				this.track(() => this.onInteraction(interaction), "interaction handling failed"),
-			onGuild: (guild) => this.track(() => this.onGuild(guild), "guild handling failed"),
-			onGuildUpdate: (guild) =>
-				this.track(() => this.onGuildUpdate(guild), "guild update handling failed"),
-			onThreadCreate: (thread) =>
-				this.track(() => this.onThreadCreate(thread), "thread creation handling failed"),
-			onChannelUpdate: (channel) =>
-				this.track(() => this.onChannelUpdate(channel), "channel update handling failed"),
-			onChannelDelete: (channel) =>
-				this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
-		});
 		// A fresh instance — after a deploy reset or an eviction — has no socket.
 		// Connect and arm the keepalive alarm before the first request, so the bot
 		// comes back on its own and is not evicted before the next cron wake.
 		state.blockConcurrencyWhile(() => this.keepAlive());
 	}
+
+	/** The events the gateway passes on, counted so a restart can wait for them. */
+	private readonly socketHandlers: DiscordSocketHandlers = {
+		onMessage: (message) => this.track(() => this.onMessage(message), "message handling failed"),
+		onInteraction: (interaction) =>
+			this.track(() => this.onInteraction(interaction), "interaction handling failed"),
+		onGuild: (guild) => this.track(() => this.onGuild(guild), "guild handling failed"),
+		onGuildUpdate: (guild) =>
+			this.track(() => this.onGuildUpdate(guild), "guild update handling failed"),
+		onThreadCreate: (thread) =>
+			this.track(() => this.onThreadCreate(thread), "thread creation handling failed"),
+		onChannelUpdate: (channel) =>
+			this.track(() => this.onChannelUpdate(channel), "channel update handling failed"),
+		onChannelDelete: (channel) =>
+			this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
+	};
 
 	/** Run one socket handler, counting it so a restart can wait for it. */
 	private track(run: () => Promise<void>, failure: string): void {
@@ -265,7 +279,8 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			const deploy = await this.ctx.storage.get<string>("deploy:version");
 			return json({
 				ok: true,
-				connected: this.socket.open,
+				connected: this.gateway?.open ?? false,
+				shards: this.gateway?.status ?? { total: 0, open: 0 },
 				deploy: deploy ?? null,
 				restart: this.restartPending,
 			});
@@ -290,7 +305,39 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		log(`signed in as ${me.username ?? me.id}`);
 		await this.syncCommands(me.id);
 		await this.syncInteractionsEndpoint();
-		this.socket.ensure();
+		await this.connectGateway();
+	}
+
+	/**
+	 * Open the gateway, one connection per shard.
+	 *
+	 * Discord requires a shard for every 2,500 guilds and reports how many it
+	 * recommends for this bot. The count is remembered so a transient failure to
+	 * read it still builds the same set; nothing ever guesses, because too few
+	 * shards makes Discord refuse the session outright.
+	 */
+	private async connectGateway(): Promise<void> {
+		if (this.gateway) {
+			this.gateway.ensure();
+			return;
+		}
+		const stored = await this.ctx.storage.get<number>("gateway:shards").catch(() => undefined);
+		const recommended = await this.rest.gatewayShards().catch((error) => {
+			log(`could not read the recommended shard count: ${describeError(error)}`);
+			return undefined;
+		});
+		// Never guess: connecting with too few shards makes Discord refuse the
+		// session, and it is worse at scale than retrying the read a moment later.
+		const shards = recommended ?? stored;
+		if (shards === undefined) throw new Error("Discord's shard count is not known yet");
+		if (recommended !== undefined && recommended !== stored) {
+			await this.ctx.storage.put("gateway:shards", recommended).catch((error) => {
+				log(`could not remember the shard count: ${describeError(error)}`);
+			});
+		}
+		if (shards > 1) log(`opening ${shards} gateway shards`);
+		this.gateway = new DiscordSocket(this.token, log, this.socketHandlers, shards);
+		this.gateway.ensure();
 	}
 
 	/**
@@ -338,19 +385,30 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	}
 
 	private async keepAlive(): Promise<void> {
-		if (!this.token || this.socket.fatallyClosed) return;
+		if (!this.token || this.gateway?.fatallyClosed) return;
+		if (this.gateway?.reshardRequired) {
+			// Discord rejected this layout (too few shards, or an invalid index).
+			// Rebuild in place from its current recommendation rather than retrying
+			// the same wrong count forever.
+			log("the gateway rejected its shard layout; rebuilding with Discord's current recommendation");
+			this.gateway.stop();
+			this.gateway = undefined;
+			await this.ctx.storage.delete("gateway:shards").catch(() => undefined);
+			await this.connectGateway().catch((error) => log(`could not rebuild the gateway: ${describeError(error)}`));
+		}
 		// A pending restart owns the alarm; replacing it with the keepalive would
-		// postpone the restart for a whole cycle. A closed socket gets a short
+		// postpone the restart for a whole cycle. A closed gateway gets a short
 		// retry so a failed first connect does not wait for the long interval.
 		if (!this.restartPending) {
-			const delay = this.socket.open ? this.keepAliveMs : Math.min(this.keepAliveMs, 10_000);
+			const delay = this.gateway?.open ? this.keepAliveMs : Math.min(this.keepAliveMs, 10_000);
 			await this.ctx.storage.setAlarm(Date.now() + delay);
 		}
 		await this.ensure();
-		if (!this.socket.open) this.socket.ensure();
-		else if (this.socket.stale) {
-			log("recycling the gateway connection before Cloudflare evicts this object");
-			this.socket.recycle();
+		if (!this.gateway) return;
+		if (!this.gateway.open) this.gateway.ensure();
+		else if (this.gateway.stale) {
+			log("recycling the gateway connections before Cloudflare evicts this object");
+			this.gateway.recycle();
 		}
 	}
 

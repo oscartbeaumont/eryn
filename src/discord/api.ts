@@ -464,6 +464,15 @@ export function discordRest(token: string) {
 			return await request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
 		},
 
+		/** Discord's recommended gateway shard count for this bot. */
+		async gatewayShards(): Promise<number> {
+			const result = await request<{ shards?: unknown }>("GET", "/gateway/bot");
+			if (typeof result?.shards === "number" && Number.isFinite(result.shards) && result.shards >= 1) {
+				return Math.floor(result.shards);
+			}
+			throw new DiscordError("Discord did not return a shard count");
+		},
+
 		/** Where Discord currently posts interactions, from the application object. */
 		async interactionsEndpoint(): Promise<string | undefined> {
 			const result = await request<{ interactions_endpoint_url?: unknown }>("GET", "/applications/@me");

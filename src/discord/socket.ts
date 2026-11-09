@@ -1,10 +1,15 @@
 /**
  * Minimal Discord gateway client.
  *
- * One socket is kept open with heartbeats, resumable sessions, and backoff
- * reconnects. It knows nothing about OpenCode: the owner supplies callbacks for
- * the events it cares about (messages, interactions, guild changes, thread
- * creation, channel and thread updates and deletions).
+ * One connection is kept open per shard, with heartbeats, resumable sessions,
+ * and backoff reconnects. It knows nothing about OpenCode: the owner supplies
+ * callbacks for the events it cares about (messages, interactions, guild
+ * changes, thread creation, channel and thread updates and deletions).
+ *
+ * A shard is the unit Discord reconnects and resumes independently, and a bot
+ * in more than 2,500 guilds must use several. `DiscordSocket` owns the set and
+ * keeps the face the single connection used to have: open when every shard is
+ * open, stale when any shard is old, and ensure/recycle across the set.
  *
  * Cloudflare stops keeping a Durable Object in memory 15 minutes after an
  * outbound connection opens, so the owner should call `recycle()` (for example
@@ -14,7 +19,12 @@
 import { describeError } from "../errors";
 import type { DiscordUser } from "./api";
 
-const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
+const GATEWAY_URL = "wss://gateway.discord.gg/";
+/**
+ * Discord allows one IDENTIFY per five seconds per shard bucket. Starting the
+ * shards apart keeps a restart inside that budget without tracking the bucket.
+ */
+const IDENTIFY_SPACING_MS = 5_000;
 /**
  * GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT.
  *
@@ -29,12 +39,18 @@ const RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
  *
  * Recycling a socket opens a fresh connection and restarts that window, so the
  * alarm must reach it well inside 15 minutes. Six minutes leaves room for a
- * late or missed alarm; getting this wrong kills the bot's only gateway socket
- * and drops every interaction until the next wake.
+ * late or missed alarm; getting this wrong kills the bot's gateway sockets and
+ * drops every message until the next wake.
  */
 const CONNECTION_RECYCLE_MS = 6 * 60_000;
 /** Discord closes with these codes when the bot configuration itself is wrong. */
-const FATAL_CLOSE_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
+const FATAL_CLOSE_CODES = new Set([4004, 4012, 4013, 4014]);
+/**
+ * Discord closes with these codes when this connection's shard layout is
+ * wrong. Reconnecting the same way would fail again, so the owner has to
+ * rebuild the shards from Discord's current recommendation.
+ */
+const RESHARD_CLOSE_CODES = new Set([4010, 4011]);
 /** Discord closes with these codes when the session cannot be resumed, so re-identify instead. */
 const SESSION_RESET_CLOSE_CODES = new Set([4007, 4009]);
 
@@ -148,10 +164,12 @@ interface GatewayPayload {
 	d?: unknown;
 }
 
-export class DiscordSocket {
+/** One connection: a single shard of the bot's gateway. */
+class DiscordShard {
 	private socket: WebSocket | undefined;
 	private heartbeat: ReturnType<typeof setTimeout> | undefined;
 	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	private startTimer: ReturnType<typeof setTimeout> | undefined;
 	private sequence: number | null = null;
 	private session: string | undefined;
 	private intervalMs = 45_000;
@@ -160,9 +178,11 @@ export class DiscordSocket {
 	private connectedAt = 0;
 	private disposed = false;
 	private broken = false;
+	private reshard = false;
 
 	constructor(
 		private readonly token: string,
+		private readonly shard: { index: number; count: number },
 		private readonly log: (message: string) => void,
 		private readonly handlers: DiscordSocketHandlers,
 	) {}
@@ -170,6 +190,11 @@ export class DiscordSocket {
 	/** True when Discord rejected the bot configuration itself, such as a missing intent. */
 	get fatallyClosed(): boolean {
 		return this.broken;
+	}
+
+	/** True when this shard's layout is wrong and the set has to be rebuilt. */
+	get reshardRequired(): boolean {
+		return this.reshard;
 	}
 
 	get open(): boolean {
@@ -181,16 +206,27 @@ export class DiscordSocket {
 		return this.open && Date.now() - this.connectedAt > CONNECTION_RECYCLE_MS;
 	}
 
-	/** Connect when idle. Safe to call repeatedly, from setup or from an alarm. */
-	ensure(): void {
-		if (this.disposed || this.broken) return;
-		if (this.socket || this.reconnectTimer) return;
+	/**
+	 * Connect when idle, optionally waiting for the shard's turn to identify.
+	 * Safe to call repeatedly, from setup or from an alarm.
+	 */
+	ensure(startAt = 0): void {
+		if (this.disposed || this.broken || this.reshard) return;
+		if (this.socket || this.reconnectTimer || this.startTimer) return;
+		const wait = startAt - Date.now();
+		if (wait > 0) {
+			this.startTimer = setTimeout(() => {
+				this.startTimer = undefined;
+				this.connect();
+			}, wait);
+			return;
+		}
 		this.connect();
 	}
 
 	/** Drop the current socket and resume the session on a fresh one. */
 	recycle(): void {
-		if (this.disposed || this.broken) return;
+		if (this.disposed || this.broken || this.reshard) return;
 		if (!this.socket) {
 			this.ensure();
 			return;
@@ -201,10 +237,11 @@ export class DiscordSocket {
 	stop(): void {
 		this.disposed = true;
 		this.stopHeartbeat();
-		if (this.reconnectTimer !== undefined) {
-			clearTimeout(this.reconnectTimer);
-			this.reconnectTimer = undefined;
+		for (const timer of [this.reconnectTimer, this.startTimer]) {
+			if (timer !== undefined) clearTimeout(timer);
 		}
+		this.reconnectTimer = undefined;
+		this.startTimer = undefined;
 		const socket = this.socket;
 		this.socket = undefined;
 		try {
@@ -214,13 +251,24 @@ export class DiscordSocket {
 		}
 	}
 
+	/** A log line that names the shard only when there is more than one. */
+	private say(message: string): string {
+		return this.shard.count > 1 ? `shard ${this.shard.index + 1}/${this.shard.count}: ${message}` : message;
+	}
+
 	private connect(): void {
-		if (this.disposed || this.broken) return;
+		if (this.disposed || this.broken || this.reshard) return;
 		this.stopHeartbeat();
 
 		let socket: WebSocket;
 		try {
-			socket = new WebSocket(GATEWAY_URL);
+			const query = new URLSearchParams({
+				v: "10",
+				encoding: "json",
+				shard: String(this.shard.index),
+				num_shards: String(this.shard.count),
+			});
+			socket = new WebSocket(`${GATEWAY_URL}?${query}`);
 		} catch (error) {
 			this.reconnect(`connect failed (${describeError(error)})`);
 			return;
@@ -234,17 +282,27 @@ export class DiscordSocket {
 			this.receive(event);
 		});
 		socket.addEventListener("error", () => {
-			this.log("gateway socket error");
+			this.log(this.say("gateway socket error"));
 		});
 		socket.addEventListener("close", (event) => {
 			if (this.socket !== socket) return;
 			this.socket = undefined;
+			if (RESHARD_CLOSE_CODES.has(event.code)) {
+				this.reshard = true;
+				this.stopHeartbeat();
+				this.log(
+					this.say(`gateway closed with ${event.code}; Discord says the shard count is wrong, so it has to be rebuilt.`),
+				);
+				return;
+			}
 			if (FATAL_CLOSE_CODES.has(event.code)) {
 				this.broken = true;
 				this.stopHeartbeat();
 				this.log(
-					`gateway closed with ${event.code}; not reconnecting. ` +
-						"Check the bot token, that the bot is in the guild, and that the Message Content intent is enabled.",
+					this.say(
+						`gateway closed with ${event.code}; not reconnecting. ` +
+							"Check the bot token, that the bot is in the guild, and that the Message Content intent is enabled.",
+					),
 				);
 				return;
 			}
@@ -264,7 +322,7 @@ export class DiscordSocket {
 		try {
 			payload = JSON.parse(raw) as GatewayPayload;
 		} catch {
-			this.log("gateway sent unreadable JSON");
+			this.log(this.say("gateway sent unreadable JSON"));
 			return;
 		}
 
@@ -280,6 +338,7 @@ export class DiscordSocket {
 						d: {
 							token: this.token,
 							intents: INTENTS,
+							shard: [this.shard.index, this.shard.count],
 							properties: { os: "cloudflare-workers", browser: "eryn", device: "eryn" },
 						},
 					});
@@ -311,10 +370,10 @@ export class DiscordSocket {
 					const session = (payload.d as { session_id?: unknown } | undefined)?.session_id;
 					if (typeof session === "string") this.session = session;
 					this.attempt = 0;
-					this.log("gateway connected");
+					this.log(this.say("gateway connected"));
 				} else if (payload.t === "RESUMED") {
 					this.attempt = 0;
-					this.log("gateway resumed");
+					this.log(this.say("gateway resumed"));
 				} else if (payload.t === "MESSAGE_CREATE") {
 					const message = payload.d as DiscordMessage | undefined;
 					if (message && typeof message.id === "string" && typeof message.channel_id === "string") {
@@ -387,7 +446,7 @@ export class DiscordSocket {
 	}
 
 	private reconnect(reason: string): void {
-		if (this.disposed || this.broken) return;
+		if (this.disposed || this.broken || this.reshard) return;
 		this.stopHeartbeat();
 		const socket = this.socket;
 		this.socket = undefined;
@@ -400,7 +459,7 @@ export class DiscordSocket {
 
 		const delay = RECONNECT_DELAYS[Math.min(this.attempt, RECONNECT_DELAYS.length - 1)] ?? 60_000;
 		this.attempt += 1;
-		this.log(`gateway reconnecting in ${Math.round(delay / 1_000)}s (${reason})`);
+		this.log(this.say(`gateway reconnecting in ${Math.round(delay / 1_000)}s (${reason})`));
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = undefined;
 			this.connect();
@@ -413,8 +472,77 @@ export class DiscordSocket {
 		try {
 			socket.send(JSON.stringify(payload));
 		} catch (error) {
-			this.log(`gateway send failed: ${describeError(error)}`);
+			this.log(this.say(`gateway send failed: ${describeError(error)}`));
 		}
+	}
+}
+
+/**
+ * The bot's gateway, one connection per shard.
+ *
+ * The owner only ever talks to this: it never has to know how many shards are
+ * open. With one shard it is exactly the single connection it replaced.
+ */
+export class DiscordSocket {
+	private readonly shards: DiscordShard[];
+	private disposed = false;
+
+	constructor(
+		token: string,
+		log: (message: string) => void,
+		handlers: DiscordSocketHandlers,
+		shards = 1,
+	) {
+		const count = Math.max(1, Math.floor(shards));
+		this.shards = Array.from(
+			{ length: count },
+			(_, index) => new DiscordShard(token, { index, count }, log, handlers),
+		);
+	}
+
+	/** True when every shard is connected. */
+	get open(): boolean {
+		return this.shards.every((shard) => shard.open);
+	}
+
+	/** True when any shard has been open long enough that Cloudflare may evict the object. */
+	get stale(): boolean {
+		return this.shards.some((shard) => shard.stale);
+	}
+
+	/** True when Discord rejected the bot configuration for every shard. */
+	get fatallyClosed(): boolean {
+		return this.shards.every((shard) => shard.fatallyClosed);
+	}
+
+	/** True when Discord says the shard layout is wrong, so the set has to be rebuilt. */
+	get reshardRequired(): boolean {
+		return this.shards.some((shard) => shard.reshardRequired);
+	}
+
+	/** How many shards are connected, for the health endpoint. */
+	get status(): { total: number; open: number } {
+		return { total: this.shards.length, open: this.shards.filter((shard) => shard.open).length };
+	}
+
+	/** Connect every shard that is idle, spacing the identifies Discord rate limits. */
+	ensure(): void {
+		if (this.disposed) return;
+		const now = Date.now();
+		this.shards.forEach((shard, index) => shard.ensure(now + index * IDENTIFY_SPACING_MS));
+	}
+
+	/** Drop the stale shards and resume them on fresh connections. */
+	recycle(): void {
+		if (this.disposed) return;
+		for (const shard of this.shards) {
+			if (shard.stale) shard.recycle();
+		}
+	}
+
+	stop(): void {
+		this.disposed = true;
+		for (const shard of this.shards) shard.stop();
 	}
 }
 
@@ -429,4 +557,3 @@ export function modalValues(interaction: DiscordInteraction): Record<string, str
 	}
 	return values;
 }
-

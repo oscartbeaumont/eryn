@@ -128,8 +128,14 @@ Objects:
 
 | Object | Scope | Responsibility |
 | --- | --- | --- |
-| `BotGatewayV5` | `bot` | Discord gateway socket, interaction dispatch, threads, install messages |
+| `BotGatewayV5` | `bot` | Discord gateway sockets (one per shard), interaction dispatch, threads, install messages |
 | `BotSessionV5` | guild id | OpenCode host, provider credentials, MCP links, virtual filesystem |
+
+The gateway object opens one connection per shard. Discord requires a shard for
+every 2,500 guilds and reports the recommended count from `/gateway/bot`; the
+count is remembered in the object and each shard identifies a few seconds apart
+to stay inside Discord's identify budget. Every shard delivers the same event
+kinds to the same handlers, so nothing else in the bot is shard-aware.
 
 Each guild's credentials and MCP tokens are sealed with AES-GCM under
 `ENCRYPTION_KEY` and stay in that guild's session object.
@@ -183,7 +189,7 @@ reports both ids so you can confirm the deployment has taken effect:
 
 ```sh
 curl -s https://eryn.otbeaumont.me/health
-# {"ok":true,"service":"eryn","deploy":"<worker deploy>","bot":{"connected":true,"deploy":"<bot object deploy>","restart":false}}
+# {"ok":true,"service":"eryn","deploy":"<worker deploy>","bot":{"connected":true,"shards":{"total":1,"open":1},"deploy":"<bot object deploy>","restart":false}}
 ```
 
 ### Brand assets
