@@ -528,15 +528,20 @@ class GuildAgentImpl implements GuildAgentShape {
 				// The speaker is recorded on the same context: the tools read it
 				// back to hold the turn to that person's Discord permissions.
 				const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
-				// Set, or clear, the author id for this turn. An automated prompt
-				// (a thread-created notice, for example) has no speaker, so it must
-				// not inherit the last human's authority from the stored context.
-				const discord = refreshed
-					? { ...refreshed, authorId: request.author?.id }
-					: undefined;
+				// Keep the conversation's stored context when the prompt carries
+				// none, but set or clear the speaker on it. A turn with no speaker
+				// (an older message watch, for example) must not borrow the previous
+				// speaker's Discord authority. A session with no context stays
+				// without one: this does not invent a conversation.
+				const stored =
+					refreshed ??
+					this.contextByThread.get(request.threadId) ??
+					(await this.contextForSession(sessionID))?.context;
+				const discord = stored ? { ...stored, authorId: request.author?.id } : undefined;
 				await this.applyDiscord(host, request.threadId, sessionID, discord);
 				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
 				if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
+				else this.requesterByThread.delete(request.threadId);
 				await this.applyModel(host, request.threadId, sessionID, config.model);
 
 				const attached = await fetchAttachmentFiles(request.attachments);

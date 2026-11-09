@@ -111,22 +111,28 @@ export function guildPermissions(input: GuildPermissionInput): bigint {
 
 /** Apply one overwrite: a deny wins over an allow for the same bit. */
 export function applyOverwrite(permissions: bigint, overwrite: PermissionOverwriteLike): bigint {
-	return (permissions & ~parsePermissions(overwrite.deny)) | parsePermissions(overwrite.allow);
+	const deny = parsePermissions(overwrite.deny);
+	const allow = parsePermissions(overwrite.allow);
+	// Intersect allow with the complement of deny. A malformed overwrite that
+	// names the same bit in both fields must deny, not grant.
+	return (permissions & ~deny) | (allow & ~deny);
 }
 
-/** The overwrites that apply to a channel, preferring a thread's own list. */
+/** The overwrite lists that apply to a channel, in the order they apply. */
 export function overwritesFor(
 	channel: PermissionChannel,
 	parent: PermissionChannel | undefined,
-): readonly PermissionOverwriteLike[] {
-	if (THREAD_TYPES.has(channel.type)) {
-		// An empty list is not a grant: a thread inherits its parent's
-		// overwrites, so only a non-empty thread list replaces them.
-		const own = channel.permission_overwrites;
-		if (own !== undefined && own.length > 0) return own;
-		return parent?.permission_overwrites ?? [];
+): readonly (readonly PermissionOverwriteLike[])[] {
+	if (!THREAD_TYPES.has(channel.type)) {
+		return channel.permission_overwrites?.length ? [channel.permission_overwrites] : [];
 	}
-	return channel.permission_overwrites ?? [];
+	// A thread inherits its parent's overwrites. Apply the parent's list first,
+	// then the thread's own: repeating an entry is idempotent, and a
+	// thread-specific entry cannot discard a parent deny.
+	const layers: (readonly PermissionOverwriteLike[])[] = [];
+	if (parent?.permission_overwrites?.length) layers.push(parent.permission_overwrites);
+	if (channel.permission_overwrites?.length) layers.push(channel.permission_overwrites);
+	return layers;
 }
 
 /** The effective permissions of one member in one channel or thread. */
@@ -135,25 +141,34 @@ export function effectivePermissions(input: EffectivePermissionInput): bigint {
 	// An administrator is not subject to overwrites.
 	if (permissions === ALL_PERMISSIONS) return ALL_PERMISSIONS;
 
-	const overwrites = overwritesFor(input.channel, input.parent);
-	// Discord applies `@everyone`, then role overwrites from lowest to highest
-	// role, then the member overwrite. The later write wins per bit.
-	const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === input.guildId);
-	if (everyone) permissions = applyOverwrite(permissions, everyone);
-
 	const positions = new Map(input.roles.map((role) => [role.id, role.position ?? 0]));
-	const roleOverwrites = overwrites
-		.filter(
-			(overwrite) =>
-				overwrite.type === 0 &&
-				overwrite.id !== input.guildId &&
-				input.memberRoleIds.includes(overwrite.id),
-		)
-		.sort((a, b) => (positions.get(a.id) ?? 0) - (positions.get(b.id) ?? 0));
-	for (const overwrite of roleOverwrites) permissions = applyOverwrite(permissions, overwrite);
+	// Each list is applied in Discord's order: `@everyone`, then role
+	// overwrites from lowest to highest role, then the member overwrite. For a
+	// thread there are two lists, parent first, so the parent's deny survives a
+	// thread list that names only thread-specific bits.
+	for (const overwrites of overwritesFor(input.channel, input.parent)) {
+		for (const everyone of overwrites.filter(
+			(overwrite) => overwrite.type === 0 && overwrite.id === input.guildId,
+		)) {
+			permissions = applyOverwrite(permissions, everyone);
+		}
 
-	const member = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === input.userId);
-	if (member) permissions = applyOverwrite(permissions, member);
+		const roleOverwrites = overwrites
+			.filter(
+				(overwrite) =>
+					overwrite.type === 0 &&
+					overwrite.id !== input.guildId &&
+					input.memberRoleIds.includes(overwrite.id),
+			)
+			.sort((a, b) => (positions.get(a.id) ?? 0) - (positions.get(b.id) ?? 0));
+		for (const overwrite of roleOverwrites) permissions = applyOverwrite(permissions, overwrite);
+
+		for (const member of overwrites.filter(
+			(overwrite) => overwrite.type === 1 && overwrite.id === input.userId,
+		)) {
+			permissions = applyOverwrite(permissions, member);
+		}
+	}
 
 	// A private thread also requires being in it, or a thread/channel manager.
 	// Returning no permissions (rather than a separate boolean) keeps every

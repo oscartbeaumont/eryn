@@ -568,11 +568,16 @@ export function discordTools(
 			async run(rawInput, call) {
 				const { channelId, messageId } = rawInput as MessageInput;
 				await channel(channelId);
+				const message = await rest.message(channelId, messageId);
+				if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
+				// Deleting Eryn's own message only needs visibility; deleting anyone
+				// else's is a moderation action, matching the edit policy.
+				const own = botUserId !== undefined && message.author?.id === botUserId;
 				await requireChannelPermission(
 					call.sessionID,
 					channelId,
-					Permission.ViewChannel | Permission.ManageMessages,
-					"delete messages",
+					own ? Permission.ViewChannel : Permission.ViewChannel | Permission.ManageMessages,
+					own ? "delete its own message" : "delete messages",
 				);
 				await rest.deleteMessage(channelId, messageId);
 				return { ok: true };

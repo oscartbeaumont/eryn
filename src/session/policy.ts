@@ -297,7 +297,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					: edit === "ask"
 						? "read, ask before write"
 						: "read and write";
-	const discordLine = discord.some((effect) => effect === "ask")
+	const discordSummary = discord.some((effect) => effect === "ask")
 		? "ask before use"
 		: discord.every((effect) => effect === "allow")
 			? "everything"
@@ -308,6 +308,10 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					: discord[0] === "allow"
 						? "replies only"
 						: "limited";
+	const discordLine =
+		tools["cross-channel"] === "block"
+			? `${discordSummary} (cross-channel blocked)`
+			: discordSummary;
 
 	const mcp = policy.mcp ?? {};
 	const all = mcp[MCP_ALL] ?? "allow";

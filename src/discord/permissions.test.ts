@@ -99,6 +99,16 @@ test("a member overwrite deny overrides a role allow", () => {
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
+test("a deny wins when one overwrite allows and denies the same bit", () => {
+	const permissions = effectivePermissions({
+		...base,
+		channel: channel(0, [
+			{ id: GUILD, type: 0, allow: Permission.ViewChannel.toString(), deny: Permission.ViewChannel.toString() },
+		]),
+	});
+	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
+});
+
 test("a higher role allow beats a lower role deny", () => {
 	const permissions = effectivePermissions({
 		...base,
@@ -170,6 +180,31 @@ test("an empty thread overwrite list still inherits the parent's deny", () => {
 		},
 	});
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
+});
+
+test("thread overwrites are applied on top of the parent's, not instead of them", () => {
+	const permissions = effectivePermissions({
+		...base,
+		channel: channel(
+			11,
+			[
+				{ id: GUILD, type: 0, allow: Permission.SendMessages.toString(), deny: "0" },
+				{ id: GUILD, type: 0, allow: "0", deny: Permission.AddReactions.toString() },
+			],
+			"parent-1",
+		),
+		parent: {
+			id: "parent-1",
+			type: 0,
+			permission_overwrites: [
+				{ id: GUILD, type: 0, allow: Permission.AddReactions.toString(), deny: "0" },
+				{ id: GUILD, type: 0, allow: "0", deny: Permission.ViewChannel.toString() },
+			],
+		},
+	});
+	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
+	assert.equal(hasPermission(permissions, Permission.SendMessages), true);
+	assert.equal(hasPermission(permissions, Permission.AddReactions), false);
 });
 
 test("a non-member cannot view a private thread", () => {
