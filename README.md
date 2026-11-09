@@ -2,39 +2,31 @@
   <img src="assets/brand/banner.webp" alt="Eryn — your personal agent in Discord" width="100%">
 </p>
 
-# eryn
+# Eryn
 
-Eryn is a Discord bot that runs an [OpenCode](https://opencode.ai) agent in
-Discord. The hosted instance is at
-[eryn.otbeaumont.me](https://eryn.otbeaumont.me), which covers what it does and
-how to use it. This repository is its source, and the same Worker can be
-deployed into your own Cloudflare account.
+Eryn is your personal agent in Discord. Built on top of [OpenCode](https://opencode.ai) running in a Cloudflare Durable Object.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    subgraph Discord
-        member[Server member]
-        gateway[Gateway]
+    discord[Discord]
+
+    subgraph worker[Cloudflare Worker]
+        routes[HTTP<br/>landing + interactions]
+        bot[BotGatewayV5<br/>the bot]
+        session["BotSessionV5<br/>one per server"]
     end
 
-    worker["Worker<br/>src/index.ts"]
-    bot["BotGatewayV5<br/>one for the bot"]
-    session["BotSessionV5<br/>one per server"]
-    agent[OpenCode agent]
-    provider[Inference provider]
-    mcp[Linked MCP servers]
+    agent[OpenCode]
+    services[Inference and MCP]
 
-    member -->|slash commands, buttons| worker
-    worker -->|verified interaction| bot
-    gateway <-->|socket: messages, threads, installs| bot
+    discord -->|commands| routes
+    routes --> bot
+    discord <-->|gateway socket| bot
     bot --> session
     session --> agent
-    agent --> provider
-    agent --> mcp
-    session -.-> store[(Virtual filesystem<br/>sealed credentials)]
-    worker -.->|landing page, brand images| member
+    agent --> services
 ```
 
 Eryn is one Cloudflare Worker and two Durable Objects. The Worker answers
@@ -74,13 +66,13 @@ In the [Discord developer portal](https://discord.com/developers/applications):
 
 Click the button and fill in the secrets it asks for:
 
-| Secret | Value |
-| --- | --- |
-| `DISCORD_BOT_TOKEN` | The bot token from the portal |
-| `DISCORD_CLIENT_ID` | The application id |
-| `DISCORD_PUBLIC_KEY` | The application's public key |
-| `ENCRYPTION_KEY` | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
-| `SESSION_SECRET` | `openssl rand -hex 32` |
+| Secret               | Value                                                  |
+| -------------------- | ------------------------------------------------------ |
+| `DISCORD_BOT_TOKEN`  | The bot token from the portal                          |
+| `DISCORD_CLIENT_ID`  | The application id                                     |
+| `DISCORD_PUBLIC_KEY` | The application's public key                           |
+| `ENCRYPTION_KEY`     | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
+| `SESSION_SECRET`     | `openssl rand -hex 32`                                 |
 
 ### 3. Point Eryn at its own URL
 
@@ -133,12 +125,12 @@ configured by `cloudflare.config.ts`, and `cf` ignores the Wrangler file.
 
 ## Configuration
 
-| Variable | Type | Purpose |
-| --- | --- | --- |
-| `DISCORD_BOT_TOKEN` | secret | Gateway socket, REST calls, and command registration |
-| `DISCORD_CLIENT_ID` | secret | Application id for the install link; defaults to the hosted application |
-| `DISCORD_PUBLIC_KEY` | secret | Verifies interaction signatures; defaults to the hosted application |
-| `ENCRYPTION_KEY` | secret | Base64url 32-byte key for sealing stored credentials |
-| `SESSION_SECRET` | secret | Signs MCP sign-in state and callback links |
-| `PUBLIC_ORIGIN` | var | Origin for links, OAuth callbacks, and the interactions endpoint |
-| `ERYN_DOMAIN` | build | Custom domain attached by `cf deploy`; unset on Workers Builds |
+| Variable             | Type   | Purpose                                                                 |
+| -------------------- | ------ | ----------------------------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`  | secret | Gateway socket, REST calls, and command registration                    |
+| `DISCORD_CLIENT_ID`  | secret | Application id for the install link; defaults to the hosted application |
+| `DISCORD_PUBLIC_KEY` | secret | Verifies interaction signatures; defaults to the hosted application     |
+| `ENCRYPTION_KEY`     | secret | Base64url 32-byte key for sealing stored credentials                    |
+| `SESSION_SECRET`     | secret | Signs MCP sign-in state and callback links                              |
+| `PUBLIC_ORIGIN`      | var    | Origin for links, OAuth callbacks, and the interactions endpoint        |
+| `ERYN_DOMAIN`        | build  | Custom domain attached by `cf deploy`; unset on Workers Builds          |
