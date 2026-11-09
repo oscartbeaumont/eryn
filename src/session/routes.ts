@@ -21,6 +21,7 @@ import type { GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
 import {
 	ApprovalReplyRequestSchema,
+	CompactRequestSchema,
 	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
 	FormCancelRequestSchema,
@@ -448,6 +449,15 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			// remove the Session and stop a suspended turn from resuming.
 			const config = gone ? await loadConfig().catch(() => undefined) : undefined;
 			return json({ stopped: await agent.interrupt(body.threadId, gone, config) });
+		}),
+
+		/** Compact one conversation's history, at a member's request. */
+		[ROUTES.compact]: route(CompactRequestSchema, async (body) => {
+			const config = await loadConfig(true).catch(() => undefined);
+			if (!config || config.connections.length === 0) {
+				return json({ ok: false, message: "Connect a provider before compacting a conversation." });
+			}
+			return json(await agent.compact(body.threadId, config));
 		}),
 
 		/** Whether a speaker covers the capability scope of this conversation. */

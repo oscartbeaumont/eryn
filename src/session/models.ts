@@ -572,6 +572,17 @@ export const InteractResponseSchema = Schema.Struct({
 });
 export type InteractResponse = typeof InteractResponseSchema.Type;
 
+/** Trigger a manual compaction of one conversation's history. */
+export const CompactRequestSchema = guildScoped({
+	threadId: Schema.String,
+});
+
+export const CompactResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type CompactResponse = typeof CompactResponseSchema.Type;
+
 export const PolicyGetRequestSchema = guildScoped({
 	channelId: Schema.String,
 	threadId: Schema.optional(Schema.String),

@@ -58,6 +58,14 @@ conversations. The agent's files live in a separate shared virtual workspace,
 not inside that project directory, so the grouping does not stop it reading or
 writing elsewhere.
 
+### Commands
+
+- `/eryn setup` — providers, models, MCP servers, and status (needs Manage Server)
+- `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)
+- `/eryn stop` — stop the run in this conversation
+- `/eryn compact` — compact this conversation's history
+- `/eryn help` — show the command list
+
 ## Permissions
 
 `/eryn policy` sets per-channel and per-thread tool limits. A policy is a

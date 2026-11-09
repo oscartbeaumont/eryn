@@ -12,6 +12,7 @@ import { ROUTES } from "../session/paths";
 import { botError } from "../errors";
 import {
 	ApprovalReplyResponseSchema,
+	CompactResponseSchema,
 	GuildStatusSchema,
 	IntegrationOptionSchema,
 	McpAuthCompleteResponseSchema,
@@ -25,6 +26,7 @@ import {
 	FormViewSchema,
 	InteractResponseSchema,
 	PolicyStateSchema,
+	type CompactResponse,
 	type DiscordContext,
 	type ElicitationMode,
 	type FormView,
@@ -257,6 +259,11 @@ export class SessionClient {
 			{ threadId, gone },
 		);
 		return payload.stopped === true;
+	}
+
+	/** Compact this conversation's history at a member's request. */
+	compact(threadId: string): Promise<CompactResponse> {
+		return this.call(ROUTES.compact, CompactResponseSchema, { threadId });
 	}
 
 	/** Whether this Discord user covers the conversation's schedule scope. */

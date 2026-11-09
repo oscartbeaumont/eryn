@@ -25,6 +25,7 @@ import type { HostInterface } from "./host";
 import { channelProjectDirectory, LOCATION } from "./locations";
 import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
 import type {
+	CompactResponse,
 	DiscordContext,
 	FormField,
 	FormView,
@@ -57,6 +58,8 @@ export type { HostConfig };
 /** The JSON metadata boundary: stored scope arrays are readonly for readers. */
 type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 const TURN_TIMEOUT_MS = 900_000;
+/** How long a manual compaction may take before the command answers anyway. */
+const COMPACTION_TIMEOUT_MS = 120_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -118,6 +121,8 @@ export interface GuildAgentShape {
 	oauthCancel(config: HostConfig, integrationID: string, attemptID: string): Promise<void>;
 	disconnect(config: HostConfig, integrationID: string): Promise<number>;
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
+	/** Compact one conversation's history, at a member's request. */
+	compact(threadId: string, config: HostConfig): Promise<CompactResponse>;
 	/** The policy in effect in one channel or thread, before the menu renders it. */
 	policyState(input: { channelId: string; threadId?: string }): Promise<PolicyState>;
 	setPolicy(input: {
@@ -214,6 +219,14 @@ class GuildAgentImpl implements GuildAgentShape {
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	/** MCP forms currently waiting for a modal reply. */
 	private readonly pendingForms = new Map<string, PendingForm>();
+	/** Manual compactions waiting for the runner's end event, keyed by session. */
+	private readonly compactions = new Map<
+		string,
+		{
+			readonly resolve: (outcome: "ended" | "failed") => void;
+			readonly timer: ReturnType<typeof setTimeout>;
+		}
+	>();
 	/** The config last used to build the host, for policies and MCP modes. */
 	private currentConfig: HostConfig | undefined;
 	/** Per-guild Discord permission lookups, shared by tool checks and gating. */
@@ -675,6 +688,67 @@ class GuildAgentImpl implements GuildAgentShape {
 			},
 			() => this.interrupt(request.threadId, false).catch(() => undefined),
 		);
+	}
+
+	/**
+	 * Compact one conversation's history.
+	 *
+	 * Compaction runs as its own execution and reports `session.compaction.ended`
+	 * or `.failed` rather than a normal turn, so it is tracked here instead of
+	 * with `runTurn`. The command waits for that outcome so the member gets a
+	 * real answer, but the timeout keeps a stuck summarisation from holding the
+	 * interaction open indefinitely.
+	 */
+	async compact(threadId: string, config: HostConfig): Promise<CompactResponse> {
+		const sessionID = await this.sessionFor(threadId);
+		if (!sessionID) return { ok: false, message: "There is no Eryn conversation here yet." };
+		if (this.compactions.has(sessionID)) {
+			return { ok: false, message: "A compaction is already running in this conversation." };
+		}
+		try {
+			const host = await this.hostFor(config, threadId);
+			this.startConsuming(host);
+			const outcome = await new Promise<"ended" | "failed" | "timeout">((resolve) => {
+				const timer = setTimeout(() => {
+					this.compactions.delete(sessionID);
+					resolve("timeout");
+				}, COMPACTION_TIMEOUT_MS);
+				this.compactions.set(sessionID, {
+					resolve: (result) => {
+						clearTimeout(timer);
+						resolve(result);
+					},
+					timer,
+				});
+				// Queue it behind any turn in progress: compacting halfway through
+				// a step would rewrite the context the running turn is using.
+				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error) => {
+					log("session", `could not compact ${threadId}: ${describeError(error)}`);
+					if (this.compactions.delete(sessionID)) {
+						clearTimeout(timer);
+						resolve("failed");
+					}
+				});
+			});
+			if (outcome === "ended") return { ok: true };
+			if (outcome === "failed") {
+				return { ok: false, message: "Compaction failed; the conversation history is unchanged." };
+			}
+			return { ok: false, message: "Compaction is taking longer than expected. It may still finish." };
+		} catch (error) {
+			log("session", `could not compact ${threadId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not compact this conversation." };
+		}
+	}
+
+	/** Resolve the command waiting on a manual compaction, if there is one. */
+	private settleCompaction(data: Record<string, unknown>, ended: boolean): void {
+		if (data.reason !== "manual" || typeof data.sessionID !== "string") return;
+		const pending = this.compactions.get(data.sessionID);
+		if (!pending) return;
+		this.compactions.delete(data.sessionID);
+		clearTimeout(pending.timer);
+		pending.resolve(ended ? "ended" : "failed");
 	}
 
 	/**
@@ -2138,6 +2212,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		}
 		const sessionID = data.sessionID;
 		if (typeof sessionID !== "string") return;
+		if (shape.type === "session.compaction.ended" || shape.type === "session.compaction.failed") {
+			this.settleCompaction(data, shape.type === "session.compaction.ended");
+			return;
+		}
 		if (shape.type === "permission.asked") {
 			void this.onPermissionAsked(data).catch((error) =>
 				log("session", `could not show an approval: ${describeError(error)}`),

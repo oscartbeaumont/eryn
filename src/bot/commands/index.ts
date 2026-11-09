@@ -44,6 +44,7 @@ export function erynCommand(): DiscordCommand {
 				type: 1,
 			},
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
+			{ name: "compact", description: "Compact this conversation's history", type: 1 },
 			{ name: "policy", description: "Restrict what Eryn may do in this channel or thread", type: 1 },
 			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
@@ -151,8 +152,9 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		await rejectInteraction(ctx, interaction, "Run `/eryn` inside a server, so I know which setup to change.");
 		return;
 	}
-	// Stopping a run and reading help are not configuration; everything else is.
-	if (path !== "stop" && path !== "help" && !canManage(interaction)) {
+	// Stopping a run, compacting a conversation, and reading help are not
+	// configuration; everything else is.
+	if (path !== "stop" && path !== "compact" && path !== "help" && !canManage(interaction)) {
 		return await denyConfiguration(ctx, interaction);
 	}
 	const request = requestFor(ctx, interaction, guildId);
@@ -177,6 +179,24 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 				}
 				await responder(request).reply("Stopping the current run…");
 				await request.session.interrupt(channelId, false).catch(() => undefined);
+			});
+		case "compact":
+			return await guarded(request, "reply", async () => {
+				const channelId = interaction.channel_id;
+				const answer = responder(request);
+				if (!channelId || !(await ctx.ownsConversation(channelId))) {
+					await answer.reply("There is no Eryn conversation here yet.");
+					return;
+				}
+				// Compaction summarises with the model, so acknowledge first and
+				// edit the ephemeral reply when the runner reports the outcome.
+				await answer.defer();
+				const result = await request.session.compact(channelId);
+				await answer.reply(
+					result.ok
+						? "Compacted this conversation's history."
+						: (result.message ?? "I could not compact this conversation."),
+				);
 			});
 		case "help":
 			return await responder(request).reply(helpText());
