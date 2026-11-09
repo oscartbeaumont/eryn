@@ -397,7 +397,7 @@ export function discordTools(
 						name: spec.name,
 						description: spec.description,
 						input: spec.input,
-						execute: toolExecute(spec),
+						execute: toolExecute(spec, ctx),
 					});
 				}
 			});

@@ -44,6 +44,7 @@ Server; stopping a run and reading help do not.
 | Command | Permission | Purpose |
 | --- | --- | --- |
 | `/eryn setup` | Manage Server | Open the setup menu: connect or remove a provider, choose a model, manage MCP servers, and see whether the server is ready |
+| `/eryn policy` | Manage Server | Restrict tools and MCP servers in this channel or thread |
 | `/eryn stop` | Everyone | Stop the run in the current thread; the session stays intact for the next message |
 | `/eryn help` | Everyone | Show the commands and where setup lives |
 
@@ -66,6 +67,42 @@ The install message opens the same menu in the server, so every screen is
 available there. The menu itself is ephemeral, so only the admin who opened it
 sees the configuration, and the install message is deleted once a provider is
 connected.
+
+### Permissions
+
+`/eryn policy`, run in a channel or thread, sets what Eryn may do there. Threads
+inherit their channel, and channels inherit the server default, so an admin can
+lock down one conversation without touching the rest.
+
+Four presets cover the common cases:
+
+| Preset | What it allows |
+| --- | --- |
+| **Full** | Everything Eryn can do |
+| **Chat** | Discord messages and threads; no workspace, shell, or MCP |
+| **Read-only** | Read the workspace and reply; no edits, shell, or MCP |
+| **Locked** | Only reply; every other tool is hidden |
+
+**Customise** overrides one group at a time: workspace reads, workspace edits,
+shell, Discord replies, Discord threads, channel subscriptions, message
+management, or one MCP server. Each group can be **allowed**, **ask**, or
+**blocked**. A blocked tool is not offered to the model at all; an allowed tool
+runs; an asked tool posts a card in the conversation before it runs.
+
+A non-default channel or thread gets one card explaining the restriction, with
+a **Change** button. The card is the only public surface; the editor itself is
+ephemeral, exactly like `/eryn setup`.
+
+Approvals are per conversation:
+
+- **Allow once** runs this call.
+- **Always here** writes an allow rule for this conversation's policy.
+- **Block here** writes a deny rule and rejects the call.
+
+Changing a conversation's policy requires Manage Server. The person who asked,
+or someone with Manage Server, can approve a single call, so a thread's
+requester is not stuck waiting for an admin. Requests expire after 90 seconds
+instead of hanging the turn.
 
 ### Agent tools
 
@@ -107,6 +144,13 @@ refresh tokens with the link. A server that wants a static bearer token can be
 added with one instead. Tokens are refreshed as they expire.
 
 Only servers an admin has explicitly linked are available to the agent.
+
+When linking, **Approvals** chooses where a server's confirmation or form goes:
+`discord` renders it as a card or modal in the conversation, `browser` posts a
+link for the user to complete, `agent` lets the model relay it, and `off`
+cancels requests. For an Executor MCP endpoint these map to `elicitation_mode=native`,
+`browser`, and `model`; the mode is written into the URL when the server is
+linked, because Executor fixes it in the grant.
 
 ## Limits
 

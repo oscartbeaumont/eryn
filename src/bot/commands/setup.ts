@@ -99,6 +99,7 @@ export function helpText(): string {
 	return [
 		"**Eryn commands**",
 		"• `/eryn setup` — providers, models, MCP servers, and current status (needs Manage Server)",
+		"• `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)",
 		"• `/eryn stop` — stop the run in this thread",
 		"• `/eryn help` — show this",
 	].join("\n");

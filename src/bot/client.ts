@@ -11,6 +11,7 @@ import { withDeploy } from "../deploy";
 import { ROUTES } from "../session/paths";
 import { botError } from "../errors";
 import {
+	ApprovalReplyResponseSchema,
 	GuildStatusSchema,
 	IntegrationOptionSchema,
 	McpAuthCompleteResponseSchema,
@@ -21,7 +22,11 @@ import {
 	ModelOptionSchema,
 	ProviderConnectResponseSchema,
 	PublicLinkSchema,
+	FormViewSchema,
+	PolicyStateSchema,
 	type DiscordContext,
+	type ElicitationMode,
+	type FormView,
 	type GuildStatus,
 	type IntegrationOption,
 	type McpAuthCompleteResponse,
@@ -30,6 +35,8 @@ import {
 	type McpLink,
 	type McpProbeResponse,
 	type ModelOption,
+	type Policy,
+	type PolicyState,
 	type PromptRequest,
 	type ProviderConnectRequest,
 	type ProviderConnectResponse,
@@ -140,6 +147,7 @@ export class SessionClient {
 	mcpAuthStart(input: {
 		name: string;
 		url: string;
+		elicitation?: ElicitationMode;
 		applicationId?: string;
 		interactionToken?: string;
 		resourceMetadataUrl?: string;
@@ -178,6 +186,66 @@ export class SessionClient {
 	 */
 	async updateContext(threadId: string, discord: DiscordContext): Promise<void> {
 		await this.call(ROUTES.context, Schema.Unknown, { threadId, discord });
+	}
+
+	policy(input: { channelId: string; threadId?: string }): Promise<PolicyState> {
+		return this.call(ROUTES.policy, PolicyStateSchema, input);
+	}
+
+	async setPolicy(input: {
+		scope: "guild" | "channel" | "thread";
+		channelId: string;
+		threadId?: string;
+		policy: Policy;
+	}): Promise<PolicyState> {
+		const response = await this.call(
+			ROUTES.policySet,
+			Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema }),
+			input,
+		);
+		return response.state;
+	}
+
+	async clearPolicy(input: {
+		scope: "guild" | "channel" | "thread";
+		channelId: string;
+		threadId?: string;
+	}): Promise<PolicyState> {
+		const response = await this.call(
+			ROUTES.policyClear,
+			Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema }),
+			input,
+		);
+		return response.state;
+	}
+
+	replyApproval(input: {
+		threadId: string;
+		requestId: string;
+		decision: "once" | "always" | "block";
+		userId?: string;
+		manager?: boolean;
+	}): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.approval, ApprovalReplyResponseSchema, input);
+	}
+
+	form(formId: string, auth: { userId?: string; manager?: boolean } = {}): Promise<FormView> {
+		return this.call(ROUTES.form, FormViewSchema, { formId, ...auth });
+	}
+
+	replyForm(
+		formId: string,
+		values: Record<string, string>,
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, { formId, values, ...auth });
+	}
+
+	cancelForm(
+		formId: string,
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.formCancel, ApprovalReplyResponseSchema, { formId, ...auth });
 	}
 
 	async interrupt(threadId: string, gone: boolean): Promise<boolean> {

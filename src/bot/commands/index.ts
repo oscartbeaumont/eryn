@@ -12,6 +12,7 @@ import { Equal } from "effect";
 import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
 import type { DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
+import { describeError } from "../../errors";
 import { scopedId, unmarshalId } from "../ids";
 import {
 	canManage,
@@ -19,11 +20,14 @@ import {
 	guarded,
 	rejectInteraction,
 	responder,
+	textInput,
+	textModal,
 	type CommandContext,
 	type InteractionRequest,
 } from "./interaction";
 import { mcpComponent, mcpModal } from "./mcp";
 import { modelComponent, modelModalSubmit, modelScreen } from "./models";
+import { policyComponent, policyMenu } from "./policy";
 import { providerComponent, providerModal, providerScreen } from "./providers";
 import { helpText, setupComponent, setupMenu } from "./setup";
 
@@ -40,6 +44,7 @@ export function erynCommand(): DiscordCommand {
 				type: 1,
 			},
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
+			{ name: "policy", description: "Restrict what Eryn may do in this channel or thread", type: 1 },
 			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
 	};
@@ -88,6 +93,7 @@ const COMPONENT_HANDLERS: readonly Handler<readonly string[]>[] = [
 	providerComponent,
 	modelComponent,
 	mcpComponent,
+	policyComponent,
 ];
 
 const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [providerModal, modelModalSubmit, mcpModal];
@@ -95,12 +101,20 @@ const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [providerModa
 /** Dispatch any interaction Eryn receives. */
 export async function handleInteraction(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
 	// A component carries the select's values; a modal carries its fields.
+	const customId = interaction.data?.custom_id;
 	switch (interaction.type) {
 		case 2:
 			return await handleCommand(ctx, interaction);
 		case 3:
+			// Approvals and form cards belong to the conversation, not to the
+			// setup flow: a requester without Manage Server can still answer one.
+			if (customId?.startsWith("approval:")) return await handleApproval(ctx, interaction, customId);
+			if (customId?.startsWith("form:")) return await handleFormComponent(ctx, interaction, customId);
 			return await dispatch(ctx, interaction, COMPONENT_HANDLERS, interaction.data?.values ?? []);
 		case 5:
+			if (customId?.startsWith("form:modal:")) {
+				return await handleFormModal(ctx, interaction, customId, modalValues(interaction));
+			}
 			return await dispatch(ctx, interaction, MODAL_HANDLERS, modalValues(interaction));
 	}
 }
@@ -152,6 +166,8 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(request, "reply", () => providerScreen(request));
 		case "setup:model":
 			return await guarded(request, "reply", () => modelScreen(request));
+		case "policy":
+			return await guarded(request, "reply", () => policyMenu(request));
 		case "stop":
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
@@ -208,4 +224,144 @@ async function dispatch<Values>(
 	for (const handle of handlers) {
 		if (await handle(request, target.customId, values)) return;
 	}
+}
+
+// --- Approval and MCP-form cards ---------------------------------------------
+
+/** Answer a permission card. `approval:<once|always|block>:<requestId>`. */
+async function handleApproval(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	customId: string,
+): Promise<void> {
+	const guildId = interaction.guild_id;
+	const channelId = interaction.channel_id;
+	const [, decision, ...rest] = customId.split(":");
+	const requestId = rest.join(":");
+	if (
+		!guildId ||
+		!channelId ||
+		!requestId ||
+		(decision !== "once" && decision !== "always" && decision !== "block")
+	) {
+		return;
+	}
+	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const result = await ctx
+		.session(guildId)
+		.replyApproval({
+			threadId: channelId,
+			requestId,
+			decision,
+			...(userId ? { userId } : {}),
+			manager: canManage(interaction),
+		})
+		.catch((error) => ({ ok: false, message: describeError(error) }));
+	const message = result.ok
+		? decision === "block"
+			? "Blocked in this conversation."
+			: "Approved."
+		: result.message ?? "That request is no longer waiting.";
+	await ctx.rest
+		.interactionEditOriginal(ctx.applicationId, interaction.token, message, { components: [] })
+		.catch(() => undefined);
+}
+
+/** Open, or acknowledge, an MCP form card. `form:<open|done>:<formId>`. */
+async function handleFormComponent(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	customId: string,
+): Promise<void> {
+	const guildId = interaction.guild_id;
+	if (!guildId) return;
+	const [, action, ...rest] = customId.split(":");
+	const formId = rest.join(":");
+	if (!formId) return;
+	const session = ctx.session(guildId);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const manager = canManage(interaction);
+
+	if (action === "done" || action === "cancel") {
+		await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
+		const result =
+			action === "done"
+				? await session
+						.replyForm(formId, {}, { ...(userId ? { userId } : {}), manager })
+						.catch((error) => ({ ok: false, message: describeError(error) }))
+				: await session
+						.cancelForm(formId, { ...(userId ? { userId } : {}), manager })
+						.catch((error) => ({ ok: false, message: describeError(error) }));
+		await ctx.rest
+			.interactionEditOriginal(
+				ctx.applicationId,
+				interaction.token,
+				result.ok
+					? action === "done"
+						? "Answered."
+						: "Cancelled."
+					: result.message ?? "That form is no longer waiting.",
+				{ components: [] },
+			)
+			.catch(() => undefined);
+		return;
+	}
+
+	if (action !== "open") return;
+	const view = await session.form(formId, { ...(userId ? { userId } : {}), manager }).catch(() => undefined);
+	if (!view) {
+		await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
+		return;
+	}
+	const fields = view.fields.slice(0, 5);
+	const hint = (field: (typeof fields)[number]) =>
+		field.type === "boolean" ? " (yes/no)" : field.type === "number" || field.type === "integer" ? " (number)" : "";
+	await ctx.rest
+		.interactionModal(
+			interaction.id,
+			interaction.token,
+			textModal(
+				`form:modal:${formId}`,
+				view.title.slice(0, 45),
+				fields.map((field, index) =>
+					textInput({
+						custom_id: `f${index}`,
+						label: `${field.title}${hint(field)}`.slice(0, 45),
+						required: field.required,
+						max_length: 1_000,
+						...(field.description || field.placeholder
+							? { placeholder: (field.description ?? field.placeholder ?? "").slice(0, 100) }
+							: {}),
+					}),
+				),
+			),
+		)
+		.catch(() => undefined);
+}
+
+/** A submitted MCP form modal. `form:modal:<formId>`. */
+async function handleFormModal(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	customId: string,
+	values: Record<string, string>,
+): Promise<void> {
+	const guildId = interaction.guild_id;
+	if (!guildId) return;
+	const formId = customId.slice("form:modal:".length);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
+	const result = await ctx
+		.session(guildId)
+		.replyForm(formId, values, { ...(userId ? { userId } : {}), manager: canManage(interaction) })
+		.catch((error) => ({ ok: false, message: describeError(error) }));
+	await ctx.rest
+		.interactionEditOriginal(
+			ctx.applicationId,
+			interaction.token,
+			result.ok ? "Answered." : result.message ?? "That form is no longer waiting.",
+			{ components: [] },
+		)
+		.catch(() => undefined);
 }

@@ -43,6 +43,14 @@ export const KEYS = {
 	pendingOAuth: "config:oauth",
 	/** The guild's virtual filesystem, one key per absolute path. */
 	fs: "fs:",
+	/** The server-wide policy patch. */
+	policyGuild: "policy:guild",
+	/** One channel's policy patch. */
+	policyChannel: "policy:channel:",
+	/** One thread's policy patch. */
+	policyThread: "policy:thread:",
+	/** The message that announces a scope's non-default policy. */
+	policyCard: "policy:card:",
 } as const;
 
 /**
