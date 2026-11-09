@@ -18,7 +18,7 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log, publicOrigin } from "./config";
+import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
@@ -320,13 +320,7 @@ export default {
 			// that leaves it offline is visible from one request. The deploy id says
 			// which code is actually serving: a Durable Object keeps the code it
 			// started with until it restarts.
-			//
-			// Only this Worker's public origin may wake it. A local `cf dev` server
-			// shares the production bot token, so booting the gateway from it would
-			// open a second Discord session that answers from its own empty storage
-			// — a second Eryn, replying "no provider" beside the real one.
-			const isPublicOrigin = new URL(request.url).origin === publicOrigin(env);
-			const botState = isPublicOrigin ? await wake(env).catch(() => undefined) : null;
+			const botState = await wake(env).catch(() => undefined);
 			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
 		}
 

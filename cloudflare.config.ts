@@ -15,6 +15,11 @@ export default defineConfig({
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
 		domains: ["eryn.otbeaumont.me"],
+		// A string domain serves production traffic only, and both workers.dev
+		// URLs are off: neither `eryn.<subdomain>.workers.dev` nor a
+		// `<version>-eryn.<subdomain>.workers.dev` Preview URL is published.
+		workersDev: false,
+		previewUrls: false,
 		// `assets/` is the public directory. Only the brand paths are routed to
 		// the Worker; every other matching file is served directly by Cloudflare.
 		assets: {
