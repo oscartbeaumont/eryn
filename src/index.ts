@@ -16,8 +16,7 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log, publicOrigin } from "./config";
-import { landingPage } from "./landing";
+import { APPLICATION_PUBLIC_KEY, INTERACTIONS_PATH, log } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
@@ -86,8 +85,6 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	// Brand images and the favicon are static assets; the Worker owns these
 	// paths so it can add the long-lived cache headers.
 	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
-	// The public origin is a landing page, since the bot's whole UI is Discord.
-	if (url.pathname === "/" && isRead(request)) return landingPage(publicOrigin(env));
 	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
 	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
 

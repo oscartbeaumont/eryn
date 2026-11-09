@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/banner.webp" alt="Eryn — an OpenCode agent for Discord" width="100%">
+  <img src="assets/brand/banner.webp" alt="Eryn — your personal agent in Discord" width="100%">
 </p>
 
 # eryn
@@ -121,10 +121,10 @@ Only servers an admin has explicitly linked are available to the agent.
 
 ## Technical details
 
-Eryn is a single Cloudflare Worker. The Worker serves the landing page, the
-health check, the filtered models.dev catalogue used by the embedded agent, and
-the external MCP sign-in callback. The bot itself is made of two Durable
-Objects:
+Eryn is a single Cloudflare Worker. The Worker serves the health check, the
+filtered models.dev catalogue used by the embedded agent, and the external MCP
+sign-in callback. The landing page is a prerendered static asset. The bot itself
+is made of two Durable Objects:
 
 | Object | Scope | Responsibility |
 | --- | --- | --- |
@@ -159,9 +159,12 @@ messages, joins, and thread events, where a short gap is harmless.
 ### Source layout
 
 ```
-assets/          public images served by Cloudflare static assets
+assets/          public images and the prerendered landing page
+scripts/         the landing-page prerender entry
 src/
-├─ index.ts       Worker entrypoint, landing page, health, MCP callback
+├─ index.ts       Worker entrypoint: health, MCP callback, bot routes
+├─ landing/       SolidJS + Tailwind landing page, rendered at build time
+├─ public.ts      brand paths, install URL, and constants shared with the page
 ├─ bot/           bot gateway object, slash commands, install flow
 ├─ session/       per-guild Durable Object, OpenCode agent, storage
 ├─ discord/       Discord REST and gateway socket
@@ -169,13 +172,21 @@ src/
 └─ plugins/       OpenCode plugins, one self-contained directory each
 ```
 
+The landing page is a Solid component tree in `src/landing/`, styled with
+Tailwind. `scripts/prerender.mjs` loads the SSR entry through Vite and writes a
+complete `assets/index.html`; Cloudflare then serves it directly, so the page
+ships no client-side JavaScript. `vite.landing.config.ts` and
+`tsconfig.landing.json` are separate from the Worker's Vite and TypeScript
+configuration so Solid and Tailwind never participate in bundling the Worker.
+
 ### Development
 
 ```sh
 pnpm install
 cp .dev.vars.example .dev.vars
-pnpm dev          # cf dev
-pnpm typecheck    # cf workers types && tsc
+pnpm dev          # prerender the landing page, then cf dev
+pnpm prerender    # regenerate assets/index.html only
+pnpm typecheck    # cf workers types && tsc && tsc -p tsconfig.landing.json
 pnpm run check    # typecheck + build
 ```
 
@@ -199,8 +210,12 @@ favicon, square mark, apple touch icon, and wide banner are served as Cloudflare
 static assets; `/brand/*` and `/favicon.ico` are routed through the Worker's
 `ASSETS` binding so they keep the long-lived cache and `nosniff` headers. The
 landing page and the sign-in pages use the favicon, and
-`/brand/banner.webp` is the social preview image. Add or replace files in
-`assets/` and deploy; there is no generated source to keep in sync.
+`/brand/banner.webp` is the social preview image. Add or replace images in
+`assets/` and deploy.
+
+`assets/index.html` is generated from `src/landing/`; edit the Solid components
+and Tailwind classes there, then run `pnpm prerender` (or let `pnpm dev` and
+`pnpm build` do it). Do not edit the generated HTML by hand.
 
 ### Configuration
 

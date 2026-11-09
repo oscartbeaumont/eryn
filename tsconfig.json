@@ -15,5 +15,6 @@
       "@opencode/sdk/internal/host": ["./node_modules/@opencode/sdk/dist/internal/host.d.ts"]
     }
   },
-  "include": ["src", "cloudflare.config.ts", "vite.config.ts", ".cloudflare/types"]
+  "include": ["src", "cloudflare.config.ts", "vite.config.ts", ".cloudflare/types"],
+  "exclude": ["src/landing"]
 }

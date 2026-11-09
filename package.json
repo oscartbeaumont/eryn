@@ -7,10 +7,11 @@
   },
   "packageManager": "pnpm@10.33.1",
   "scripts": {
-    "dev": "cf dev",
-    "build": "cf build",
-    "deploy": "cf deploy",
-    "typecheck": "cf workers types && tsc",
+    "dev": "pnpm prerender && cf dev",
+    "prerender": "node scripts/prerender.mjs",
+    "build": "pnpm prerender && cf build",
+    "deploy": "pnpm prerender && cf deploy",
+    "typecheck": "cf workers types && tsc && tsc -p tsconfig.landing.json",
     "check": "pnpm typecheck && pnpm build"
   },
   "dependencies": {
@@ -25,10 +26,14 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "beta",
+    "@tailwindcss/vite": "^4.3.5",
     "@types/node": "^26.6.5",
     "cf": "^1.0.0-beta.18",
+    "solid-js": "^1.9.18",
+    "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "vite-plugin-solid": "^2.11.15"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -7,13 +7,9 @@
  * and nosniff headers the pages have always used.
  */
 
-export const BRAND = {
-	banner: "/brand/banner.webp",
-	mark: "/brand/mark.webp",
-	icon: "/brand/icon-64.png",
-	appleIcon: "/brand/apple-touch-icon.png",
-	favicon: "/favicon.ico",
-} as const;
+import { BRAND } from "./public";
+
+export { BRAND };
 
 /** The paths handled by {@link brandAsset}; keep in sync with `assets.runWorkerFirst`. */
 export function isBrandAsset(pathname: string): boolean {
