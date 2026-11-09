@@ -379,10 +379,28 @@ export const PromptRequestSchema = Schema.Struct({
 	mentions: Schema.optional(Schema.Array(PromptUserSchema)),
 	/** Where the request came from in Discord, recorded on the session. */
 	discord: Schema.optional(DiscordContextSchema),
+	/**
+	 * An automated Discord notice to put in front of the message, such as a
+	 * rename. Kept separate so it is not attributed to the speaker.
+	 */
+	notice: Schema.optional(Schema.String),
 	/** Files attached to the message, for the model to read. */
 	attachments: Schema.optional(Schema.Array(PromptAttachmentSchema)),
 });
 export type PromptRequest = typeof PromptRequestSchema.Type;
+
+/**
+ * A fresh description of a conversation, written when Discord renames it.
+ *
+ * The gateway sends the same {@link DiscordContext} it records on prompts, so
+ * the session object can correct the stored copy before the next turn.
+ */
+export const ContextUpdateRequestSchema = Schema.Struct({
+	guildId: Schema.String,
+	threadId: Schema.String,
+	discord: DiscordContextSchema,
+});
+export type ContextUpdateRequest = typeof ContextUpdateRequestSchema.Type;
 
 export const InterruptRequestSchema = Schema.Struct({
 	threadId: Schema.String,

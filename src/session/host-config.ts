@@ -179,6 +179,9 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 		config: {
 			model: config.model,
 			default_agent: "build",
+			// Sessions are only read through the bot, so generating a title is
+			// pure token overhead.
+			agents: { title: { disabled: true } },
 			permissions: [{ action: "*", resource: "*", effect: "allow" }],
 			mcp: mcpConfig(config.links),
 			experimental: { schedules: true },

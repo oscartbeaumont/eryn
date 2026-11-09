@@ -5,10 +5,13 @@
  * thread, the thread's parent), its guild's name, and the bot's managed role.
  * Each is fetched at most once; a failed lookup is not a missing channel, so it
  * is not remembered and the next message tries again.
+ *
+ * Gateway update events replace the cached entry, which is what makes a rename
+ * visible to the next message instead of only after a restart.
  */
 
 import type { DiscordChannelRef, DiscordRest } from "../discord/api";
-import type { DiscordMessage } from "../discord/socket";
+import type { DiscordChannel, DiscordMessage } from "../discord/socket";
 import type { DiscordContext } from "../session/models";
 
 /** A long-lived guild object should not remember every channel forever. */
@@ -32,6 +35,37 @@ export class DiscordLookups {
 		return channel;
 	}
 
+	/**
+	 * A channel already read during this object's lifetime, without a request.
+	 *
+	 * Used to notice what a name was before an update replaces it; `undefined`
+	 * means the old name was never needed, not that the channel is missing.
+	 */
+	cached(channelId: string): DiscordChannelRef | undefined {
+		return this.channels.get(channelId);
+	}
+
+	/**
+	 * Use a gateway channel payload as the fresh cache entry.
+	 *
+	 * The payload carries every field a context needs, and a rename arrives this
+	 * way before the next message, so remembering it is what stops a rename from
+	 * being invisible until this object restarts.
+	 */
+	remember(channel: DiscordChannel): DiscordChannelRef | undefined {
+		if (typeof channel.type !== "number") return undefined;
+		const ref: DiscordChannelRef = {
+			id: channel.id,
+			type: channel.type,
+			...(channel.guild_id ? { guild_id: channel.guild_id } : {}),
+			...(channel.parent_id ? { parent_id: channel.parent_id } : {}),
+			...(channel.name ? { name: channel.name } : {}),
+		};
+		if (this.channels.size > MAX_CACHED_CHANNELS) this.channels.clear();
+		this.channels.set(ref.id, ref);
+		return ref;
+	}
+
 	/** A guild's name, from one cached listing. A failed listing is not cached. */
 	async guildName(guildId: string): Promise<string | undefined> {
 		const cached = this.guildNames.get(guildId);
@@ -40,6 +74,11 @@ export class DiscordLookups {
 		if (!guilds) return undefined;
 		for (const guild of guilds) this.guildNames.set(guild.id, guild.name);
 		return this.guildNames.get(guildId);
+	}
+
+	/** Replace a cached guild name from a gateway payload. */
+	rememberGuild(guildId: string, name: string): void {
+		this.guildNames.set(guildId, name);
 	}
 
 	/**

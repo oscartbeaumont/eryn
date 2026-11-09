@@ -24,7 +24,7 @@ import { CLIENT_ID, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../co
 import { deployChanged } from "../deploy";
 import { describeError } from "../errors";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
-import { renderThreadCreated } from "../discord/render";
+import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
 import { DiscordSocket, type DiscordChannel, type DiscordGuildCreate, type DiscordInteraction, type DiscordMessage } from "../discord/socket";
 import type { DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
@@ -40,6 +40,7 @@ const MESSAGE_WATCH_PATH = "/message-watch";
 const THREAD_PREFIX = "thread:";
 const CHANNEL_PREFIX = "channel:";
 const WATCH_PREFIX = "watch:";
+const RENAME_PREFIX = "rename:";
 /**
  * How often the keepalive alarm runs.
  *
@@ -66,6 +67,20 @@ interface MessageWatch {
 	readonly notifyThreadId?: string;
 	readonly notifyTitle?: string;
 	readonly notifyDiscord?: DiscordContext;
+}
+
+/**
+ * A rename an owned conversation has not been told about yet.
+ *
+ * Renames arrive while the agent is idle, and telling it promptly would mean
+ * starting a turn for nothing. The notice waits for the next real message, so
+ * the agent learns the old and new names in the turn that already runs.
+ */
+interface RenameNotice {
+	readonly id: string;
+	readonly kind: "thread" | "channel";
+	readonly name: string;
+	readonly previousName?: string;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -105,8 +120,12 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			onInteraction: (interaction) =>
 				this.track(() => this.onInteraction(interaction), "interaction handling failed"),
 			onGuild: (guild) => this.track(() => this.onGuild(guild), "guild handling failed"),
+			onGuildUpdate: (guild) =>
+				this.track(() => this.onGuildUpdate(guild), "guild update handling failed"),
 			onThreadCreate: (thread) =>
 				this.track(() => this.onThreadCreate(thread), "thread creation handling failed"),
+			onChannelUpdate: (channel) =>
+				this.track(() => this.onChannelUpdate(channel), "channel update handling failed"),
 			onChannelDelete: (channel) =>
 				this.track(() => this.onChannelDelete(channel), "channel deletion handling failed"),
 		});
@@ -341,6 +360,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		await maybeAnnounceInstall(this.rest, this.ctx.storage, guild, this.botUserId);
 	}
 
+	/** A guild rename only has to reach the next context build. */
+	private async onGuildUpdate(guild: DiscordGuildCreate): Promise<void> {
+		if (guild.name) this.lookups.rememberGuild(guild.id, guild.name);
+	}
+
 	private async onMessage(message: DiscordMessage): Promise<void> {
 		if (!this.botUserId) return;
 		const guildId = message.guild_id;
@@ -378,6 +402,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				text,
 				message,
 				await this.lookups.context(guildId, parent, channel),
+				await this.takeRenameNotice(channel.id),
 			);
 			return;
 		}
@@ -402,6 +427,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				text,
 				message,
 				await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel"),
+				await this.takeRenameNotice(channel.id),
 			);
 			return;
 		}
@@ -446,6 +472,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			text,
 			message,
 			await this.lookups.context(guildId, channel, { id: threadId, name }),
+			await this.takeRenameNotice(threadId),
 		);
 	}
 
@@ -458,6 +485,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	private async onThreadCreate(thread: DiscordChannel): Promise<void> {
 		const guildId = thread.guild_id;
 		if (guildId === undefined) return;
+		// Keep the creation payload, so a rename that follows has a name to
+		// compare against.
+		this.lookups.remember(thread);
 		const watch = await this.ctx.storage.get<MessageWatch>(WATCH_PREFIX + thread.id);
 		if (!watch || watch.guildId !== guildId) return;
 		// A thread made from a message can only live in that message's channel.
@@ -508,6 +538,40 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	}
 
 	/**
+	 * A channel or thread was updated, usually because it was renamed.
+	 *
+	 * The payload itself is the freshest lookup, so the next message carries
+	 * the new name with no REST round-trip. When the renamed conversation is
+	 * one Eryn owns, the session's stored context is corrected too: the agent
+	 * was told the old name in its system prompt, and nothing else would ever
+	 * correct it. A notice is left for the next message so the agent knows a
+	 * rename happened without spending a whole turn on it.
+	 */
+	private async onChannelUpdate(channel: DiscordChannel): Promise<void> {
+		const guildId = channel.guild_id;
+		const previous = this.lookups.cached(channel.id)?.name;
+		const ref = this.lookups.remember(channel);
+		if (guildId === undefined || !ref?.name || previous === undefined || previous === ref.name) return;
+
+		const isThread = THREAD_TYPES.has(ref.type);
+		const owned = isThread ? await this.ownsThread(ref.id) : await this.ownsChannel(ref.id);
+		if (!owned) return;
+
+		const kind = isThread ? "thread" : "channel";
+		await this.ctx.storage.put<RenameNotice>(RENAME_PREFIX + ref.id, {
+			id: ref.id,
+			kind,
+			name: ref.name,
+			previousName: previous,
+		});
+		const parent = ref.parent_id ? await this.lookups.channel(ref.parent_id) : undefined;
+		const discord = await this.lookups.context(guildId, parent, { id: ref.id, name: ref.name }, kind);
+		await this.session(guildId)
+			.updateContext(ref.id, discord)
+			.catch((error) => log(`could not record the rename of ${ref.id}: ${describeError(error)}`));
+	}
+
+	/**
 	 * A deleted thread or channel can never receive the reply, so a turn still
 	 * running in it is cancelled rather than left to finish into nothing, and
 	 * the record that says we own the conversation goes with it.
@@ -522,6 +586,8 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			log(`could not stop the turn in deleted ${isThread ? "thread" : "channel"} ${channel.id}: ${describeError(error)}`),
 		);
 		await this.ctx.storage.delete((isThread ? THREAD_PREFIX : CHANNEL_PREFIX) + channel.id);
+		// The conversation is gone, so a rename it never received is moot.
+		await this.ctx.storage.delete(RENAME_PREFIX + channel.id);
 	}
 
 	// --- Session object plumbing ------------------------------------------------
@@ -560,6 +626,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		text: string,
 		message: DiscordMessage,
 		discord: DiscordContext,
+		notice?: string,
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const client = this.session(guildId);
@@ -571,6 +638,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 					author: authorInfo(message),
 					mentions: mentionInfo(message, this.botUserId),
 					discord,
+					...(notice ? { notice } : {}),
 					attachments: attachmentsOf(message),
 				});
 				return;
@@ -584,6 +652,20 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				.sendMessage(threadId, "I could not start that turn, so there is nothing to show. Please try again.")
 				.catch(() => undefined);
 		});
+	}
+
+	/**
+	 * Take the rename notice a conversation is owed, if any.
+	 *
+	 * Read at prompt time rather than delivered on the event: starting a turn
+	 * just to say a name changed would spend tokens and could make the agent
+	 * post a reply nobody asked for. The next real message carries it instead.
+	 */
+	private async takeRenameNotice(channelId: string): Promise<string | undefined> {
+		const notice = await this.ctx.storage.get<RenameNotice>(RENAME_PREFIX + channelId);
+		if (!notice) return undefined;
+		await this.ctx.storage.delete(RENAME_PREFIX + channelId);
+		return renderChannelRenamed(notice);
 	}
 
 	/**

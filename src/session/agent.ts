@@ -65,6 +65,8 @@ export interface GuildAgentShape {
 	oauthCancel(config: HostConfig, integrationID: string, attemptID: string): Promise<void>;
 	disconnect(config: HostConfig, integrationID: string): Promise<number>;
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
+	/** Correct a conversation's stored context after Discord renames it. */
+	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
 	interrupt(threadId: string | undefined, gone: boolean): Promise<boolean>;
 	/** Build the host if it is not up, so its schedule runner is running. */
 	ensureHost(config: HostConfig): Promise<void>;
@@ -421,7 +423,10 @@ class GuildAgentImpl implements GuildAgentShape {
 			// died since the last turn has to be replaced before this one starts.
 			this.startConsuming(host);
 			const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
-			await this.applyDiscord(host, request.threadId, sessionID, request.discord);
+			// A rename is not replayed to the agent, and the gateway's copy can
+			// predate it, so re-read the conversation rather than trusting it.
+			const discord = request.discord ? await this.refreshContext(request.discord) : undefined;
+			await this.applyDiscord(host, request.threadId, sessionID, discord);
 			await this.applyModel(host, request.threadId, sessionID, config.model);
 
 			const attached = await fetchAttachmentFiles(request.attachments);
@@ -429,8 +434,8 @@ class GuildAgentImpl implements GuildAgentShape {
 			// The message carries the channel and (when there is one) the thread
 			// it came from. The agent posts its reply with a Discord tool, so
 			// these ids are what tell it where the reply belongs.
-			const context = request.discord ? renderConversation(request.discord) : undefined;
-			const body = [context, message].filter(Boolean).join("\n\n");
+			const conversation = discord ? renderConversation(discord) : undefined;
+			const body = [conversation, request.notice, message].filter(Boolean).join("\n\n");
 			const text =
 				attached.notes.length > 0
 					? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
@@ -537,6 +542,60 @@ class GuildAgentImpl implements GuildAgentShape {
 		} catch (error) {
 			log("session", `could not record the Discord context for ${threadId}: ${describeError(error)}`);
 		}
+	}
+
+	/**
+	 * Correct a conversation's stored context after a rename.
+	 *
+	 * The next prompt refreshes it anyway, but a scheduled turn starts from
+	 * metadata alone: writing now means a schedule that fires before the next
+	 * message still knows the current name. A conversation with no session yet
+	 * needs nothing, because its first prompt writes the context from scratch.
+	 */
+	async updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void> {
+		const sessionID = await this.sessionFor(threadId);
+		if (!sessionID) return;
+		const host = await this.hostFor(config);
+		const session = await host.sessions.get({ sessionID }).catch((error) => {
+			log("session", `could not read ${sessionID} to record a rename: ${describeError(error)}`);
+			return undefined;
+		});
+		if (!session) return;
+		await host.sessions.update({
+			sessionID,
+			// Merged, so a rename cannot drop metadata another plugin put there.
+			metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: discord },
+		});
+		// The prompt path keeps the last signature it wrote; drop it so a stale
+		// value cannot make the next prompt skip a needed write.
+		this.appliedContext.delete(threadId);
+	}
+
+	/**
+	 * Re-read the names of a conversation from Discord.
+	 *
+	 * Ids never change, so only the names are refreshed. This is the fallback
+	 * for a rename event that arrived while this object had no gateway
+	 * connection, and it is what a scheduled turn relies on when it starts from
+	 * metadata without a gateway event in front of it.
+	 */
+	private async refreshContext(context: DiscordContext): Promise<DiscordContext> {
+		const conversation = await this.rest.channel(context.thread.id).catch(() => undefined);
+		if (!conversation) return context;
+
+		const thread = conversation.name
+			? { id: conversation.id, name: conversation.name }
+			: context.thread;
+		let channel = context.channel;
+		if (conversation.parent_id) {
+			const parent = await this.rest.channel(conversation.parent_id).catch(() => undefined);
+			if (parent?.name) channel = { id: parent.id, name: parent.name };
+		} else if (conversation.name) {
+			// A subscribed channel is its own conversation, so there is no parent
+			// whose name would be the room the agent is in.
+			channel = { id: conversation.id, name: conversation.name };
+		}
+		return { ...context, channel, thread };
 	}
 
 	/**
@@ -692,9 +751,22 @@ class GuildAgentImpl implements GuildAgentShape {
 		void (async () => {
 			try {
 				const session = await host.sessions.get({ sessionID });
-				const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				// A scheduled turn starts from metadata with no message to carry a
+				// rename, so correct the names before following the turn.
+				const context = stored ? await this.refreshContext(stored) : undefined;
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn) return;
+				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
+					await host.sessions
+						.update({
+							sessionID,
+							metadata: { ...session.metadata, [DISCORD_METADATA_KEY]: context },
+						})
+						.catch((error) =>
+							log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`),
+						);
+				}
 
 				this.remember(threadId, sessionID);
 				const turn = this.beginTurn(threadId);

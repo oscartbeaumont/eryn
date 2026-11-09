@@ -21,6 +21,7 @@ import {
 	ModelOptionSchema,
 	ProviderConnectResponseSchema,
 	PublicLinkSchema,
+	type DiscordContext,
 	type GuildStatus,
 	type IntegrationOption,
 	type McpAuthCompleteResponse,
@@ -166,6 +167,16 @@ export class SessionClient {
 
 	async prompt(body: Omit<PromptRequest, "guildId">): Promise<void> {
 		await this.call(ROUTES.prompt, Schema.Unknown, { ...body, guildId: this.guildId });
+	}
+
+	/**
+	 * Correct a conversation's recorded Discord context after a rename.
+	 *
+	 * A scheduled turn starts from the stored copy, so it has to be right even
+	 * when no message follows the rename.
+	 */
+	async updateContext(threadId: string, discord: DiscordContext): Promise<void> {
+		await this.call(ROUTES.context, Schema.Unknown, { guildId: this.guildId, threadId, discord });
 	}
 
 	async interrupt(threadId: string, gone: boolean): Promise<boolean> {

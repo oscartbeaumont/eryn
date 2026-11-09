@@ -19,6 +19,7 @@ import { probeServer } from "../mcp/probe";
 import type { GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
 import {
+	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
 	GuildRefSchema,
 	InterruptRequestSchema,
@@ -381,6 +382,22 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			await agent.prompt(body, await reconcileModel(config));
 			// The object's alarm is re-armed after this request returns, so a
 			// schedule the turn created still fires on time.
+			return json({ ok: true });
+		}),
+
+		/**
+		 * Keep a conversation's stored description current after a rename.
+		 *
+		 * A rename is not a prompt: with no provider there is no scheduled turn
+		 * to keep current, and the next prompt writes the context anyway. When
+		 * there is a session, the stored copy is corrected now so a schedule
+		 * that fires before the next message still sees the new name.
+		 */
+		[ROUTES.context]: route(ContextUpdateRequestSchema, async (body) => {
+			const config = await loadConfig();
+			if (config.connections.length > 0) {
+				await agent.updateContext(await reconcileModel(config), body.threadId, body.discord);
+			}
 			return json({ ok: true });
 		}),
 

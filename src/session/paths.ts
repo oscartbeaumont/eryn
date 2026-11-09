@@ -23,5 +23,6 @@ export const ROUTES = {
 	linkOauthUrl: "/link/oauth/url",
 	linkOauthComplete: "/link/oauth/complete",
 	prompt: "/prompt",
+	context: "/context",
 	interrupt: "/interrupt",
 } as const;

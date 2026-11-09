@@ -71,6 +71,32 @@ export function renderThreadCreated(
 }
 
 /**
+ * An automated notice that the conversation was renamed.
+ *
+ * Kept until the next message so the agent learns the change without spending
+ * a turn on it and without a second bot message appearing in the channel. The
+ * id is the part that matters; it never changes.
+ */
+export function renderChannelRenamed(notice: {
+	id: string;
+	kind: "thread" | "channel";
+	name: string;
+	previousName?: string;
+}): string {
+	const entries: [string, string][] = [
+		["type", "channel_renamed"],
+		[notice.kind === "thread" ? "threadId" : "channelId", notice.id],
+		["name", notice.name],
+	];
+	if (notice.previousName) entries.push(["previousName", notice.previousName]);
+	const what = notice.kind === "thread" ? "thread" : "channel";
+	return [
+		selfClosing("discord-event", entries),
+		`Automated notice: this ${what} was renamed${notice.previousName ? ` from "${notice.previousName}"` : ""}. Its id is unchanged, so keep using it.`,
+	].join("\n\n");
+}
+
+/**
  * The channel a live prompt came from, and the thread when it came from one.
  *
  * The agent needs this in the message itself so it knows which conversation a

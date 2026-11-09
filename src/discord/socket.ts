@@ -3,8 +3,8 @@
  *
  * One socket is kept open with heartbeats, resumable sessions, and backoff
  * reconnects. It knows nothing about OpenCode: the owner supplies callbacks for
- * the events it cares about (messages, interactions, guild joins, channel
- * deletions).
+ * the events it cares about (messages, interactions, guild changes, thread
+ * creation, channel and thread updates and deletions).
  *
  * Cloudflare stops keeping a Durable Object in memory 15 minutes after an
  * outbound connection opens, so the owner should call `recycle()` (for example
@@ -128,8 +128,15 @@ export interface DiscordSocketHandlers {
 	onMessage(message: DiscordMessage): void;
 	onInteraction(interaction: DiscordInteraction): void;
 	onGuild(guild: DiscordGuildCreate): void;
+	/** A guild was renamed or otherwise updated. */
+	onGuildUpdate(guild: DiscordGuildCreate): void;
 	/** A thread was created, or the bot was added to one. */
 	onThreadCreate(thread: DiscordChannel): void;
+	/**
+	 * A channel or thread was updated, which is how a rename arrives. Threads
+	 * are channels, so both forms are passed here.
+	 */
+	onChannelUpdate(channel: DiscordChannel): void;
 	/** A channel or thread was deleted. Threads are channels, so both arrive here. */
 	onChannelDelete(channel: DiscordChannel): void;
 }
@@ -321,10 +328,21 @@ export class DiscordSocket {
 				} else if (payload.t === "GUILD_CREATE") {
 					const guild = payload.d as DiscordGuildCreate | undefined;
 					if (guild && typeof guild.id === "string") this.handlers.onGuild(guild);
+				} else if (payload.t === "GUILD_UPDATE") {
+					const guild = payload.d as DiscordGuildCreate | undefined;
+					if (guild && typeof guild.id === "string") this.handlers.onGuildUpdate(guild);
 				} else if (payload.t === "THREAD_CREATE") {
 					const thread = payload.d as DiscordChannel | undefined;
 					if (thread && typeof thread.id === "string") {
 						this.handlers.onThreadCreate(thread);
+					}
+				} else if (payload.t === "CHANNEL_UPDATE" || payload.t === "THREAD_UPDATE") {
+					// Discord names a thread update THREAD_UPDATE, but a thread is a
+					// channel and other updates can arrive as CHANNEL_UPDATE. Both are
+					// passed on; the update is idempotent.
+					const channel = payload.d as DiscordChannel | undefined;
+					if (channel && typeof channel.id === "string") {
+						this.handlers.onChannelUpdate(channel);
 					}
 				} else if (payload.t === "THREAD_DELETE" || payload.t === "CHANNEL_DELETE") {
 					// A thread is a channel: Discord names the thread's own deletion
