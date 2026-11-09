@@ -23,6 +23,7 @@ import {
 	ApprovalReplyRequestSchema,
 	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
+	FormCancelRequestSchema,
 	FormGetRequestSchema,
 	FormReplyRequestSchema,
 	GuildRefSchema,
@@ -297,6 +298,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 						guildId,
 						name,
 						url: body.url,
+						...(body.elicitation ? { elicitation: body.elicitation } : {}),
 						...(body.applicationId ? { applicationId: body.applicationId } : {}),
 						...(body.interactionToken ? { interactionToken: body.interactionToken } : {}),
 						...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
@@ -427,11 +429,16 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		[ROUTES.approval]: route(ApprovalReplyRequestSchema, async (body) => json(await agent.replyApproval(body))),
 
 		[ROUTES.form]: route(FormGetRequestSchema, async (body) => {
-			const view = await agent.formView(body.formId);
+			const view = await agent.formView(body.formId, {
+				...(body.userId ? { userId: body.userId } : {}),
+				...(body.manager !== undefined ? { manager: body.manager } : {}),
+			});
 			return view ? json(view) : json({ error: "That form is no longer waiting." }, 404);
 		}),
 
 		[ROUTES.formReply]: route(FormReplyRequestSchema, async (body) => json(await agent.replyForm(body))),
+
+		[ROUTES.formCancel]: route(FormCancelRequestSchema, async (body) => json(await agent.cancelForm(body))),
 
 		[ROUTES.interrupt]: openRoute(InterruptRequestSchema, async (body) => {
 			const gone = body.gone === true;

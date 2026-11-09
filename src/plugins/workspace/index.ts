@@ -165,7 +165,7 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 						name: spec.name,
 						description: spec.description,
 						input: spec.input,
-						execute: toolRun(spec),
+						execute: toolRun(spec, ctx),
 					});
 				}
 			});

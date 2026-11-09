@@ -87,6 +87,7 @@ interface PendingForm {
 	readonly kind: "thread" | "channel";
 	readonly fields: readonly FormField[];
 	readonly content: string;
+	readonly requesterId?: string;
 	readonly messageId?: string;
 	readonly timer: ReturnType<typeof setTimeout>;
 }
@@ -130,11 +131,22 @@ export interface GuildAgentShape {
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }>;
 	/** The fields a Discord modal must render for one MCP form. */
-	formView(formId: string): Promise<FormView | undefined>;
+	formView(
+		formId: string,
+		auth?: { userId?: string; manager?: boolean },
+	): Promise<FormView | undefined>;
 	/** Answer an MCP form with the values a Discord modal collected. */
 	replyForm(input: {
 		formId: string;
 		values: Record<string, string>;
+		userId?: string;
+		manager?: boolean;
+	}): Promise<{ ok: boolean; message?: string }>;
+	/** Dismiss an MCP form without answering it. */
+	cancelForm(input: {
+		formId: string;
+		userId?: string;
+		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }>;
 	/** Correct a conversation's stored context after Discord renames it. */
 	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
@@ -732,18 +744,20 @@ class GuildAgentImpl implements GuildAgentShape {
 		discord: DiscordContext | undefined,
 		config: HostConfig,
 	): Promise<void> {
-		if (!discord) return;
-		this.contextByThread.set(threadId, discord);
-		const state = await this.policyFor(discord.channel.id, discord.kind === "channel" ? undefined : threadId);
+		// A prompt with no message context still belongs to a conversation. Fall
+		// back to what the session already knows; if there is nothing, fail the
+		// turn rather than run it under the host's allow-all base.
+		const context = discord ?? this.contextByThread.get(threadId) ?? (await this.contextForSession(sessionID))?.context;
+		if (!context) throw new Error("This conversation has no Discord context, so its policy could not be applied.");
+		this.contextByThread.set(threadId, context);
+		const state = await this.policyFor(context.channel.id, context.kind === "channel" ? undefined : threadId);
 		const signature = `${JSON.stringify(state.effective)}|${config.links.map((link) => link.name).join(",")}`;
 		if (this.appliedPolicies.get(threadId) === signature) return;
 		const permissions = compilePermissions(state.effective, config.links);
-		try {
-			await host.sessions.update({ sessionID, permissions });
-			this.appliedPolicies.set(threadId, signature);
-		} catch (error) {
-			log("session", `could not apply the policy for ${threadId}: ${describeError(error)}`);
-		}
+		// Do not swallow this: a restrictive policy that failed to apply must not
+		// silently turn into an unrestricted turn.
+		await host.sessions.update({ sessionID, permissions });
+		this.appliedPolicies.set(threadId, signature);
 	}
 
 	private async applyPolicyToThread(
@@ -878,13 +892,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (input.decision !== "once") {
 			try {
 				const effect: PolicyEffect = input.decision === "always" ? "allow" : "block";
-				const links = this.currentConfig?.links ?? (await this.store.links());
 				const key = this.scopeKey(
 					pending.kind === "thread" ? "thread" : "channel",
 					pending.channelId,
 					pending.threadId,
 				);
-				const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect, links));
+				const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect));
 				await this.store.putPolicy(key, patch);
 				await this.reapplyScope({
 					scope: pending.kind === "thread" ? "thread" : "channel",
@@ -1089,18 +1102,50 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	// --- MCP forms ------------------------------------------------------------
 
-	async formView(formId: string): Promise<FormView | undefined> {
+	async formView(
+		formId: string,
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<FormView | undefined> {
 		const pending = this.pendingForms.get(formId);
-		if (!pending) return undefined;
+		if (!pending || !this.mayAnswer(pending, auth.userId, auth.manager)) return undefined;
 		return { id: pending.formId, title: "Eryn needs some information", fields: [...pending.fields] };
+	}
+
+	/** The requester or a manager may answer a form, the same rule as an approval. */
+	private mayAnswer(
+		pending: { requesterId?: string },
+		userId: string | undefined,
+		manager: boolean | undefined,
+	): boolean {
+		return manager === true || (pending.requesterId !== undefined && userId === pending.requesterId);
+	}
+
+	/** Dismiss an MCP form from its card, without answering it. */
+	async cancelForm(input: {
+		formId: string;
+		userId?: string;
+		manager?: boolean;
+	}): Promise<{ ok: boolean; message?: string }> {
+		const pending = this.pendingForms.get(input.formId);
+		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+		if (!this.mayAnswer(pending, input.userId, input.manager)) {
+			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can cancel this." };
+		}
+		await this.cancelPendingForm(pending, "cancelled in Discord.");
+		return { ok: true };
 	}
 
 	async replyForm(input: {
 		formId: string;
 		values: Record<string, string>;
+		userId?: string;
+		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
 		const pending = this.pendingForms.get(input.formId);
 		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+		if (!this.mayAnswer(pending, input.userId, input.manager)) {
+			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can answer this." };
+		}
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
 		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
 
@@ -1146,7 +1191,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			.catch(() => undefined);
 	}
 
-	private async cancelForm(pending: PendingForm, message: string): Promise<void> {
+	private async cancelPendingForm(pending: PendingForm, message: string): Promise<void> {
 		this.pendingForms.delete(pending.formId);
 		clearTimeout(pending.timer);
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
@@ -1193,12 +1238,14 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (!found) return;
 
 		const metadata = form.metadata && typeof form.metadata === "object" ? (form.metadata as Record<string, unknown>) : undefined;
-		const server = typeof metadata?.server === "string" ? metadata.server : "An MCP server";
+		const isMcp = metadata?.kind === "mcp-elicitation";
+		const server = isMcp && typeof metadata?.server === "string" ? metadata.server : "Eryn";
 		const links = this.currentConfig?.links ?? (await this.store.links());
-		const mode = links.find((link) => link.name === server)?.elicitation ?? "discord";
+		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
 		const fields = Array.isArray(form.fields) ? form.fields.map(formField).filter(Boolean) as FormField[] : [];
 		const message = typeof metadata?.message === "string" ? metadata.message : undefined;
 
+		const requester = this.requesterByThread.get(found.threadId);
 		const base: Omit<PendingForm, "content" | "timer" | "messageId"> = {
 			formId: formId,
 			sessionID: formSessionID,
@@ -1206,6 +1253,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			channelId: found.context.channel.id,
 			kind: found.context.kind === "channel" ? "channel" : "thread",
 			fields,
+			...(requester ? { requesterId: requester } : {}),
 		};
 
 		if (mode === "off") {
@@ -1214,7 +1262,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				content: `**${server} asked for input**`,
 				timer: setTimeout(() => undefined, 0),
 			};
-			await this.cancelForm(pending, "approvals are turned off in this conversation.");
+			await this.cancelPendingForm(pending, "approvals are turned off in this conversation.");
 			return;
 		}
 		if (fields.length > 5) {
@@ -1223,7 +1271,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				content: `**${server} asked for input**`,
 				timer: setTimeout(() => undefined, 0),
 			};
-			await this.cancelForm(pending, "the form has more fields than Discord can show.");
+			await this.cancelPendingForm(pending, "the form has more fields than Discord can show.");
 			return;
 		}
 
@@ -1247,7 +1295,9 @@ class GuildAgentImpl implements GuildAgentShape {
 					: external
 						? [
 								...(external.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
-								actionButton("Done", `form:done:${formId}`, 3),
+								// A URL-mode elicitation is confirmed by the server out of
+								// band. Never turn a Discord click into an `accept`.
+								actionButton("Cancel", `form:cancel:${formId}`, 2),
 							]
 						: [actionButton("Open form", `form:open:${formId}`, 1)],
 			),
@@ -1260,7 +1310,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			});
 		if (!sent) {
 			const pending: PendingForm = { ...base, content, timer: setTimeout(() => undefined, 0) };
-			await this.cancelForm(pending, "Eryn could not ask here.");
+			await this.cancelPendingForm(pending, "Eryn could not ask here.");
 			return;
 		}
 
@@ -1275,7 +1325,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async expireForm(formId: string): Promise<void> {
 		const pending = this.pendingForms.get(formId);
 		if (!pending) return;
-		await this.cancelForm(pending, "nobody answered in time.");
+		await this.cancelPendingForm(pending, "nobody answered in time.");
 	}
 
 	/**
@@ -1665,7 +1715,7 @@ function describeApproval(
 	const command = typeof input?.command === "string" ? input.command : undefined;
 	const path = typeof input?.filePath === "string" ? input.filePath : first;
 	let detail: string;
-	if (action === "bash" && command) detail = `Run \`${command}\``;
+	if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
 	else if ((action === "edit" || action === "write" || action === "read") && path) detail = `${action === "read" ? "Read" : "Change"} \`${path}\``;
 	else if (message) detail = message;
 	else detail = `Use **${action}**${first ? ` on \`${first}\`` : ""}`;

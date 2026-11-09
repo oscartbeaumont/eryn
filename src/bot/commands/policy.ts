@@ -55,8 +55,11 @@ async function targetOf(request: InteractionRequest): Promise<Target | undefined
 	if (!channelId) return undefined;
 	const channel = await request.ctx.rest.channel(channelId).catch(() => undefined);
 	if (!channel) return undefined;
-	const thread = channel.parent_id !== undefined || [10, 11, 12].includes(channel.type);
-	if (thread) return { channelId: channel.parent_id ?? channelId, threadId: channelId, label: "this thread" };
+	// A normal channel also has a parent_id: its category. Only Discord's thread
+	// types (public, private, announcement) are a thread scope.
+	if ([10, 11, 12].includes(channel.type)) {
+		return { channelId: channel.parent_id ?? channelId, threadId: channelId, label: "this thread" };
+	}
 	return { channelId, label: `#${channel.name ?? "channel"}` };
 }
 

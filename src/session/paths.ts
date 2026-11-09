@@ -31,4 +31,5 @@ export const ROUTES = {
 	approval: "/approval",
 	form: "/form",
 	formReply: "/form/reply",
+	formCancel: "/form/cancel",
 } as const;

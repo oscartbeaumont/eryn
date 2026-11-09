@@ -63,13 +63,17 @@ export function supportsElicitationParam(url: string): boolean {
 	}
 }
 
-/** Add the server-facing mode to a URL, preserving one it already carries. */
+/** Apply the server-facing mode to a URL; `off` removes an existing one. */
 export function withElicitation(url: string, mode: ElicitationMode | undefined): string {
-	const value = elicitationParam(mode);
-	if (!value) return url;
 	try {
 		const parsed = new URL(url);
-		if (!parsed.searchParams.has(ELICITATION_PARAM)) parsed.searchParams.set(ELICITATION_PARAM, value);
+		if (mode === "off") {
+			parsed.searchParams.delete(ELICITATION_PARAM);
+			return parsed.toString();
+		}
+		const value = elicitationParam(mode);
+		if (!value) return url;
+		parsed.searchParams.set(ELICITATION_PARAM, value);
 		return parsed.toString();
 	} catch {
 		return url;

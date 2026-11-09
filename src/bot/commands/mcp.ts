@@ -222,7 +222,7 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 		// A 401 with a Bearer challenge is the server saying it supports a
 		// sign-in. If discovery finds nothing, the reply falls back to a token.
 		if (probe.needsAuth) {
-			await startAuth(request, name, url, probe);
+			await startAuth(request, name, url, probe, elicitation);
 			return;
 		}
 		await answer.reply(`Could not connect to **${name}**: ${probe.error ?? "the server did not answer"}`, [
@@ -268,11 +268,13 @@ async function startAuth(
 	name: string,
 	url: string,
 	probe: McpProbeResponse,
+	elicitation: ElicitationMode,
 ): Promise<void> {
 	const answer = responder(request);
 	const started = await request.session.mcpAuthStart({
 		name,
 		url,
+		elicitation,
 		applicationId: request.interaction.application_id,
 		interactionToken: request.interaction.token,
 		...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),

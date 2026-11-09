@@ -121,6 +121,8 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	attemptId: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
+	/** Carried across the browser round trip so the finished link keeps it. */
+	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	state: Schema.String,
 	/** The full authorization URL, for the short browser redirect. */
 	authorizationUrl: Schema.optional(Schema.String),
@@ -438,6 +440,7 @@ export const McpTestRequestSchema = guildScoped({ linkId: Schema.String });
 export const McpAuthStartRequestSchema = guildScoped({
 	name: Schema.String,
 	url: Schema.String,
+	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	applicationId: Schema.optional(Schema.String),
 	interactionToken: Schema.optional(Schema.String),
 	/** The `resource_metadata` URL from the server's challenge, when it gave one. */
@@ -540,12 +543,24 @@ export const ApprovalReplyResponseSchema = Schema.Struct({
 	message: Schema.optional(Schema.String),
 });
 
-export const FormGetRequestSchema = guildScoped({ formId: Schema.String });
+export const FormGetRequestSchema = guildScoped({
+	formId: Schema.String,
+	userId: Schema.optional(Schema.String),
+	manager: Schema.optional(Schema.Boolean),
+});
 
 export const FormReplyRequestSchema = guildScoped({
 	formId: Schema.String,
 	/** Keyed `f0`, `f1`, … in field order; the agent maps them back. */
 	values: Schema.Record(Schema.String, Schema.String),
+	userId: Schema.optional(Schema.String),
+	manager: Schema.optional(Schema.Boolean),
+});
+
+export const FormCancelRequestSchema = guildScoped({
+	formId: Schema.String,
+	userId: Schema.optional(Schema.String),
+	manager: Schema.optional(Schema.Boolean),
 });
 
 export const FormReplyResponseSchema = Schema.Struct({

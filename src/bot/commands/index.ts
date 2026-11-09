@@ -280,17 +280,28 @@ async function handleFormComponent(
 	const formId = rest.join(":");
 	if (!formId) return;
 	const session = ctx.session(guildId);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const manager = canManage(interaction);
 
-	if (action === "done") {
+	if (action === "done" || action === "cancel") {
 		await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
-		const result = await session
-			.replyForm(formId, {})
-			.catch((error) => ({ ok: false, message: describeError(error) }));
+		const result =
+			action === "done"
+				? await session
+						.replyForm(formId, {}, { ...(userId ? { userId } : {}), manager })
+						.catch((error) => ({ ok: false, message: describeError(error) }))
+				: await session
+						.cancelForm(formId, { ...(userId ? { userId } : {}), manager })
+						.catch((error) => ({ ok: false, message: describeError(error) }));
 		await ctx.rest
 			.interactionEditOriginal(
 				ctx.applicationId,
 				interaction.token,
-				result.ok ? "Answered." : result.message ?? "That form is no longer waiting.",
+				result.ok
+					? action === "done"
+						? "Answered."
+						: "Cancelled."
+					: result.message ?? "That form is no longer waiting.",
 				{ components: [] },
 			)
 			.catch(() => undefined);
@@ -298,7 +309,7 @@ async function handleFormComponent(
 	}
 
 	if (action !== "open") return;
-	const view = await session.form(formId).catch(() => undefined);
+	const view = await session.form(formId, { ...(userId ? { userId } : {}), manager }).catch(() => undefined);
 	if (!view) {
 		await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
 		return;
@@ -339,10 +350,11 @@ async function handleFormModal(
 	const guildId = interaction.guild_id;
 	if (!guildId) return;
 	const formId = customId.slice("form:modal:".length);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
 	const result = await ctx
 		.session(guildId)
-		.replyForm(formId, values)
+		.replyForm(formId, values, { ...(userId ? { userId } : {}), manager: canManage(interaction) })
 		.catch((error) => ({ ok: false, message: describeError(error) }));
 	await ctx.rest
 		.interactionEditOriginal(

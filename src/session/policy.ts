@@ -18,6 +18,8 @@ export const POLICY_GROUPS = [
 	"discord-thread",
 	"discord-channel",
 	"discord-manage",
+	"web",
+	"subagent",
 ] as const;
 
 export type PolicyGroup = (typeof POLICY_GROUPS)[number];
@@ -26,7 +28,7 @@ export type PolicyGroup = (typeof POLICY_GROUPS)[number];
 export const GROUP_TOOLS: Record<PolicyGroup, readonly string[]> = {
 	workspace: ["read", "list", "glob", "grep"],
 	edit: ["write", "edit", "patch"],
-	shell: ["bash"],
+	shell: ["bash", "shell"],
 	"discord-reply": [
 		"discord_send_message",
 		"discord_read_messages",
@@ -44,6 +46,8 @@ export const GROUP_TOOLS: Record<PolicyGroup, readonly string[]> = {
 	],
 	"discord-channel": ["discord_join_channel", "discord_leave_channel"],
 	"discord-manage": ["discord_edit_message", "discord_delete_message", "discord_pin_message"],
+	web: ["webfetch", "websearch"],
+	subagent: ["subagent"],
 };
 
 export const GROUP_LABELS: Record<PolicyGroup, string> = {
@@ -54,6 +58,8 @@ export const GROUP_LABELS: Record<PolicyGroup, string> = {
 	"discord-thread": "Discord threads",
 	"discord-channel": "Channel subscriptions",
 	"discord-manage": "Manage messages",
+	web: "Web access",
+	subagent: "Subagents",
 };
 
 export const PRESET_LABELS: Record<PolicyPreset, string> = {
@@ -67,7 +73,7 @@ export const PRESET_HINTS: Record<PolicyPreset, string> = {
 	full: "Everything Eryn can do.",
 	chat: "Talk in Discord, but do not touch the workspace or MCP servers.",
 	"read-only": "Read the workspace and reply; no edits, shell, or MCP.",
-	locked: "Only read and reply. Every other tool is hidden.",
+	locked: "Only reply. Every other tool is hidden.",
 };
 
 /** The preset values, written out so a later preset can reset an earlier one. */
@@ -80,6 +86,8 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "allow",
 		"discord-channel": "allow",
 		"discord-manage": "allow",
+		web: "allow",
+		subagent: "allow",
 	},
 	chat: {
 		workspace: "block",
@@ -89,6 +97,8 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "allow",
 		"discord-channel": "allow",
 		"discord-manage": "block",
+		web: "block",
+		subagent: "block",
 	},
 	"read-only": {
 		workspace: "allow",
@@ -98,6 +108,8 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "block",
 		"discord-channel": "block",
 		"discord-manage": "block",
+		web: "block",
+		subagent: "block",
 	},
 	locked: {
 		workspace: "block",
@@ -107,6 +119,8 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "block",
 		"discord-channel": "block",
 		"discord-manage": "block",
+		web: "block",
+		subagent: "block",
 	},
 };
 
@@ -152,13 +166,14 @@ export function resolvePolicy(layers: readonly (Policy | undefined)[]): Policy {
 /** Whether a policy leaves everything at the default. */
 export function isDefaultPolicy(policy: Policy): boolean {
 	const resolved = resolvePolicy([policy]);
-	const matchesFull = POLICY_GROUPS.every((group) => resolved.tools?.[group] === PRESETS.full[group]);
-	return (
-		matchesFull &&
-		(resolved.mcp?.[MCP_ALL] ?? "allow") === "allow" &&
-		Object.keys(resolved.mcp ?? {}).length <= 1 &&
-		(resolved.elicitation ?? "discord") === "discord"
-	);
+	const tools = resolved.tools ?? {};
+	const mcp = resolved.mcp ?? {};
+	// An exact tool or per-server override is not visible in the group values,
+	// but it still changes behaviour, so it is never "default".
+	if (Object.keys(tools).some((key) => !(key in GROUP_TOOLS))) return false;
+	if (Object.keys(mcp).some((key) => key !== MCP_ALL)) return false;
+	const matchesFull = POLICY_GROUPS.every((group) => tools[group] === PRESETS.full[group]);
+	return matchesFull && (mcp[MCP_ALL] ?? "allow") === "allow" && (resolved.elicitation ?? "discord") === "discord";
 }
 
 /** The name OpenCode gives an MCP tool from a server and tool name. */
@@ -256,20 +271,26 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	const discord = [tools["discord-reply"], tools["discord-thread"], tools["discord-channel"], tools["discord-manage"]];
 
 	const workspaceLine =
-		workspace === "allow" && edit === "allow"
-			? "read and write"
-			: workspace === "allow"
-				? "read only"
-				: "hidden";
-	const discordLine = discord.every((effect) => effect === "allow")
-		? "everything"
-		: discord.every((effect) => effect === "block")
-			? "blocked"
-			: discord[0] === "allow" && discord[1] === "allow" && discord[2] === "allow"
-				? "chat and threads"
-				: discord[0] === "allow"
-					? "replies only"
-					: "limited";
+		workspace === "block"
+			? "hidden"
+			: workspace === "ask"
+				? "ask before read"
+				: edit === "block"
+					? "read only"
+					: edit === "ask"
+						? "read, ask before write"
+						: "read and write";
+	const discordLine = discord.some((effect) => effect === "ask")
+		? "ask before use"
+		: discord.every((effect) => effect === "allow")
+			? "everything"
+			: discord.every((effect) => effect === "block")
+				? "send only"
+				: discord[0] === "allow" && discord[1] === "allow" && discord[2] === "allow"
+					? "chat and threads"
+					: discord[0] === "allow"
+						? "replies only"
+						: "limited";
 
 	const mcp = policy.mcp ?? {};
 	const all = mcp[MCP_ALL] ?? "allow";
@@ -285,25 +306,29 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					? `blocked in ${blocked.join(", ")}`
 					: "allowed";
 
-	return [
+	const exact = Object.entries(tools).filter(([key]) => !(key in GROUP_TOOLS));
+	const lines = [
 		`Workspace: **${workspaceLine}**`,
 		`Shell: **${effectLabel(shell)}**`,
+		`Web: **${effectLabel(tools.web)}**`,
+		`Subagents: **${effectLabel(tools.subagent)}**`,
 		`Discord: **${discordLine}**`,
 		`MCP: **${mcpLine}**`,
 	];
+	if (exact.length) {
+		lines.push(`Custom: ${exact.map(([key, effect]) => `${key} **${effectLabel(effect)}**`).join(", ")}`);
+	}
+	return lines;
 }
 
-const BUILTIN_ACTIONS = new Set(Object.values(GROUP_TOOLS).flat());
-
-/** Where a rule lives, so an approval can write the smallest possible override. */
-export function overrideFor(action: string, effect: PolicyEffect, links: readonly McpLink[]): {
-	tools?: Record<string, PolicyEffect>;
-	mcp?: Record<string, PolicyEffect>;
-} {
-	if (BUILTIN_ACTIONS.has(action)) return { tools: { [action]: effect } };
-	for (const link of links) {
-		if (action.startsWith(mcpActionPrefix(link.name).slice(0, -1))) return { mcp: { [link.name]: effect } };
-	}
+/**
+ * Where a rule lives, so an approval writes the smallest possible override.
+ *
+ * Even an MCP action is written as the exact tool (`github_create_issue`), not
+ * the whole server, so approving a read once does not allow every destructive
+ * tool the same server exposes.
+ */
+export function overrideFor(action: string, effect: PolicyEffect): { tools: Record<string, PolicyEffect> } {
 	return { tools: { [action]: effect } };
 }
 
@@ -312,7 +337,6 @@ export function withOverride(patch: Policy | undefined, override: ReturnType<typ
 	return {
 		...(patch ?? {}),
 		...(override.tools ? { tools: { ...(patch?.tools ?? {}), ...override.tools } } : {}),
-		...(override.mcp ? { mcp: { ...(patch?.mcp ?? {}), ...override.mcp } } : {}),
 		updatedAt: Date.now(),
 	};
 }

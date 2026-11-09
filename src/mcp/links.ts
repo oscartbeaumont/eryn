@@ -52,6 +52,7 @@ export interface BeginAuthorizationInput {
 	guildId: string;
 	name: string;
 	url: string;
+	elicitation?: McpLink["elicitation"];
 	applicationId?: string;
 	interactionToken?: string;
 	resourceMetadataUrl?: string;
@@ -88,6 +89,7 @@ export async function beginAuthorization(
 		attemptId,
 		name: input.name,
 		url: input.url,
+		...(input.elicitation ? { elicitation: input.elicitation } : {}),
 		...(input.applicationId ? { applicationId: input.applicationId } : {}),
 		...(input.interactionToken ? { interactionToken: input.interactionToken } : {}),
 		state,
@@ -173,6 +175,7 @@ export async function finishAuthorization(
 		id: crypto.randomUUID(),
 		name: pending.name,
 		url: pending.url,
+		...(pending.elicitation ? { elicitation: pending.elicitation } : {}),
 		token: tokens.accessToken,
 		oauth: {
 			clientId: pending.clientId,

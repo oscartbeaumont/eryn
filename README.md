@@ -81,7 +81,7 @@ Four presets cover the common cases:
 | **Full** | Everything Eryn can do |
 | **Chat** | Discord messages and threads; no workspace, shell, or MCP |
 | **Read-only** | Read the workspace and reply; no edits, shell, or MCP |
-| **Locked** | Only read and reply |
+| **Locked** | Only reply; every other tool is hidden |
 
 **Customise** overrides one group at a time: workspace reads, workspace edits,
 shell, Discord replies, Discord threads, channel subscriptions, message

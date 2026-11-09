@@ -25,6 +25,7 @@ import {
 	FormViewSchema,
 	PolicyStateSchema,
 	type DiscordContext,
+	type ElicitationMode,
 	type FormView,
 	type GuildStatus,
 	type IntegrationOption,
@@ -146,6 +147,7 @@ export class SessionClient {
 	mcpAuthStart(input: {
 		name: string;
 		url: string;
+		elicitation?: ElicitationMode;
 		applicationId?: string;
 		interactionToken?: string;
 		resourceMetadataUrl?: string;
@@ -227,12 +229,23 @@ export class SessionClient {
 		return this.call(ROUTES.approval, ApprovalReplyResponseSchema, input);
 	}
 
-	form(formId: string): Promise<FormView> {
-		return this.call(ROUTES.form, FormViewSchema, { formId });
+	form(formId: string, auth: { userId?: string; manager?: boolean } = {}): Promise<FormView> {
+		return this.call(ROUTES.form, FormViewSchema, { formId, ...auth });
 	}
 
-	replyForm(formId: string, values: Record<string, string>): Promise<{ ok: boolean; message?: string }> {
-		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, { formId, values });
+	replyForm(
+		formId: string,
+		values: Record<string, string>,
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, { formId, values, ...auth });
+	}
+
+	cancelForm(
+		formId: string,
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.formCancel, ApprovalReplyResponseSchema, { formId, ...auth });
 	}
 
 	async interrupt(threadId: string, gone: boolean): Promise<boolean> {
