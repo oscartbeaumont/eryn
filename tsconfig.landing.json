@@ -12,7 +12,7 @@
 		"verbatimModuleSyntax": true,
 		"skipLibCheck": true,
 		"jsx": "preserve",
-		"jsxImportSource": "solid-js"
+		"jsxImportSource": "@solidjs/web"
 	},
 	"include": ["src/landing", "src/public.ts", "vite.landing.config.ts"]
 }

@@ -172,12 +172,13 @@ src/
 └─ plugins/       OpenCode plugins, one self-contained directory each
 ```
 
-The landing page is a Solid component tree in `src/landing/`, styled with
-Tailwind. `scripts/prerender.mjs` loads the SSR entry through Vite and writes a
-complete `assets/index.html`; Cloudflare then serves it directly, so the page
-ships no client-side JavaScript. `vite.landing.config.ts` and
-`tsconfig.landing.json` are separate from the Worker's Vite and TypeScript
-configuration so Solid and Tailwind never participate in bundling the Worker.
+The landing page is a Solid 2 component tree in `src/landing/`, compiled with
+`@solidjs/vite-plugin` and styled with Tailwind. `scripts/prerender.mjs` loads
+the SSR entry through Vite and writes a complete `assets/index.html`; Cloudflare
+then serves it directly, so the page ships no client-side JavaScript.
+`vite.landing.config.ts` and `tsconfig.landing.json` are separate from the
+Worker's Vite and TypeScript configuration so Solid and Tailwind never
+participate in bundling the Worker.
 
 ### Development
 

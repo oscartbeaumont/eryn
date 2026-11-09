@@ -1,4 +1,4 @@
-import { renderToString } from "solid-js/web";
+import { renderToString } from "@solidjs/web";
 
 import { BRAND } from "../public";
 import { Landing } from "./app";
