@@ -12,7 +12,6 @@
 
 import { Bash, InMemoryFs } from "just-bash/browser";
 import { base64ToBytes, bytesToBase64 } from "./bytes";
-import { dirname } from "./paths";
 import type { FileStore, StoredFile } from "./store";
 
 export interface ShellResult {
@@ -22,23 +21,23 @@ export interface ShellResult {
 }
 
 export async function runShell(store: FileStore, command: string, cwd: string, root: string): Promise<ShellResult> {
-	const fs = new InMemoryFs();
-	const before = new Map<string, StoredFile>();
-
-	for (const entry of await store.list(root)) {
-		before.set(entry.path, entry.file);
-		await fs.mkdir(dirname(entry.path), { recursive: true });
-		await fs.writeFile(entry.path, base64ToBytes(entry.file.b));
-	}
+	const entries = await store.list(root);
+	const before = new Map(entries.map((entry) => [entry.path, entry.file]));
+	const fs = new InMemoryFs(
+		Object.fromEntries(entries.map((entry) => [entry.path, base64ToBytes(entry.file.b)])),
+	);
 
 	const bash = new Bash({ fs, cwd, env: { HOME: root, PWD: cwd, PATH: "/usr/bin:/bin" } });
 	const result = await bash.exec(command);
 
 	const after = new Map<string, StoredFile>();
-	await walk(fs, root, async (path, mtime) => {
+	for (const path of fs.getAllPaths()) {
+		if (!path.startsWith(`${root}/`)) continue;
+		const stat = await fs.stat(path).catch(() => undefined);
+		if (!stat?.isFile) continue;
 		const bytes = await fs.readFileBuffer(path);
-		after.set(path, { b: bytesToBase64(bytes), m: mtime });
-	});
+		after.set(path, { b: bytesToBase64(bytes), m: stat.mtime.getTime() });
+	}
 
 	for (const [path, file] of after) {
 		const previous = before.get(path);
@@ -49,24 +48,4 @@ export async function runShell(store: FileStore, command: string, cwd: string, r
 	}
 
 	return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-}
-
-async function walk(fs: InMemoryFs, dir: string, visit: (path: string, mtime: number) => Promise<void>): Promise<void> {
-	let names: string[];
-	try {
-		names = await fs.readdir(dir);
-	} catch {
-		return;
-	}
-	for (const name of names) {
-		const child = dir === "/" ? `/${name}` : `${dir}/${name}`;
-		let stat;
-		try {
-			stat = await fs.stat(child);
-		} catch {
-			continue;
-		}
-		if (stat.isDirectory) await walk(fs, child, visit);
-		else if (stat.isFile) await visit(child, stat.mtime.getTime());
-	}
 }

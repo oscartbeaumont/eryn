@@ -9,6 +9,8 @@
  */
 
 import { env } from "cloudflare:workers";
+import { Result } from "effect";
+import { Hex } from "effect/encoding";
 
 import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
@@ -156,12 +158,8 @@ const ED25519 = { name: "Ed25519" } as const;
 
 /** Decode a hex string, or undefined when it is not one. */
 function hexBytes(value: string): Uint8Array | undefined {
-	if (!value || value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) return undefined;
-	const bytes = new Uint8Array(value.length / 2);
-	for (let index = 0; index < bytes.length; index++) {
-		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-	}
-	return bytes;
+	if (!value) return undefined;
+	return Result.getOrUndefined(Hex.decode(value));
 }
 
 /** Whether Discord signed this timestamp and body for this application. */

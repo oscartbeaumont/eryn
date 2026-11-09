@@ -7,6 +7,8 @@
  * who owns which id.
  */
 
+import { Equal } from "effect";
+
 import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
 import type { DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
@@ -61,7 +63,7 @@ export function sameCommands(
 		type: command.type,
 		options: (command.options ?? []).map(optionShape),
 	});
-	return JSON.stringify(registered.map(shape)) === JSON.stringify(desired.map(shape));
+	return Equal.equals(registered.map(shape), desired.map(shape));
 }
 
 function optionShape(option: DiscordCommandOption): unknown {

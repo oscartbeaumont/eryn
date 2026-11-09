@@ -10,7 +10,7 @@
  * every subsystem that needs it.
  */
 
-import { Option, Schema } from "effect";
+import { Cause, Duration, Effect, Option, Schedule, Schema } from "effect";
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -107,8 +107,6 @@ const AuditLogSchema = Schema.Struct({
 	audit_log_entries: Schema.optional(Schema.Array(DiscordAuditEntrySchema)),
 });
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 /** Seconds Discord asked us to wait, from a 429 body. Defaults to one second. */
 function retryDelay(body: unknown): number {
 	if (body && typeof body === "object" && "retry_after" in body) {
@@ -117,6 +115,31 @@ function retryDelay(body: unknown): number {
 	}
 	return 1_000;
 }
+
+/** How many times a rate-limited request is retried before its 429 is reported. */
+const MAX_RATE_LIMIT_RETRIES = 3;
+
+/** One attempt at a request: the response, and what a 429 asked us to wait. */
+interface Attempt {
+	readonly response: Response;
+	readonly retryAfter?: number;
+}
+
+/**
+ * Repeat while Discord is rate limiting us, waiting what its 429 asked for.
+ *
+ * A response that is not a 429 ends the loop, and `upTo` caps how many retries
+ * follow.
+ */
+const retryRateLimits = Schedule.fromStep(
+	Effect.succeed((_now: number, attempt: Attempt) => {
+		if (attempt.response.status !== 429) return Cause.done(attempt);
+		return Effect.succeed([
+			attempt,
+			Duration.millis(attempt.retryAfter ?? 1_000),
+		] as [Attempt, Duration.Duration]);
+	}),
+).pipe(Schedule.upTo({ times: MAX_RATE_LIMIT_RETRIES }));
 
 /** A slash-command registration entry. `options` makes it a command group. */
 export interface DiscordCommandOption {
@@ -191,26 +214,26 @@ export function discordRest(token: string) {
 		path: string,
 		body?: unknown,
 	): Promise<T | undefined> {
-		for (let attempt = 0; ; attempt++) {
-			const headers = new Headers({ Authorization: `Bot ${token}` });
-			if (body !== undefined) headers.set("Content-Type", "application/json");
+		const headers = new Headers({ Authorization: `Bot ${token}` });
+		if (body !== undefined) headers.set("Content-Type", "application/json");
+		const fetchOnce = Effect.promise(async (): Promise<Attempt> => {
 			const response = await fetch(`${API}${path}`, {
 				method,
 				headers,
 				body: body === undefined ? undefined : JSON.stringify(body),
 			});
+			const retryAfter =
+				response.status === 429 ? retryDelay(await response.json().catch(() => undefined)) : undefined;
+			return { response, ...(retryAfter === undefined ? {} : { retryAfter }) };
+		});
 
-			if (response.status === 429 && attempt < 3) {
-				await sleep(retryDelay(await response.json().catch(() => undefined)));
-				continue;
-			}
-			if (response.status === 404 && method === "GET") return undefined;
-			if (response.status === 204) return undefined;
-			if (!response.ok) {
-				throw new DiscordError(`Discord returned HTTP ${response.status} for ${method} ${path}`, response.status);
-			}
-			return (await response.json()) as T;
+		const { response } = await Effect.runPromise(Effect.repeat(fetchOnce, retryRateLimits));
+		if (response.status === 404 && method === "GET") return undefined;
+		if (response.status === 204) return undefined;
+		if (!response.ok) {
+			throw new DiscordError(`Discord returned HTTP ${response.status} for ${method} ${path}`, response.status);
 		}
+		return (await response.json()) as T;
 	}
 
 	/** POST a body and return the id of the resource Discord created. */
@@ -371,9 +394,7 @@ export function discordRest(token: string) {
 				"GET",
 				`/guilds/${guildId}/audit-logs?action_type=${AUDIT_BOT_ADD}&limit=1`,
 			);
-			const parsed = Schema.decodeUnknownOption(AuditLogSchema)(result);
-			if (Option.isNone(parsed)) return undefined;
-			return parsed.value.audit_log_entries?.[0];
+			return Option.getOrUndefined(Schema.decodeUnknownOption(AuditLogSchema)(result))?.audit_log_entries?.[0];
 		},
 
 		/** Acknowledge an interaction with a message (ephemeral by default). */

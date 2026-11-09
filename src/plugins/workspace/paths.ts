@@ -11,9 +11,3 @@ export function resolvePath(cwd: string, input: string): string {
 	}
 	return `/${parts.join("/")}`;
 }
-
-/** The parent directory of an absolute path. */
-export function dirname(path: string): string {
-	const index = path.lastIndexOf("/");
-	return index <= 0 ? "/" : path.slice(0, index);
-}

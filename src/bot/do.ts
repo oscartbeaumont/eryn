@@ -20,6 +20,8 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { Option, Schema } from "effect";
+
 import { CLIENT_ID, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
 import { deployRestart } from "../deploy";
 import { describeError } from "../errors";
@@ -34,7 +36,7 @@ import {
 	type DiscordMessage,
 	type DiscordSocketHandlers,
 } from "../discord/socket";
-import type { DiscordContext } from "../session/models";
+import { DiscordContextSchema, type DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { SessionClient } from "./client";
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
@@ -76,6 +78,41 @@ interface MessageWatch {
 	readonly notifyTitle?: string;
 	readonly notifyDiscord?: DiscordContext;
 }
+
+/** The interaction body the Worker forwards: only the ids the bot needs. */
+const InteractionBodySchema = Schema.Struct({
+	id: Schema.String,
+	token: Schema.String,
+});
+
+/** A request to subscribe or unsubscribe a conversation. */
+const SubscriptionBodySchema = Schema.Struct({
+	kind: Schema.Literals(["thread", "channel"]),
+	id: Schema.String,
+	subscribed: Schema.Boolean,
+});
+
+/** A request to start or stop watching a message for a new thread. */
+const MessageWatchBodySchema = Schema.Struct({
+	guildId: Schema.String,
+	channelId: Schema.String,
+	messageId: Schema.String,
+	subscribed: Schema.Boolean,
+	notifyThreadId: Schema.optional(Schema.String),
+	notifyTitle: Schema.optional(Schema.String),
+	notifyDiscord: Schema.optional(DiscordContextSchema),
+});
+
+/** Decode a JSON body, or `undefined` when it is missing or the wrong shape. */
+async function decodeBody<S extends Schema.ConstraintDecoder<unknown>>(
+	request: Request,
+	schema: S,
+): Promise<S["Type"] | undefined> {
+	const body = await request.json().catch(() => undefined);
+	return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(body));
+}
+
+const badRequest = () => json({ error: "bad request" }, 400);
 
 /**
  * A rename an owned conversation has not been told about yet.
@@ -197,28 +234,19 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (pathname === INTERACTION_PATH) {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const interaction = (await request.json().catch(() => undefined)) as DiscordInteraction | undefined;
-			if (!interaction || typeof interaction.id !== "string" || typeof interaction.token !== "string") {
-				return json({ error: "bad request" }, 400);
-			}
+			const body = await request.json().catch(() => undefined);
+			if (!Schema.is(InteractionBodySchema)(body)) return badRequest();
 			// The Worker already answered Discord with a 202, so this handler still
-			// acknowledges through the interaction callback endpoint.
-			await this.onInteraction(interaction);
+			// acknowledges through the interaction callback endpoint. The payload is
+			// passed on untouched; only the ids the bot needs are checked here.
+			await this.onInteraction(body as DiscordInteraction);
 			return json({ ok: true });
 		}
 		if (pathname === SUBSCRIPTION_PATH) {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const body = (await request.json().catch(() => undefined)) as
-				| { guildId?: unknown; kind?: unknown; id?: unknown; subscribed?: unknown }
-				| undefined;
-			if (
-				(body?.kind !== "thread" && body?.kind !== "channel") ||
-				typeof body.id !== "string" ||
-				typeof body.subscribed !== "boolean"
-			) {
-				return json({ error: "bad request" }, 400);
-			}
+			const body = await decodeBody(request, SubscriptionBodySchema);
+			if (!body) return badRequest();
 			const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
 			if (body.subscribed) await this.ctx.storage.put(key, true);
 			else await this.ctx.storage.delete(key);
@@ -227,25 +255,8 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		if (pathname === MESSAGE_WATCH_PATH) {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const body = (await request.json().catch(() => undefined)) as
-				| {
-						guildId?: unknown;
-						channelId?: unknown;
-						messageId?: unknown;
-						subscribed?: unknown;
-						notifyThreadId?: unknown;
-						notifyTitle?: unknown;
-						notifyDiscord?: unknown;
-					}
-				| undefined;
-			if (
-				typeof body?.guildId !== "string" ||
-				typeof body.channelId !== "string" ||
-				typeof body.messageId !== "string" ||
-				typeof body.subscribed !== "boolean"
-			) {
-				return json({ error: "bad request" }, 400);
-			}
+			const body = await decodeBody(request, MessageWatchBodySchema);
+			if (!body) return badRequest();
 			const key = WATCH_PREFIX + body.messageId;
 			if (!body.subscribed) {
 				await this.ctx.storage.delete(key);
@@ -255,11 +266,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 				guildId: body.guildId,
 				channelId: body.channelId,
 				messageId: body.messageId,
-				...(typeof body.notifyThreadId === "string" ? { notifyThreadId: body.notifyThreadId } : {}),
-				...(typeof body.notifyTitle === "string" ? { notifyTitle: body.notifyTitle } : {}),
-				...(body.notifyDiscord && typeof body.notifyDiscord === "object"
-					? { notifyDiscord: body.notifyDiscord as DiscordContext }
-					: {}),
+				...(body.notifyThreadId !== undefined ? { notifyThreadId: body.notifyThreadId } : {}),
+				...(body.notifyTitle !== undefined ? { notifyTitle: body.notifyTitle } : {}),
+				...(body.notifyDiscord !== undefined ? { notifyDiscord: body.notifyDiscord } : {}),
 			};
 			await this.ctx.storage.put(key, watch);
 			return json({ ok: true });

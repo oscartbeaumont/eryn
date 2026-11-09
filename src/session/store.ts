@@ -49,13 +49,7 @@ class GuildStoreImpl {
 		if (!sealed) return undefined;
 		const plaintext = await decryptSecret(this.requireSecret(), sealed).catch(() => undefined);
 		if (plaintext === undefined) return undefined;
-		let value: unknown;
-		try {
-			value = JSON.parse(plaintext) as unknown;
-		} catch {
-			return undefined;
-		}
-		return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(value));
+		return Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(schema))(plaintext));
 	}
 
 	/**

@@ -41,9 +41,9 @@ const ProviderListSchema = Schema.Struct({ integrations: Schema.Array(Integratio
 const ModelListSchema = Schema.Struct({ models: Schema.Array(ModelOptionSchema) });
 
 function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] {
-	const parsed = Schema.decodeUnknownOption(schema)(input);
-	if (Option.isNone(parsed)) throw botError("the guild session returned an unexpected shape");
-	return parsed.value;
+	return Option.getOrThrowWith(Schema.decodeUnknownOption(schema)(input), () =>
+		botError("the guild session returned an unexpected shape"),
+	);
 }
 
 /** The guild's own session object, addressed by guild id. */
