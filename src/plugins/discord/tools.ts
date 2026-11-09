@@ -278,7 +278,11 @@ export function discordTools(
 				threadId,
 				{
 					read: parent.read,
-					send: parent.send,
+					// A thread uses Send Messages in Threads, which the parent's
+					// `send` (Send Messages) does not imply. Use the creator's
+					// thread-send reach captured when the scope was written.
+					send: parent.sendInThreads === true,
+					sendInThreads: parent.sendInThreads === true,
 					manage: parent.manage,
 					createThread: false,
 					react: parent.react === true,

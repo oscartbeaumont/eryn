@@ -15,6 +15,13 @@ export interface ScopeChannelCapabilities {
 	readonly read: boolean;
 	readonly send: boolean;
 	/**
+	 * Sending in a thread under this channel. A thread inherits its parent's
+	 * Discord permissions but uses Send Messages in Threads, which can differ
+	 * from Send Messages. Stored so a thread a schedule creates gets exactly
+	 * the creator's thread reach. Optional for scopes written before it.
+	 */
+	readonly sendInThreads?: boolean;
+	/**
 	 * Editing, deleting, pinning, and archiving beyond Eryn's own messages.
 	 * True only when the person could both manage messages and manage threads,
 	 * so the single boolean never grants a moderation bit they lacked.
@@ -44,7 +51,8 @@ export type ChannelCapabilities = ScopeChannelCapabilities;
 /**
  * The scope a new schedule starts with: only the conversation itself, using
  * exactly the capabilities the creator has there. Reaching other channels is
- * an explicit later decision on a human turn.
+ * an explicit later decision on a human turn; the one exception is a thread the
+ * schedule creates, which inherits the channel it was made in.
  */
 export function defaultScheduleScope(input: {
 	ownerId: string;

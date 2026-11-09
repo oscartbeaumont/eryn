@@ -201,11 +201,17 @@ export class DiscordAuthority {
 	async scopeCapabilities(userId: string, channel: DiscordChannelRef): Promise<{
 		read: boolean;
 		send: boolean;
+		sendInThreads: boolean;
 		manage: boolean;
 		createThread: boolean;
 		react: boolean;
 	}> {
 		const thread = THREAD_TYPES.has(channel.type);
+		const sendInThreads = await this.can(
+			userId,
+			channel.id,
+			Permission.ViewChannel | Permission.SendMessagesInThreads,
+		);
 		// The scope has one management boolean for both moderation bits. Gate it
 		// on both so enabling it can never grant a bit the person lacks; a
 		// person with only one of the two loses the other, never gains it.
@@ -231,6 +237,7 @@ export class DiscordAuthority {
 				Permission.ViewChannel |
 					(thread ? Permission.SendMessagesInThreads : Permission.SendMessages),
 			),
+			sendInThreads,
 			manage: manageMessages && manageThreads,
 			createThread: await this.can(
 				userId,

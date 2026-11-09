@@ -23,6 +23,7 @@ import {
 const CAPABILITIES = {
 	read: true,
 	send: true,
+	sendInThreads: true,
 	manage: false,
 	createThread: true,
 	react: true,
@@ -40,7 +41,14 @@ const scope = (): ScheduleScopeShape =>
 test("a new scope covers only the conversation, with the creator's capabilities", () => {
 	const created = scope();
 	assert.deepEqual(created.channels, {
-		conversation: { read: true, send: true, manage: false, createThread: true, react: true },
+		conversation: {
+			read: true,
+			send: true,
+			sendInThreads: true,
+			manage: false,
+			createThread: true,
+			react: true,
+		},
 	});
 	assert.equal(created.ownerId, "owner");
 	assert.deepEqual(created.scheduleIds, ["schedule-1"]);
@@ -101,6 +109,7 @@ test("adding a channel stores the editor's capabilities", () => {
 	const created = addChannelToScope(scope(), "other", {
 		read: true,
 		send: false,
+		sendInThreads: false,
 		manage: true,
 		createThread: false,
 		react: true,
@@ -108,6 +117,7 @@ test("adding a channel stores the editor's capabilities", () => {
 	assert.deepEqual(created.channels.other, {
 		read: true,
 		send: false,
+		sendInThreads: false,
 		manage: true,
 		createThread: false,
 		react: true,

@@ -65,8 +65,10 @@ scope starts as the conversation only, with the creator's own read, send,
 thread-creation, reaction, and moderation permissions there. The scope
 owner or someone with Manage Server can add another channel with
 `discord_join_channel` or `discord_subscribe_message`, which stores the editor's
-permissions in that channel; a schedule turn cannot change its own scope.
-People talking to the conversation must cover that scope with their own Discord
+permissions in that channel; a schedule turn cannot change its own scope,
+except that a thread it creates inside an in-scope channel inherits that
+channel's capabilities. People talking to the conversation must cover that scope
+with their own Discord
 permissions, or their message is not forwarded to the agent. A scope that
 includes message management therefore makes the conversation moderator-only.
 

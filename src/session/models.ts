@@ -24,6 +24,8 @@ export const DiscordRefSchema = Schema.Struct({
 export const ScheduleChannelScopeSchema = Schema.Struct({
 	read: Schema.Boolean,
 	send: Schema.Boolean,
+	/** Absent on scopes stored before inherited threads needed this bit. */
+	sendInThreads: Schema.optional(Schema.Boolean),
 	manage: Schema.Boolean,
 	/** Absent on scopes stored before thread creation was a capability. */
 	createThread: Schema.optional(Schema.Boolean),
