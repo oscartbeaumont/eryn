@@ -221,8 +221,6 @@ export function compilePermissions(policy: Policy, links: readonly McpLink[]): P
 	for (const [group, effect] of groups) {
 		for (const tool of GROUP_TOOLS[group as PolicyGroup]) add(tool, effect);
 	}
-	// Exact overrides come after their group, so they win for one tool.
-	for (const [tool, effect] of exact) add(tool, effect, true);
 
 	const mcp = policy.mcp ?? {};
 	const all = mcp[MCP_ALL] ?? "allow";
@@ -231,6 +229,10 @@ export function compilePermissions(policy: Policy, links: readonly McpLink[]): P
 		if (server === MCP_ALL) continue;
 		add(mcpActionPrefix(server), effect);
 	}
+
+	// Exact overrides come last, so an approval for one tool beats both its
+	// group and its MCP server rule.
+	for (const [tool, effect] of exact) add(tool, effect, true);
 
 	return rules;
 }
