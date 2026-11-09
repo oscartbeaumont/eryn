@@ -213,9 +213,10 @@ landing page and the sign-in pages use the favicon, and
 `/brand/banner.webp` is the social preview image. Add or replace images in
 `assets/` and deploy.
 
-`assets/index.html` is generated from `src/landing/`; edit the Solid components
-and Tailwind classes there, then run `pnpm prerender` (or let `pnpm dev` and
-`pnpm build` do it). Do not edit the generated HTML by hand.
+`assets/index.html` is generated from `src/landing/` and ignored by git; edit the
+Solid components and Tailwind classes there, then run `pnpm prerender` (or let
+`pnpm dev`, `pnpm build`, and `pnpm deploy` do it). Do not edit the generated
+HTML by hand.
 
 ### Configuration
 
