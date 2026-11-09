@@ -32,7 +32,7 @@ const BUSY_POLL_MS = 20_000;
 /** How soon to try a schedule that is already due. */
 const SCHEDULE_SOON_MS = 5_000;
 
-export class BotSessionV5 extends DurableObject<Env> {
+export class BotSession extends DurableObject<Env> {
 	private readonly guildId: string;
 	private readonly rest: DiscordRest;
 	private readonly store: GuildStoreShape;

@@ -14,8 +14,8 @@ flowchart LR
 
     subgraph worker[Cloudflare Worker]
         routes[HTTP<br/>landing + interactions]
-        bot[BotGatewayV5<br/>the bot]
-        session["BotSessionV5<br/>one per server"]
+        bot[BotGateway<br/>the bot]
+        session["BotSession<br/>one per server"]
     end
 
     agent[OpenCode]
@@ -34,9 +34,9 @@ Eryn is one Cloudflare Worker and two Durable Objects. The Worker answers
 serves the landing page, the install redirect, the MCP sign-in callback, the
 models.dev catalogue, and the health check.
 
-`BotGatewayV5` is the single bot: it holds the Discord gateway socket (one
+`BotGateway` is the single bot: it holds the Discord gateway socket (one
 connection per shard), registers the global commands, and dispatches
-interactions. It forwards each guild's work to that guild's `BotSessionV5`,
+interactions. It forwards each guild's work to that guild's `BotSession`,
 which owns the OpenCode host, the provider credentials, the MCP links, and a
 virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
 and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.

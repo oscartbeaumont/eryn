@@ -62,8 +62,8 @@ export default defineConfig({
 			ASSETS: bindings.assets(),
 
 			// The bot: the singleton Discord socket, and one session per guild.
-			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGatewayV5" }),
-			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSessionV5" }),
+			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGateway" }),
+			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSession" }),
 
 			// Discord: the bot token powers the socket, slash commands, and threads.
 			DISCORD_BOT_TOKEN: bindings.secret(),
@@ -83,11 +83,8 @@ export default defineConfig({
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
-			// The only objects left. The old gateway and pre-redesign namespaces were
-			// deleted by earlier deploys, so their `deleted` and `renamed` tombstones
-			// have done their job and are gone too.
-			BotGatewayV5: exports.durableObject({ storage: "sqlite" }),
-			BotSessionV5: exports.durableObject({ storage: "sqlite" }),
+			BotGateway: exports.durableObject({ storage: "sqlite" }),
+			BotSession: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 });

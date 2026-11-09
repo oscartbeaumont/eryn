@@ -15,7 +15,7 @@ import { Hex } from "effect/encoding";
 import solidHandler from "virtual:solid-ssr-handler";
 
 import { SessionClient } from "./bot/client";
-import { BotGatewayV5 } from "./bot/do";
+import { BotGateway } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
 import { APPLICATION_PUBLIC_KEY, configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config";
@@ -26,9 +26,9 @@ import { application, applicationId, ensureEndpoint } from "./discord/applicatio
 import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
 import { installUrl } from "./public";
-import { BotSessionV5 } from "./session/do";
+import { BotSession } from "./session/do";
 
-export { BotGatewayV5, BotSessionV5 };
+export { BotGateway, BotSession };
 
 /** What the bot object reports about itself, as `/health` passes it on. */
 interface WakeState {

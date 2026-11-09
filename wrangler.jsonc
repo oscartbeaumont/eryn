@@ -15,14 +15,24 @@
 	},
 	"durable_objects": {
 		"bindings": [
-			{ "name": "BOT_GATEWAY", "class_name": "BotGatewayV5" },
-			{ "name": "BOT_SESSION", "class_name": "BotSessionV5" }
+			{ "name": "BOT_GATEWAY", "class_name": "BotGateway" },
+			{ "name": "BOT_SESSION", "class_name": "BotSession" }
 		]
 	},
+	// The V5 names were the classes' first names; the second migration carries
+	// their namespaces over so a Worker that already applied the first one keeps
+	// its data. A fresh deploy just runs both in order.
 	"migrations": [
 		{
 			"tag": "v5",
 			"new_sqlite_classes": ["BotGatewayV5", "BotSessionV5"]
+		},
+		{
+			"tag": "v6",
+			"renamed_classes": [
+				{ "from": "BotGatewayV5", "to": "BotGateway" },
+				{ "from": "BotSessionV5", "to": "BotSession" }
+			]
 		}
 	],
 	"observability": {

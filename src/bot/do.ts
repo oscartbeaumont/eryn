@@ -129,7 +129,7 @@ interface RenameNotice {
 	readonly previousName?: string;
 }
 
-export class BotGatewayV5 extends DurableObject<Env> {
+export class BotGateway extends DurableObject<Env> {
 	private readonly token: string;
 	private readonly rest: DiscordRest;
 	/**
