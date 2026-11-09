@@ -27,8 +27,18 @@ export interface ToolSpec {
 	readonly name: string;
 	readonly description: string;
 	readonly input: ObjectSchema;
+	/**
+	 * Extra policy checks that must fail the call rather than become tool
+	 * output. Both adapters run this outside their own error handling, so an
+	 * `ask` or `deny` ends the step instead of being reported to the model.
+	 */
+	guard?(input: Record<string, unknown>, call: ToolCall): Promise<void>;
 	/** A string is sent as-is; any other value is JSON-encoded. */
 	run(input: Record<string, unknown>, call: ToolCall): Promise<unknown>;
+}
+
+function content(result: unknown) {
+	return { content: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
 }
 
 /**
@@ -58,21 +68,23 @@ async function assertAllowed(
 /** Adapt a spec to the editor's `execute`, letting a thrown error fail the call. */
 export function toolRun(spec: ToolSpec, ctx?: Plugin.Context) {
 	return async (rawInput: unknown, call: ToolCall) => {
+		const input = (rawInput ?? {}) as Record<string, unknown>;
 		await assertAllowed(ctx, spec, rawInput, call);
-		const result = await spec.run((rawInput ?? {}) as Record<string, unknown>, call);
-		return { content: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
+		await spec.guard?.(input, call);
+		return content(await spec.run(input, call));
 	};
 }
 
 /** Adapt a spec to the editor's `execute`, reporting a thrown error to the model. */
 export function toolExecute(spec: ToolSpec, ctx?: Plugin.Context) {
-	const run = toolRun(spec);
 	return async (rawInput: unknown, call: ToolCall) => {
+		const input = (rawInput ?? {}) as Record<string, unknown>;
 		// Outside the try: a permission denial is not an error the model should
-		// retry or report as a result.
+		// retry or report as a result. The guard runs here for the same reason.
 		await assertAllowed(ctx, spec, rawInput, call);
+		await spec.guard?.(input, call);
 		try {
-			return await run(rawInput, call);
+			return content(await spec.run(input, call));
 		} catch (error) {
 			return { content: `Error: ${describeError(error)}` };
 		}

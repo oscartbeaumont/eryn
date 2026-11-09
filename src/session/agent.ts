@@ -525,7 +525,15 @@ class GuildAgentImpl implements GuildAgentShape {
 				const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
 				// A rename is not replayed to the agent, and the gateway's copy can
 				// predate it, so re-read the conversation rather than trusting it.
-				const discord = request.discord ? await this.refreshContext(request.discord) : undefined;
+				// The speaker is recorded on the same context: the tools read it
+				// back to hold the turn to that person's Discord permissions.
+				const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
+				// Set, or clear, the author id for this turn. An automated prompt
+				// (a thread-created notice, for example) has no speaker, so it must
+				// not inherit the last human's authority from the stored context.
+				const discord = refreshed
+					? { ...refreshed, authorId: request.author?.id }
+					: undefined;
 				await this.applyDiscord(host, request.threadId, sessionID, discord);
 				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
 				if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
@@ -1362,7 +1370,14 @@ class GuildAgentImpl implements GuildAgentShape {
 			return undefined;
 		});
 		if (!session) return;
-		await this.saveDiscordContext(host, sessionID, session.metadata, discord);
+		// A rename event carries no speaker. Keep the author already stored so a
+		// rename between two messages does not erase who is allowed to act.
+		const existing = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+		const merged =
+			!discord.authorId && existing?.authorId
+				? { ...discord, authorId: existing.authorId }
+				: discord;
+		await this.saveDiscordContext(host, sessionID, session.metadata, merged);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
 		// value cannot make the next prompt skip a needed write.
 		this.appliedContext.delete(threadId);
@@ -1674,7 +1689,12 @@ class GuildAgentImpl implements GuildAgentShape {
 				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 				// A scheduled turn starts from metadata with no message to carry a
 				// rename, so correct the names before following the turn.
-				const context = stored ? await this.refreshContext(stored) : undefined;
+				const refreshed = stored ? await this.refreshContext(stored) : undefined;
+				// A turn this object did not start has no speaker of its own. Drop
+				// the last human's id so a schedule cannot borrow their Discord
+				// permissions: the tools then allow only this conversation's own
+				// read/send and refuse cross-channel actions.
+				const context = refreshed ? { ...refreshed, authorId: undefined } : undefined;
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
 				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
@@ -1684,6 +1704,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				}
 
 				this.remember(threadId, sessionID);
+				// Approvals during a scheduled turn must not name, or be approved
+				// by, whoever happened to speak last.
+				this.requesterByThread.delete(threadId);
 				if (context) {
 					this.contextByThread.set(threadId, context);
 					if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
@@ -1715,7 +1738,9 @@ function describeApproval(
 	const command = typeof input?.command === "string" ? input.command : undefined;
 	const path = typeof input?.filePath === "string" ? input.filePath : first;
 	let detail: string;
-	if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
+	if (action === "discord.cross-channel" && typeof metadata?.targetChannelId === "string") {
+		detail = `Act in another Discord channel: <#${metadata.targetChannelId}>`;
+	} else if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
 	else if ((action === "edit" || action === "write" || action === "read") && path) detail = `${action === "read" ? "Read" : "Change"} \`${path}\``;
 	else if (message) detail = message;
 	else detail = `Use **${action}**${first ? ` on \`${first}\`` : ""}`;

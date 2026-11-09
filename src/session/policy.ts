@@ -18,6 +18,7 @@ export const POLICY_GROUPS = [
 	"discord-thread",
 	"discord-channel",
 	"discord-manage",
+	"cross-channel",
 	"web",
 	"subagent",
 ] as const;
@@ -46,6 +47,9 @@ export const GROUP_TOOLS: Record<PolicyGroup, readonly string[]> = {
 	],
 	"discord-channel": ["discord_join_channel", "discord_leave_channel"],
 	"discord-manage": ["discord_edit_message", "discord_delete_message", "discord_pin_message"],
+	// Not a tool of its own: every Discord tool asserts this synthetic action
+	// before acting outside the conversation it was prompted in.
+	"cross-channel": ["discord.cross-channel"],
 	web: ["webfetch", "websearch"],
 	subagent: ["subagent"],
 };
@@ -58,6 +62,7 @@ export const GROUP_LABELS: Record<PolicyGroup, string> = {
 	"discord-thread": "Discord threads",
 	"discord-channel": "Channel subscriptions",
 	"discord-manage": "Manage messages",
+	"cross-channel": "Cross-channel Discord",
 	web: "Web access",
 	subagent: "Subagents",
 };
@@ -86,6 +91,7 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "allow",
 		"discord-channel": "allow",
 		"discord-manage": "allow",
+		"cross-channel": "allow",
 		web: "allow",
 		subagent: "allow",
 	},
@@ -97,6 +103,7 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "allow",
 		"discord-channel": "allow",
 		"discord-manage": "block",
+		"cross-channel": "block",
 		web: "block",
 		subagent: "block",
 	},
@@ -108,6 +115,7 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "block",
 		"discord-channel": "block",
 		"discord-manage": "block",
+		"cross-channel": "block",
 		web: "block",
 		subagent: "block",
 	},
@@ -119,6 +127,7 @@ export const PRESETS: Record<PolicyPreset, Record<PolicyGroup, PolicyEffect>> = 
 		"discord-thread": "block",
 		"discord-channel": "block",
 		"discord-manage": "block",
+		"cross-channel": "block",
 		web: "block",
 		subagent: "block",
 	},
@@ -270,7 +279,13 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	const workspace = tools.workspace ?? "allow";
 	const edit = tools.edit ?? "allow";
 	const shell = tools.shell ?? "allow";
-	const discord = [tools["discord-reply"], tools["discord-thread"], tools["discord-channel"], tools["discord-manage"]];
+	const discord = [
+		tools["discord-reply"],
+		tools["discord-thread"],
+		tools["discord-channel"],
+		tools["discord-manage"],
+		tools["cross-channel"],
+	];
 
 	const workspaceLine =
 		workspace === "block"

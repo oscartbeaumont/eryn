@@ -49,6 +49,15 @@ which owns the OpenCode host, the provider credentials, the MCP links, and a
 virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
 and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
 
+## Permissions
+
+`/eryn policy` sets per-channel and per-thread tool limits. A policy is a
+ceiling, not the whole decision: every Discord tool also checks the Discord
+permissions of the member who prompted the turn, so a Full policy cannot let
+someone read a channel they cannot see themselves. Actions outside the current
+conversation are a separate **Cross-channel Discord** policy group, and an
+automated turn has no speaker, so it cannot use cross-channel tools.
+
 ## Self-hosting
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/oscartbeaumont/eryn)

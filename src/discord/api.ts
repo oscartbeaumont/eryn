@@ -35,6 +35,20 @@ export interface DiscordUser {
 	bot?: boolean;
 }
 
+/**
+ * One channel permission overwrite.
+ *
+ * `allow` and `deny` are decimal permission bitmasks encoded as strings, which
+ * is how Discord sends them. They are kept raw rather than parsed here so the
+ * pure resolver can decide what a malformed value means.
+ */
+export interface PermissionOverwrite {
+	id: string;
+	type: number;
+	allow: string;
+	deny: string;
+}
+
 export interface DiscordChannelRef {
 	id: string;
 	type: number;
@@ -43,6 +57,7 @@ export interface DiscordChannelRef {
 	name?: string;
 	topic?: string;
 	position?: number;
+	permission_overwrites?: readonly PermissionOverwrite[];
 	thread_metadata?: { archived?: boolean; auto_archive_duration?: number };
 }
 
@@ -64,6 +79,8 @@ export interface DiscordMessageView {
 	timestamp?: string;
 	edited_timestamp?: string | null;
 	author?: DiscordUser;
+	/** Present when a webhook posted the message, even though `author.bot` may be unset. */
+	webhook_id?: string;
 	mentions?: DiscordUser[];
 	attachments?: DiscordAttachment[];
 	referenced_message?: { id?: string } | null;
@@ -74,6 +91,10 @@ export interface DiscordRole {
 	id: string;
 	name: string;
 	managed: boolean;
+	/** A decimal permission bitmask, as Discord sends it. */
+	permissions?: string;
+	/** The role's place in the hierarchy; higher roles override lower ones. */
+	position?: number;
 	tags?: { bot_id?: string };
 }
 
@@ -170,10 +191,28 @@ export interface InteractionMessageOptions {
 	components?: readonly DiscordComponent[];
 }
 
+function permissionOverwrites(value: unknown): readonly PermissionOverwrite[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const parsed: PermissionOverwrite[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object") continue;
+		const overwrite = entry as Record<string, unknown>;
+		if (typeof overwrite.id !== "string" || typeof overwrite.type !== "number") continue;
+		parsed.push({
+			id: overwrite.id,
+			type: overwrite.type,
+			allow: typeof overwrite.allow === "string" ? overwrite.allow : "0",
+			deny: typeof overwrite.deny === "string" ? overwrite.deny : "0",
+		});
+	}
+	return parsed;
+}
+
 function channelRef(value: unknown): DiscordChannelRef | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const result = value as Record<string, unknown>;
 	if (typeof result.id !== "string" || typeof result.type !== "number") return undefined;
+	const overwrites = permissionOverwrites(result.permission_overwrites);
 	return {
 		id: result.id,
 		type: result.type,
@@ -182,6 +221,7 @@ function channelRef(value: unknown): DiscordChannelRef | undefined {
 		...(typeof result.name === "string" ? { name: result.name } : {}),
 		...(typeof result.topic === "string" ? { topic: result.topic } : {}),
 		...(typeof result.position === "number" ? { position: result.position } : {}),
+		...(overwrites ? { permission_overwrites: overwrites } : {}),
 		...(result.thread_metadata && typeof result.thread_metadata === "object"
 			? { thread_metadata: result.thread_metadata as { archived?: boolean; auto_archive_duration?: number } }
 			: {}),
@@ -380,6 +420,42 @@ export function discordRest(token: string) {
 			return Array.isArray(result) ? result : [];
 		},
 
+		/**
+		 * One guild member's role ids, or undefined when they are not a member.
+		 *
+		 * Permissions are computed from these ids; a member who has left has no
+		 * permissions to lend to a tool call.
+		 */
+		async guildMember(guildId: string, userId: string): Promise<{ roles: string[] } | undefined> {
+			const result = await request<{ roles?: unknown }>("GET", `/guilds/${guildId}/members/${userId}`);
+			if (!result || !Array.isArray(result.roles)) return undefined;
+			return { roles: result.roles.filter((role): role is string => typeof role === "string") };
+		},
+
+		/** A guild's owner, which the permission resolver needs to grant everything. */
+		async guildInfo(guildId: string): Promise<{ ownerId?: string } | undefined> {
+			const result = await request<{ owner_id?: unknown }>("GET", `/guilds/${guildId}`);
+			if (!result) return undefined;
+			return typeof result.owner_id === "string" ? { ownerId: result.owner_id } : {};
+		},
+
+		/**
+		 * Whether a user is a member of a thread.
+		 *
+		 * A private thread is only readable by its members (or managers), so this
+		 * is part of resolving the speaker's permissions there. Every failure,
+		 * including a 404, means "not a member": failing closed is the only safe
+		 * answer when membership cannot be proven.
+		 */
+		async isThreadMember(threadId: string, userId: string): Promise<boolean> {
+			try {
+				const result = await request<unknown>("GET", `/channels/${threadId}/thread-members/${userId}`);
+				return result !== undefined;
+			} catch {
+				return false;
+			}
+		},
+
 		/** The guilds the bot is a member of. */
 		async guilds(): Promise<{ id: string; name: string }[]> {
 			const result = await request<{ id?: unknown; name?: unknown }[]>("GET", "/users/@me/guilds");
@@ -415,6 +491,9 @@ export function discordRest(token: string) {
 				type: 4,
 				data: {
 					content,
+					// Error strings and MCP text are untrusted: never let a mention
+					// token in them ping a user, role, or another bot.
+					allowed_mentions: { parse: [] },
 					flags: options.ephemeral === false ? 0 : 64,
 					...(options.components?.length ? { components: options.components } : {}),
 				},
@@ -445,6 +524,7 @@ export function discordRest(token: string) {
 		): Promise<void> {
 			await request<void>("PATCH", `/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
 				content,
+				allowed_mentions: { parse: [] },
 				...(options.components ? { components: options.components } : {}),
 			});
 		},
@@ -460,6 +540,7 @@ export function discordRest(token: string) {
 				type: 7,
 				data: {
 					content,
+					allowed_mentions: { parse: [] },
 					...(options.components ? { components: options.components } : {}),
 				},
 			});

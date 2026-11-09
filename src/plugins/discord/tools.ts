@@ -25,11 +25,15 @@ import {
 	MAX_CONTENT,
 	THREAD_TYPES,
 	type DiscordChannelRef,
+	type DiscordMessageView,
 	type DiscordRest,
 } from "../../discord/api";
+import { DiscordAuthority } from "../../discord/authority";
+import { isBotAuthored } from "../../discord/authorship";
+import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import type { DiscordContext } from "../../session/models";
-import { objectSchema, toolExecute, type ToolSpec } from "../tool";
+import { objectSchema, toolExecute, type ToolCall, type ToolSpec } from "../tool";
 import { readDiscordContext } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
@@ -71,11 +75,17 @@ export function discordTools(
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
 ) {
+	// One per host/guild. A cache shared across guilds would let a role id from
+	// one server be read as a role in another.
+	const authority = new DiscordAuthority(rest, guildId);
+
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await rest.channel(channelId);
 		if (!found) throw new Error(`Channel ${channelId} was not found.`);
-		if (found.guild_id !== undefined && found.guild_id !== guildId) {
+		// A DM or group DM has no guild_id. The tools only work inside this
+		// server, so anything else is refused rather than treated as local.
+		if (found.guild_id !== guildId) {
 			throw new Error(`Channel ${channelId} is not in this server.`);
 		}
 		return found;
@@ -104,6 +114,117 @@ export function discordTools(
 	// conversation that asked for the watch, which is read from the session.
 	let plugin: Plugin.Context | undefined;
 
+	/**
+	 * The Discord context stored on the calling session.
+	 *
+	 * Every authorization decision starts here: it names both the conversation
+	 * the turn belongs to and the person who prompted it. A missing context
+	 * cannot be authorized, so it is a refusal rather than an empty default.
+	 */
+	const sessionContext = async (sessionID: string): Promise<DiscordContext> => {
+		if (!plugin) throw new Error("Eryn cannot verify Discord permissions right now.");
+		const session = await plugin.session.get({ sessionID }).catch(() => undefined);
+		const context = readDiscordContext(session?.metadata);
+		if (!context) {
+			throw new Error("This conversation has no Discord context, so Eryn cannot verify who is asking.");
+		}
+		return context;
+	};
+
+	/** Whether `channelId` is part of the conversation this turn belongs to. */
+	const isCurrentConversation = (context: DiscordContext, channelId: string): boolean =>
+		context.thread.id === channelId || context.channel.id === channelId;
+
+	/**
+	 * Require the speaker to have Discord permissions in a channel.
+	 *
+	 * A scheduled or automated turn has no speaker. It may still read and send
+	 * in its own conversation, because the reply has to land somewhere, but
+	 * anything else is refused: there is no person whose permissions could
+	 * justify it.
+	 */
+	const requireChannelPermission = async (
+		sessionID: string,
+		channelId: string,
+		required: bigint,
+		label: string,
+		options: { allowWithoutAuthor?: boolean } = {},
+	): Promise<void> => {
+		const context = await sessionContext(sessionID);
+		if (!context.authorId) {
+			if (options.allowWithoutAuthor && isCurrentConversation(context, channelId)) return;
+			throw new Error(
+				`This turn has no Discord user attached, so Eryn will not ${label} outside this conversation.`,
+			);
+		}
+		if (!(await authority.can(context.authorId, channelId, required))) {
+			throw new Error(
+				`Your Discord permissions do not allow Eryn to ${label} in <#${channelId}>.`,
+			);
+		}
+	};
+
+	/** Require Manage Server, which is what server configuration asks for. */
+	const requireManageGuild = async (sessionID: string, label: string): Promise<void> => {
+		const context = await sessionContext(sessionID);
+		if (!context.authorId) {
+			throw new Error(`This turn has no Discord user attached, so Eryn will not ${label}.`);
+		}
+		if (!(await authority.canManageGuild(context.authorId))) {
+			throw new Error(`Only someone with Manage Server can ${label}.`);
+		}
+	};
+
+	/**
+	 * A message that may grow a thread.
+	 *
+	 * Watching or threading a bot's own message can make the gateway prompt
+	 * Eryn from a thread on that message, which can loop. Webhooks are treated
+	 * the same way: they are not a person asking for anything.
+	 */
+	const requireHumanMessage = async (
+		channelId: string,
+		messageId: string,
+	): Promise<DiscordMessageView> => {
+		const message = await rest.message(channelId, messageId);
+		if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
+		if (isBotAuthored(message, botUserId)) {
+			throw new Error(
+				`Message ${messageId} was written by a bot or webhook, so Eryn will not start or watch a thread from it.`,
+			);
+		}
+		return message;
+	};
+
+	/**
+	 * Assert the cross-channel policy before a tool reaches another channel.
+	 *
+	 * This runs as a tool guard, outside `toolExecute`'s catch, so an `ask`
+	 * posts a card and a `block` ends the step instead of becoming tool output.
+	 * It is defense in depth: the speaker's own Discord permissions are checked
+	 * again in the tool body, and an approval never widens them.
+	 */
+	const crossChannel = async (call: ToolCall, targetChannelId: string): Promise<void> => {
+		const context = await sessionContext(call.sessionID);
+		if (isCurrentConversation(context, targetChannelId)) return;
+		if (!plugin) throw new Error("Eryn cannot check the cross-channel policy right now.");
+		await plugin.permission.assert({
+			action: "discord.cross-channel",
+			resources: [targetChannelId],
+			save: ["*"],
+			sessionID: call.sessionID,
+			metadata: { targetChannelId },
+		});
+	};
+
+	/** A guard for a tool whose target is named by one input field. */
+	const guardChannel =
+		(key: "channelId" | "threadId") =>
+		async (input: Record<string, unknown>, call: ToolCall): Promise<void> => {
+			const channelId = input[key];
+			if (typeof channelId === "string") await crossChannel(call, channelId);
+		};
+
 	/** The conversation a watch should notify, from the calling session's metadata. */
 	const notifyTarget = async (sessionID: string) => {
 		const session = plugin
@@ -124,12 +245,18 @@ export function discordTools(
 			description:
 				"List the channels and active threads in this Discord server, with their ids, names, parent ids, and whether they are threads.",
 			input: objectSchema({}),
-			async run() {
+			async run(_rawInput, call) {
+				const context = await sessionContext(call.sessionID);
+				// Without a speaker there is nobody whose view of the server could
+				// be shown. The conversation's own ids are already in the prompt,
+				// so an empty list is the safe answer.
+				if (!context.authorId) return [];
 				const [channels, threads] = await Promise.all([
 					rest.guildChannels(guildId),
 					rest.activeThreads(guildId),
 				]);
-				return [...channels.map(channelSummary), ...threads.map(channelSummary)];
+				const visible = await authority.filterVisible(context.authorId, [...channels, ...threads]);
+				return visible.map(channelSummary);
 			},
 		},
 
@@ -137,8 +264,11 @@ export function discordTools(
 			name: "discord_list_threads",
 			description: "List the active threads in this Discord server.",
 			input: objectSchema({}),
-			async run() {
-				return (await rest.activeThreads(guildId)).map(channelSummary);
+			async run(_rawInput, call) {
+				const context = await sessionContext(call.sessionID);
+				if (!context.authorId) return [];
+				const threads = await rest.activeThreads(guildId);
+				return (await authority.filterVisible(context.authorId, threads)).map(channelSummary);
 			},
 		},
 
@@ -154,9 +284,17 @@ export function discordTools(
 				},
 				["channelId"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, limit, before } = rawInput as ChannelInput & { limit?: number; before?: string };
 				const channelInfo = await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.ReadMessageHistory,
+					"read messages",
+					{ allowWithoutAuthor: true },
+				);
 				const messages = await rest.channelMessages(channelId, {
 					limit: Math.min(Math.max(Math.trunc(limit ?? 20), 1), 50),
 					...(before ? { before } : {}),
@@ -177,9 +315,20 @@ export function discordTools(
 				},
 				["channelId", "content"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, content, replyTo } = rawInput as ChannelInput & { content: string; replyTo?: string };
-				await channel(channelId);
+				const found = await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel |
+						(THREAD_TYPES.has(found.type)
+							? Permission.SendMessagesInThreads
+							: Permission.SendMessages),
+					"send messages",
+					{ allowWithoutAuthor: true },
+				);
 				if (!content.trim()) throw new Error("Message content is required.");
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
 				return await rest.sendMessage(channelId, content, replyTo ? { replyTo } : {});
@@ -198,11 +347,21 @@ export function discordTools(
 				},
 				["channelId", "name"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, name: rawName, messageId } = rawInput as ChannelInput & { name: string; messageId?: string };
 				await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.CreatePublicThreads,
+					"create a thread",
+				);
 				const name = rawName.trim().slice(0, 100);
 				if (!name) throw new Error("A thread name is required.");
+				// Threading a bot's message is another way to make a bot-authored
+				// thread, so refuse it here as well as in the message watch.
+				if (messageId) await requireHumanMessage(channelId, messageId);
 				return messageId
 					? await rest.createThread(channelId, messageId, name)
 					: await rest.startThread(channelId, name);
@@ -214,14 +373,19 @@ export function discordTools(
 			description:
 				"Watch a message in this server. If a thread is created from it, you will be told the new thread's id in this conversation, and Eryn will automatically join and subscribe to that thread so its messages start a turn. Discord gives a thread created from a message the same id as the message.",
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
+			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
 				const { channelId, messageId } = rawInput as MessageInput;
 				if (THREAD_TYPES.has((await channel(channelId)).type)) {
 					throw new Error(`A thread cannot be created from a message inside ${channelId}.`);
 				}
-				if (!(await rest.message(channelId, messageId))) {
-					throw new Error(`Message ${messageId} was not found in ${channelId}.`);
-				}
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.ReadMessageHistory,
+					"watch that message",
+				);
+				await requireHumanMessage(channelId, messageId);
 				await setMessageSubscription(
 					{ channelId, messageId, ...(await notifyTarget(call.sessionID)) },
 					true,
@@ -234,9 +398,16 @@ export function discordTools(
 			name: "discord_unsubscribe_message",
 			description: "Stop watching a message for a thread being created from it. Existing thread subscriptions are unchanged.",
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, messageId } = rawInput as MessageInput;
 				await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.ReadMessageHistory,
+					"stop watching that message",
+				);
 				await setMessageSubscription({ channelId, messageId }, false);
 				return { ok: true, channelId, messageId, subscribed: false };
 			},
@@ -252,9 +423,16 @@ export function discordTools(
 				},
 				["threadId"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("threadId"),
+			async run(rawInput, call) {
 				const { threadId, locked } = rawInput as ThreadInput & { locked?: boolean };
 				await thread(threadId);
+				await requireChannelPermission(
+					call.sessionID,
+					threadId,
+					Permission.ManageThreads,
+					"archive that thread",
+				);
 				await rest.setThreadArchived(threadId, true, locked ?? false);
 				return { ok: true, threadId };
 			},
@@ -265,9 +443,13 @@ export function discordTools(
 			description:
 				"Join a thread and subscribe Eryn to its messages. New messages in the thread will start a turn without needing a mention.",
 			input: objectSchema({ threadId: THREAD_ID }, ["threadId"]),
-			async run(rawInput) {
+			guard: guardChannel("threadId"),
+			async run(rawInput, call) {
 				const { threadId } = rawInput as ThreadInput;
 				await thread(threadId);
+				// A private thread additionally requires membership (or manager
+				// rights); the resolver enforces that as part of ViewChannel.
+				await requireChannelPermission(call.sessionID, threadId, Permission.ViewChannel, "join that thread");
 				await rest.joinThread(threadId);
 				await setSubscription("thread", threadId, true);
 				return { ok: true, threadId, subscribed: true };
@@ -278,9 +460,11 @@ export function discordTools(
 			name: "discord_leave_thread",
 			description: "Leave a thread and stop Eryn from responding to its messages.",
 			input: objectSchema({ threadId: THREAD_ID }, ["threadId"]),
-			async run(rawInput) {
+			guard: guardChannel("threadId"),
+			async run(rawInput, call) {
 				const { threadId } = rawInput as ThreadInput;
 				await thread(threadId);
+				await requireChannelPermission(call.sessionID, threadId, Permission.ViewChannel, "leave that thread");
 				await rest.leaveThread(threadId);
 				await setSubscription("thread", threadId, false);
 				return { ok: true, threadId, subscribed: false };
@@ -292,9 +476,11 @@ export function discordTools(
 			description:
 				"Subscribe Eryn to a channel. New messages in the channel will start a turn without needing a mention, and replies are posted in the channel. Use this for channels, not threads.",
 			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId } = rawInput as ChannelInput;
 				await subscribableChannel(channelId);
+				await requireManageGuild(call.sessionID, "subscribe Eryn to a channel");
 				await setSubscription("channel", channelId, true);
 				return { ok: true, channelId, subscribed: true };
 			},
@@ -304,9 +490,11 @@ export function discordTools(
 			name: "discord_leave_channel",
 			description: "Unsubscribe Eryn from a channel and stop responding to its messages.",
 			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId } = rawInput as ChannelInput;
 				await subscribableChannel(channelId);
+				await requireManageGuild(call.sessionID, "unsubscribe Eryn from a channel");
 				await setSubscription("channel", channelId, false);
 				return { ok: true, channelId, subscribed: false };
 			},
@@ -324,9 +512,16 @@ export function discordTools(
 				},
 				["channelId", "messageId", "emoji"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, messageId, emoji, remove } = rawInput as MessageInput & { emoji: string; remove?: boolean };
 				await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.AddReactions,
+					"react to messages",
+				);
 				if (remove) await rest.removeReaction(channelId, messageId, emoji);
 				else await rest.addReaction(channelId, messageId, emoji);
 				return { ok: true };
@@ -344,9 +539,21 @@ export function discordTools(
 				},
 				["channelId", "messageId", "content"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, messageId, content } = rawInput as MessageInput & { content: string };
 				await channel(channelId);
+				const message = await rest.message(channelId, messageId);
+				if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
+				// Editing Eryn's own message only needs visibility; editing anyone
+				// else's is a moderation action.
+				const own = botUserId !== undefined && message.author?.id === botUserId;
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					own ? Permission.ViewChannel : Permission.ViewChannel | Permission.ManageMessages,
+					own ? "edit its own message" : "edit messages",
+				);
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
 				await rest.editMessage(channelId, messageId, content);
 				return { ok: true };
@@ -357,9 +564,16 @@ export function discordTools(
 			name: "discord_delete_message",
 			description: "Delete a message the bot is allowed to delete.",
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, messageId } = rawInput as MessageInput;
 				await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.ManageMessages,
+					"delete messages",
+				);
 				await rest.deleteMessage(channelId, messageId);
 				return { ok: true };
 			},
@@ -376,9 +590,16 @@ export function discordTools(
 				},
 				["channelId", "messageId"],
 			),
-			async run(rawInput) {
+			guard: guardChannel("channelId"),
+			async run(rawInput, call) {
 				const { channelId, messageId, remove } = rawInput as MessageInput & { remove?: boolean };
 				await channel(channelId);
+				await requireChannelPermission(
+					call.sessionID,
+					channelId,
+					Permission.ViewChannel | Permission.ManageMessages,
+					"pin or unpin messages",
+				);
 				if (remove) await rest.unpinMessage(channelId, messageId);
 				else await rest.pinMessage(channelId, messageId);
 				return { ok: true };

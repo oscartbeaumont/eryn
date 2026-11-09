@@ -32,6 +32,15 @@ export const DiscordContextSchema = Schema.Struct({
 	thread: DiscordRefSchema,
 	/** Whether replies land in a thread or directly in a subscribed channel. */
 	kind: Schema.optional(Schema.Literals(["thread", "channel"])),
+	/**
+	 * The Discord account that prompted the current turn.
+	 *
+	 * The Discord tools act with the bot's token, which can reach more than the
+	 * person talking to Eryn. This id is what lets them hold the turn to the
+	 * speaker's own permissions. A scheduled turn has no speaker, so the field
+	 * is absent and cross-channel actions are refused.
+	 */
+	authorId: Schema.optional(Schema.String),
 });
 export type DiscordContext = typeof DiscordContextSchema.Type;
 
