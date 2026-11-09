@@ -11,9 +11,10 @@
 import type { Configuration } from "@opencode/sdk/workerd";
 
 import { CATALOGUE_PATH } from "../catalogue";
-import { log, publicOrigin } from "../config";
+import { log } from "../config";
 import { withDeploy } from "../deploy";
 import type { DiscordRest } from "../discord/api";
+import { resolveOrigin } from "../discord/application";
 import { describeError } from "../errors";
 import { supportsElicitationParam, withElicitation } from "../mcp/elicitation";
 import {
@@ -156,6 +157,15 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 		for (const providerID of providerIDs) catalogueProviders.add(providerID);
 	}
 
+	// The host asks this deployment for the catalogue over HTTP, so it needs the
+	// origin the Worker is served from.
+	const origin = await resolveOrigin(options.env);
+	if (!origin) {
+		throw new Error(
+			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
+		);
+	}
+
 	const host = await createHost({
 		storage,
 		// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
@@ -165,7 +175,7 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 		models: {
 			snapshot: false,
 			fetch: true,
-			url: `${publicOrigin(env)}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
+			url: `${origin}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
 		},
 		config: {
 			model: config.model,

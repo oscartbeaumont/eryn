@@ -22,11 +22,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { Option, Schema } from "effect";
 
-import { clientId, INTERACTIONS_PATH, log as botLog, publicOrigin } from "../config";
+import { INTERACTIONS_PATH, log as botLog } from "../config";
 import { deployRestart } from "../deploy";
 import { describeError } from "../errors";
 import { json } from "../http";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
+import { applicationId, resolveOrigin } from "../discord/application";
 import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
 import {
 	DiscordSocket,
@@ -358,7 +359,11 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	 * again.
 	 */
 	private async syncInteractionsEndpoint(): Promise<void> {
-		const url = `${publicOrigin(this.env)}${INTERACTIONS_PATH}`;
+		const origin = await resolveOrigin(this.env);
+		// A deployment with no configured origin learns it from a request instead;
+		// this object never sees one, so there is nothing to do here.
+		if (!origin) return;
+		const url = `${origin}${INTERACTIONS_PATH}`;
 		const current = await this.rest.interactionsEndpoint().catch((error) => {
 			log(`could not read the interactions endpoint: ${describeError(error)}`);
 			return undefined;
@@ -565,7 +570,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
-			applicationId: this.botUserId ?? clientId(this.env),
+			applicationId: this.botUserId ?? (await applicationId(this.env)),
 			session: (guildId) => this.session(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),

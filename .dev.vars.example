@@ -2,19 +2,17 @@
 # Deploy to Cloudflare button turns every key here into a Worker secret.
 #
 # Discord: create an application at https://discord.com/developers/applications
-# and add a bot to it. The portal shows the bot token under Bot, and the
-# application id and public key under General Information.
+# and add a bot to it, then enable the Message Content Intent. The bot token is
+# all Eryn needs: the application id, the key that signs interactions, and the
+# deployment's public URL are read from Discord at runtime.
 DISCORD_BOT_TOKEN=
-DISCORD_CLIENT_ID=
-DISCORD_PUBLIC_KEY=
 
-# Generate with:
+# Seals stored provider and MCP credentials. Generate with:
 #   echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-#   echo "SESSION_SECRET=$(openssl rand -hex 32)"
 ENCRYPTION_KEY=
-SESSION_SECRET=
 
-# The URL this Worker is served from, used in links and OAuth callbacks. After
-# the first self-hosted deploy, set it to the Worker's workers.dev URL (or your
-# own domain) and redeploy. Only the hosted deployment leaves it set here.
-PUBLIC_ORIGIN=
+# Optional overrides, only needed for development or a deployment that cannot
+# learn these itself. `pnpm dev` reads them from this file when uncommented.
+#   PUBLIC_ORIGIN    the origin used in links and OAuth callbacks
+#   SESSION_SECRET   the key for MCP sign-in state; derived from ENCRYPTION_KEY
+#                    when this is unset

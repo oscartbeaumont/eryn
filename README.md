@@ -53,38 +53,34 @@ and its two Durable Objects, and serves the result on
 
 In the [Discord developer portal](https://discord.com/developers/applications):
 
-1. Create an application. Under **General Information**, copy the
-   **Application ID** and **Public Key**.
-2. Under **Bot**, reset and copy the token, then enable **Message Content
-   Intent**. Eryn reads messages in threads and subscribed channels, so this
-   privileged intent is required.
-3. Under **Installation**, keep the `bot` and `applications.commands` scopes.
-   The landing page's **Add to Discord** button installs the bot with exactly
-   those scopes once `DISCORD_CLIENT_ID` is set.
+1. Create an application. Under **Bot**, reset and copy the token, then enable
+   **Message Content Intent**. Eryn reads messages in threads and subscribed
+   channels, so this privileged intent is required.
+2. Under **Installation**, keep the `bot` and `applications.commands` scopes.
+   Eryn's own install link uses exactly those.
+
+That is all the portal needs. The application id, the key that signs
+interactions, and the interactions endpoint are read from Discord at runtime,
+so there is nothing to copy from **General Information**.
 
 ### 2. Deploy
 
-Click the button and fill in the secrets it asks for:
+Click the button and fill in the two secrets it asks for:
 
-| Secret               | Value                                                  |
-| -------------------- | ------------------------------------------------------ |
-| `DISCORD_BOT_TOKEN`  | The bot token from the portal                          |
-| `DISCORD_CLIENT_ID`  | The application id                                     |
-| `DISCORD_PUBLIC_KEY` | The application's public key                           |
-| `ENCRYPTION_KEY`     | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
-| `SESSION_SECRET`     | `openssl rand -hex 32`                                 |
+| Secret              | Value                                                  |
+| ------------------- | ------------------------------------------------------ |
+| `DISCORD_BOT_TOKEN` | The bot token from the portal                          |
+| `ENCRYPTION_KEY`    | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
 
-### 3. Point Eryn at its own URL
-
-Copy the Worker's `workers.dev` URL, then set it as a `PUBLIC_ORIGIN` variable
-under **Settings → Variables and Secrets** and redeploy. Eryn builds every
-outbound link from it, and sets the application's interactions endpoint to
-`<PUBLIC_ORIGIN>/interactions` itself when the bot object starts.
-
-### 4. Connect the server
+### 3. Connect the server
 
 Open the Worker's URL, choose **Add to Discord**, and pick a server. Run
 `/eryn setup` in that server and connect an inference provider.
+
+The first request to the Worker tells Eryn its public URL: it points the
+application's interactions endpoint at `<origin>/interactions` and answers
+Discord's verification ping. Keep `<worker>.<subdomain>.workers.dev` or attach
+a custom domain after that, and open the site once more.
 
 ### Deploying without the button
 
@@ -125,12 +121,12 @@ configured by `cloudflare.config.ts`, and `cf` ignores the Wrangler file.
 
 ## Configuration
 
+Two secrets are required. Everything else has a sensible default.
+
 | Variable             | Type   | Purpose                                                                 |
 | -------------------- | ------ | ----------------------------------------------------------------------- |
-| `DISCORD_BOT_TOKEN`  | secret | Gateway socket, REST calls, and command registration                    |
-| `DISCORD_CLIENT_ID`  | secret | Application id for the install link; defaults to the hosted application |
-| `DISCORD_PUBLIC_KEY` | secret | Verifies interaction signatures; defaults to the hosted application     |
-| `ENCRYPTION_KEY`     | secret | Base64url 32-byte key for sealing stored credentials                    |
-| `SESSION_SECRET`     | secret | Signs MCP sign-in state and callback links                              |
-| `PUBLIC_ORIGIN`      | var    | Origin for links, OAuth callbacks, and the interactions endpoint        |
-| `ERYN_DOMAIN`        | build  | Custom domain attached by `cf deploy`; unset on Workers Builds          |
+| `DISCORD_BOT_TOKEN`  | secret | Required. Gateway socket, REST calls, and command registration           |
+| `ENCRYPTION_KEY`     | secret | Required. Base64url 32-byte key for sealing stored credentials           |
+| `PUBLIC_ORIGIN`      | var    | Origin for links and OAuth callbacks; learned from the first request     |
+| `SESSION_SECRET`     | secret | Signs MCP sign-in state; derived from `ENCRYPTION_KEY` when unset        |
+| `ERYN_DOMAIN`        | build  | Custom domain attached by `cf deploy`; unset on Workers Builds            |

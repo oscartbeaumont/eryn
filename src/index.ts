@@ -18,10 +18,11 @@ import { SessionClient } from "./bot/client";
 import { BotGatewayV5 } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { applicationPublicKey, clientId, INTERACTIONS_PATH, log } from "./config";
+import { APPLICATION_PUBLIC_KEY, configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
 import { withDeploy } from "./deploy";
+import { application, applicationId, ensureEndpoint } from "./discord/application";
 import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
 import { installUrl } from "./public";
@@ -91,7 +92,7 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	// The landing page's buttons point here so a self-hosted deployment installs
 	// its own application instead of the hosted one.
 	if (isRead(request) && url.pathname === "/install") {
-		return Response.redirect(installUrl(clientId(env)), 302);
+		return Response.redirect(installUrl(await applicationId(env)), 302);
 	}
 	if (url.pathname === "/" && isRead(request)) {
 		const response = await solidHandler.fetch(request);
@@ -175,16 +176,23 @@ function hexBytes(value: string): Uint8Array | undefined {
 /** Whether Discord signed this timestamp and body for this application. */
 async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
 	const signatureBytes = hexBytes(signature);
-	const keyBytes = hexBytes(applicationPublicKey(env));
-	if (!signatureBytes || !keyBytes || !timestamp) return false;
+	if (!signatureBytes || !timestamp) return false;
+	const payload = new TextEncoder().encode(timestamp + body);
+	// The hosted application's key is a constant, so a normal interaction never
+	// costs a request. A self-hosted deployment runs its own application, and the
+	// first interaction it sees teaches it the key to check.
+	if (await signedWith(APPLICATION_PUBLIC_KEY, signatureBytes, payload)) return true;
+	const key = (await application(env))?.verifyKey;
+	return key ? await signedWith(key, signatureBytes, payload) : false;
+}
+
+/** Whether `signature` is valid for `payload` under a hex-encoded Ed25519 key. */
+async function signedWith(keyHex: string, signature: Uint8Array, payload: Uint8Array): Promise<boolean> {
+	const keyBytes = hexBytes(keyHex);
+	if (!keyBytes) return false;
 	try {
 		const key = await crypto.subtle.importKey("raw", keyBytes, ED25519, false, ["verify"]);
-		return await crypto.subtle.verify(
-			ED25519,
-			key,
-			signatureBytes,
-			new TextEncoder().encode(timestamp + body),
-		);
+		return await crypto.subtle.verify(ED25519, key, signature, payload);
 	} catch {
 		return false;
 	}
@@ -251,7 +259,7 @@ async function readPointer(
 	token: string | undefined,
 	env: Env,
 ): Promise<{ guildId: string; attemptId: string } | undefined> {
-	const secret = env.SESSION_SECRET?.trim();
+	const secret = sessionSecret(env);
 	if (!secret || !token) return undefined;
 	const pointer = await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret);
 	if (typeof pointer?.guildId !== "string" || typeof pointer.attemptId !== "string") return undefined;
@@ -318,6 +326,12 @@ strong { color: #ededed; }
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		// A deployment that configures no origin learns its public URL here: this
+		// request's own origin is the only place it is known. Doing it before the
+		// route runs means the first page view is enough to make interactions work.
+		if (!configuredOrigin(env)) {
+			ctx.waitUntil(ensureEndpoint(env, new URL(request.url).origin).catch(() => undefined));
+		}
 		const handled = await handle(request, ctx).catch(() => undefined);
 		if (handled) return handled;
 

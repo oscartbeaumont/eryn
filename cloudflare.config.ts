@@ -70,12 +70,10 @@ export default defineConfig({
 
 			// base64url 32-byte key protecting every stored credential at rest.
 			ENCRYPTION_KEY: bindings.secret(),
-			// Signs external MCP sign-in state and callback links.
-			SESSION_SECRET: bindings.secret(),
 
 			// Public origin used in links and OAuth callbacks. The hosted deploy
-			// knows its own domain; a self-hosted one sets PUBLIC_ORIGIN as a
-			// variable once it knows its URL, so the binding is left unset here.
+			// knows its own domain; a self-hosted one learns its URL from the first
+			// request it serves, so it leaves this unset.
 			...(DOMAIN ? { PUBLIC_ORIGIN: bindings.text(`https://${DOMAIN}`) } : {}),
 
 			// The deploy this Worker is serving. A deploy does not restart a live

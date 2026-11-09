@@ -9,9 +9,10 @@
  * storage and its routes.
  */
 
-import { log, publicOrigin } from "../config";
+import { log, sessionSecret } from "../config";
 import { randomToken, sign } from "../crypto";
 import { describeError } from "../errors";
+import { resolveOrigin } from "../discord/application";
 import type { McpLink, PendingMcpAuth } from "../session/models";
 import { discover, exchangeCode, initiate, refreshTokens, type McpDiscovery, type McpTokens } from "./oauth";
 import { MCP_CALLBACK_PATH, MCP_START_PATH, AUTH_TTL_MS } from "./paths";
@@ -42,8 +43,8 @@ function expiresAt(tokens: McpTokens): number {
 }
 
 /** The redirect URI this deployment registers with an external authorization server. */
-export function mcpRedirectUri(env: Env): string {
-	return `${publicOrigin(env)}${MCP_CALLBACK_PATH}`;
+export function mcpRedirectUri(origin: string): string {
+	return `${origin}${MCP_CALLBACK_PATH}`;
 }
 
 export interface BeginAuthorizationInput {
@@ -69,11 +70,17 @@ export interface BeginAuthorizationInput {
 export async function beginAuthorization(
 	input: BeginAuthorizationInput,
 ): Promise<{ attemptId: string; url: string; startUrl: string }> {
-	const secret = input.env.SESSION_SECRET?.trim();
+	const secret = sessionSecret(input.env);
 	if (!secret) throw new Error("This deployment has no session secret, so a sign-in cannot be completed.");
+	const origin = await resolveOrigin(input.env);
+	if (!origin) {
+		throw new Error(
+			"This deployment does not know its public URL yet. Open its site once, then start the sign-in again.",
+		);
+	}
 
 	const discovery = await discover(input.url, input.resourceMetadataUrl);
-	const redirectUri = mcpRedirectUri(input.env);
+	const redirectUri = mcpRedirectUri(origin);
 	const scope = input.scope ?? requestedScope(discovery);
 	const attemptId = randomToken(16);
 	const state = await sign({ guildId: input.guildId, attemptId }, secret);
@@ -105,7 +112,7 @@ export async function beginAuthorization(
 		createdAt: Date.now(),
 	});
 
-	return { attemptId, url: started.url, startUrl: `${publicOrigin(input.env)}${MCP_START_PATH}/${state}` };
+	return { attemptId, url: started.url, startUrl: `${origin}${MCP_START_PATH}/${state}` };
 }
 
 export interface FinishAuthorizationResult {

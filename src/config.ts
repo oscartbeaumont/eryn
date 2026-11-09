@@ -24,23 +24,31 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
 /**
  * A value a deployment can set that the hosted build does not bind.
  *
- * A self-hosted Eryn runs its own Discord application, so it supplies its id
- * and public key; the hosted Worker has no such variables and uses the
- * constants above.
+ * The hosted deployment declares only what it always sets; everything else is
+ * read without a declared binding so a fork can supply it, or omit it, freely.
  */
 function optional(env: Env, name: string): string | undefined {
 	const value = (env as unknown as Record<string, unknown>)[name];
 	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
-/** The Discord application id, which is also the bot's user id. */
-export function clientId(env: Env): string {
-	return optional(env, "DISCORD_CLIENT_ID") ?? CLIENT_ID;
+/** The public origin this deployment sets, normalised without a trailing slash. */
+export function configuredOrigin(env: Env): string | undefined {
+	return optional(env, "PUBLIC_ORIGIN")?.replace(/\/$/, "");
 }
 
-/** The key Discord signs this application's interactions with. */
-export function applicationPublicKey(env: Env): string {
-	return optional(env, "DISCORD_PUBLIC_KEY") ?? APPLICATION_PUBLIC_KEY;
+/**
+ * The key that signs MCP sign-in state and callback links.
+ *
+ * A deployment may set `SESSION_SECRET`. Without one the key is derived from
+ * `ENCRYPTION_KEY`, which every deployment has anyway; the purpose suffix keeps
+ * the two uses from sharing key material.
+ */
+export function sessionSecret(env: Env): string | undefined {
+	const configured = optional(env, "SESSION_SECRET");
+	if (configured) return configured;
+	const encryption = optional(env, "ENCRYPTION_KEY");
+	return encryption ? `${encryption}:mcp-state` : undefined;
 }
 
 /** Where Discord posts interactions once the application's endpoint is set. */
@@ -86,11 +94,6 @@ const MODEL_PATTERN = /^[A-Za-z0-9._-]+\/\S+$/;
 /** Whether a value is a usable `provider/model` reference. */
 export function isValidModel(value: string): boolean {
 	return MODEL_PATTERN.test(value);
-}
-
-/** The public origin to build links with, normalised without a trailing slash. */
-export function publicOrigin(env: Env): string {
-	return env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") || DEFAULT_PUBLIC_ORIGIN;
 }
 
 /** A namespaced log line: `[eryn:bot:gateway] …`. */
