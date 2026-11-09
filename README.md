@@ -89,9 +89,9 @@ management, or one MCP server. Each group can be **allowed**, **ask**, or
 **blocked**. A blocked tool is not offered to the model at all; an allowed tool
 runs; an asked tool posts a card in the conversation before it runs.
 
-A non-default channel or thread gets one pinned-style card explaining the
-restriction, with a **Change** button. The card is the only public surface; the
-editor itself is ephemeral, exactly like `/eryn setup`.
+A non-default channel or thread gets one card explaining the restriction, with
+a **Change** button. The card is the only public surface; the editor itself is
+ephemeral, exactly like `/eryn setup`.
 
 Approvals are per conversation:
 
@@ -99,10 +99,10 @@ Approvals are per conversation:
 - **Always here** writes an allow rule for this conversation's policy.
 - **Block here** writes a deny rule and rejects the call.
 
-Changing a conversation's policy requires Manage Server. Anyone in the
-conversation can approve a single call, so a thread's requester is not stuck
-waiting for an admin. Requests expire after 90 seconds instead of hanging the
-turn.
+Changing a conversation's policy requires Manage Server. The person who asked,
+or someone with Manage Server, can approve a single call, so a thread's
+requester is not stuck waiting for an admin. Requests expire after 90 seconds
+instead of hanging the turn.
 
 ### Agent tools
 
