@@ -23,12 +23,14 @@ import {
 	ProviderConnectResponseSchema,
 	PublicLinkSchema,
 	FormViewSchema,
+	InteractResponseSchema,
 	PolicyStateSchema,
 	type DiscordContext,
 	type ElicitationMode,
 	type FormView,
 	type GuildStatus,
 	type IntegrationOption,
+	type InteractResponse,
 	type McpAuthCompleteResponse,
 	type McpAuthStartResponse,
 	type McpAuthStatus,
@@ -255,5 +257,10 @@ export class SessionClient {
 			{ threadId, gone },
 		);
 		return payload.stopped === true;
+	}
+
+	/** Whether this Discord user covers the conversation's schedule scope. */
+	canInteract(threadId: string, userId: string): Promise<InteractResponse> {
+		return this.call(ROUTES.interact, InteractResponseSchema, { threadId, userId });
 	}
 }

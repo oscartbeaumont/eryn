@@ -12,7 +12,7 @@
     "deploy": "cf deploy",
     "typecheck": "cf workers types && tsc && tsc -p tsconfig.landing.json",
     "check": "pnpm typecheck && pnpm build",
-    "test": "node --experimental-strip-types --test src/discord/*.test.ts"
+    "test": "node --experimental-strip-types --test src/discord/*.test.ts src/session/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.3.1",

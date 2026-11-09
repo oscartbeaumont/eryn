@@ -31,8 +31,9 @@ export function readDiscordContext(metadata: Record<string, unknown> | undefined
 /** Render the context as a self-closing reference the model cannot mistake for a message. */
 export function describeDiscordContext(context: DiscordContext): string {
 	const kind = context.kind ?? "thread";
-	// `authorId` is deliberately not rendered: it is an authorization input the
-	// tools read, not something the model needs in its prompt.
+	// `authorId`, `scheduleTurn`, and `scheduleScope` are deliberately not
+	// rendered: they are authorization inputs the tools read, not things the
+	// model needs in its prompt.
 	const entries: [string, string][] = [
 		["guild", context.guild.name ?? context.guild.id],
 		["guildId", context.guild.id],

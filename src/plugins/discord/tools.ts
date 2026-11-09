@@ -32,9 +32,15 @@ import { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
-import type { DiscordContext } from "../../session/models";
+import type { DiscordContext, ScheduleScope } from "../../session/models";
+import {
+	addChannelToScope,
+	canEditScheduleScope,
+	removeChannelFromScope,
+	scopeAllows,
+} from "../../session/schedule-scope";
 import { objectSchema, toolExecute, type ToolCall, type ToolSpec } from "../tool";
-import { readDiscordContext } from "./context";
+import { DISCORD_METADATA_KEY, readDiscordContext } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
 	return {
@@ -56,6 +62,9 @@ const THREAD_ID = { type: "string", description: "Thread id" };
 type ChannelInput = { channelId: string };
 type MessageInput = ChannelInput & { messageId: string };
 type ThreadInput = { threadId: string };
+
+/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
+type SessionMetadata = NonNullable<Parameters<Plugin.Context["session"]["update"]>[0]["metadata"]>;
 
 /** A message to watch for a thread being created from it. */
 export interface MessageWatch {
@@ -151,6 +160,16 @@ export function discordTools(
 		options: { allowWithoutAuthor?: boolean } = {},
 	): Promise<void> => {
 		const context = await sessionContext(sessionID);
+		// A schedule has a capability scope, not a person. The scope is the
+		// ceiling even when the last human had more access.
+		if (context.scheduleTurn && context.scheduleScope) {
+			if (!scopeAllows(context.scheduleScope, channelId, required)) {
+				throw new Error(
+					`This schedule's Discord access does not allow Eryn to ${label} in <#${channelId}>.`,
+				);
+			}
+			return;
+		}
 		if (!context.authorId) {
 			if (options.allowWithoutAuthor && isCurrentConversation(context, channelId)) return;
 			throw new Error(
@@ -167,12 +186,68 @@ export function discordTools(
 	/** Require Manage Server, which is what server configuration asks for. */
 	const requireManageGuild = async (sessionID: string, label: string): Promise<void> => {
 		const context = await sessionContext(sessionID);
+		if (context.scheduleTurn) {
+			throw new Error(`A scheduled turn has no person to approve server configuration.`);
+		}
 		if (!context.authorId) {
 			throw new Error(`This turn has no Discord user attached, so Eryn will not ${label}.`);
 		}
 		if (!(await authority.canManageGuild(context.authorId))) {
 			throw new Error(`Only someone with Manage Server can ${label}.`);
 		}
+	};
+
+	/**
+	 * Whether the speaker may change the schedule scope.
+	 *
+	 * Only the scope's owner or someone with Manage Server may do it. A
+	 * schedule turn has no person, so it never may.
+	 */
+	const canEditScope = async (context: DiscordContext): Promise<boolean> => {
+		const scope = context.scheduleScope;
+		if (!scope || context.scheduleTurn || !context.authorId) return false;
+		if (canEditScheduleScope(scope, context.authorId, false)) return true;
+		return await authority.canManageGuild(context.authorId);
+	};
+
+	/** Update the stored scope, if this conversation has one. */
+	const updateScheduleScope = async (
+		sessionID: string,
+		update: (scope: ScheduleScope, context: DiscordContext) => ScheduleScope | undefined,
+	): Promise<void> => {
+		if (!plugin) return;
+		const session = await plugin.session.get({ sessionID }).catch(() => undefined);
+		const context = readDiscordContext(session?.metadata);
+		if (!session || !context?.scheduleScope) return;
+		const next = update(context.scheduleScope, context);
+		if (next === context.scheduleScope) return;
+		await plugin.session.update({
+			sessionID,
+			metadata: {
+				...session.metadata,
+				// Merge, do not replace: the Discord context and other plugins'
+				// metadata share this session record.
+				[DISCORD_METADATA_KEY]: next
+					? { ...context, scheduleScope: next }
+					: { ...context, scheduleScope: undefined },
+			} as unknown as SessionMetadata,
+		});
+	};
+
+	/** Add a channel to the schedule scope when this speaker may do so. */
+	const expandScheduleScope = async (sessionID: string, channelId: string): Promise<void> => {
+		const context = await sessionContext(sessionID);
+		if (!(await canEditScope(context))) return;
+		await updateScheduleScope(sessionID, (scope) => addChannelToScope(scope, channelId, Date.now()));
+	};
+
+	/** Remove a channel from the schedule scope, never the conversation itself. */
+	const contractScheduleScope = async (sessionID: string, channelId: string): Promise<void> => {
+		const context = await sessionContext(sessionID);
+		if (!(await canEditScope(context))) return;
+		await updateScheduleScope(sessionID, (scope, current) =>
+			removeChannelFromScope(scope, channelId, current.thread.id, Date.now()),
+		);
 	};
 
 	/**
@@ -247,6 +322,16 @@ export function discordTools(
 			input: objectSchema({}),
 			async run(_rawInput, call) {
 				const context = await sessionContext(call.sessionID);
+				if (context.scheduleTurn) {
+					// A schedule has no view of the server beyond its scope. Return
+					// only those channels, even if the bot can see more.
+					const allowed = new Set(Object.keys(context.scheduleScope?.channels ?? {}));
+					const [channels, threads] = await Promise.all([
+						rest.guildChannels(guildId),
+						rest.activeThreads(guildId),
+					]);
+					return [...channels, ...threads].filter((entry) => allowed.has(entry.id)).map(channelSummary);
+				}
 				// Without a speaker there is nobody whose view of the server could
 				// be shown. The conversation's own ids are already in the prompt,
 				// so an empty list is the safe answer.
@@ -266,8 +351,12 @@ export function discordTools(
 			input: objectSchema({}),
 			async run(_rawInput, call) {
 				const context = await sessionContext(call.sessionID);
-				if (!context.authorId) return [];
 				const threads = await rest.activeThreads(guildId);
+				if (context.scheduleTurn) {
+					const allowed = new Set(Object.keys(context.scheduleScope?.channels ?? {}));
+					return threads.filter((entry) => allowed.has(entry.id)).map(channelSummary);
+				}
+				if (!context.authorId) return [];
 				return (await authority.filterVisible(context.authorId, threads)).map(channelSummary);
 			},
 		},
@@ -390,6 +479,7 @@ export function discordTools(
 					{ channelId, messageId, ...(await notifyTarget(call.sessionID)) },
 					true,
 				);
+				await expandScheduleScope(call.sessionID, channelId);
 				return { ok: true, channelId, messageId, subscribed: true };
 			},
 		},
@@ -409,6 +499,7 @@ export function discordTools(
 					"stop watching that message",
 				);
 				await setMessageSubscription({ channelId, messageId }, false);
+				await contractScheduleScope(call.sessionID, channelId);
 				return { ok: true, channelId, messageId, subscribed: false };
 			},
 		},
@@ -482,6 +573,7 @@ export function discordTools(
 				await subscribableChannel(channelId);
 				await requireManageGuild(call.sessionID, "subscribe Eryn to a channel");
 				await setSubscription("channel", channelId, true);
+				await expandScheduleScope(call.sessionID, channelId);
 				return { ok: true, channelId, subscribed: true };
 			},
 		},
@@ -496,6 +588,7 @@ export function discordTools(
 				await subscribableChannel(channelId);
 				await requireManageGuild(call.sessionID, "unsubscribe Eryn from a channel");
 				await setSubscription("channel", channelId, false);
+				await contractScheduleScope(call.sessionID, channelId);
 				return { ok: true, channelId, subscribed: false };
 			},
 		},

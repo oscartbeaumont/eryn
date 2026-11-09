@@ -58,6 +58,20 @@ someone read a channel they cannot see themselves. Actions outside the current
 conversation are a separate **Cross-channel Discord** policy group, and an
 automated turn has no speaker, so it cannot use cross-channel tools.
 
+### Schedules
+
+A schedule runs as a capability scope, not as the person who created it. Its
+scope starts as the conversation only, with read and send. The scope owner or
+someone with Manage Server can add another channel with `discord_join_channel`
+or `discord_subscribe_message`; a schedule turn cannot change its own scope.
+People talking to the conversation must cover that scope with their own Discord
+permissions, or their message is not forwarded to the agent.
+
+Schedules are **public by default**: a public thread or channel stays public,
+and the scope is not a visibility feature. Private content needs a private
+thread or channel. The scope only covers Discord channels; workspace, shell,
+web, subagents, and MCP remain governed by the conversation policy.
+
 ## Self-hosting
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/oscartbeaumont/eryn)

@@ -23,6 +23,7 @@ import type { DiscordRest } from "../../discord/api";
 import { describeError } from "../../errors";
 import { appendToSystemPrompt } from "../hooks";
 import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./context";
+import { registerScheduleScope } from "./schedule";
 import { discordTools, type SetMessageSubscription } from "./tools";
 
 export function discordPlugin(
@@ -38,6 +39,7 @@ export function discordPlugin(
 		async setup(ctx) {
 			await Promise.all([
 				tools.setup(ctx),
+				registerScheduleScope(ctx),
 				// The hook carries no session metadata, so it is read from the session
 				// itself. A failure to read it must not fail the request: a missing
 				// context only costs the agent some awareness, while a thrown error

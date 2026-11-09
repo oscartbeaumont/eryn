@@ -20,6 +20,30 @@ export const DiscordRefSchema = Schema.Struct({
 	name: Schema.optional(Schema.String),
 });
 
+/** What a schedule may do in one Discord channel. */
+export const ScheduleChannelScopeSchema = Schema.Struct({
+	read: Schema.Boolean,
+	send: Schema.Boolean,
+	manage: Schema.Boolean,
+});
+
+/**
+ * A schedule's Discord capability scope.
+ *
+ * One scope covers every schedule in a conversation. It is persisted beside
+ * the Discord context rather than rendered into the prompt: it is an
+ * authorization input, not something the model needs to see.
+ */
+export const ScheduleScopeSchema = Schema.Struct({
+	/** The person who created the schedules, for scope edits and audit. */
+	ownerId: Schema.String,
+	scheduleIds: Schema.Array(Schema.String),
+	channels: Schema.Record(Schema.String, ScheduleChannelScopeSchema),
+	createdAt: Schema.Number,
+	updatedAt: Schema.Number,
+});
+export type ScheduleScope = typeof ScheduleScopeSchema.Type;
+
 export const DiscordContextSchema = Schema.Struct({
 	/** The server the bot was invoked in. */
 	guild: DiscordRefSchema,
@@ -41,6 +65,15 @@ export const DiscordContextSchema = Schema.Struct({
 	 * is absent and cross-channel actions are refused.
 	 */
 	authorId: Schema.optional(Schema.String),
+	/**
+	 * Whether the current turn was started by a schedule rather than a person.
+	 *
+	 * Set from the schedule table's last-fire time for a turn this object
+	 * adopts. A human prompt clears it.
+	 */
+	scheduleTurn: Schema.optional(Schema.Boolean),
+	/** The capability scope every schedule in this conversation runs under. */
+	scheduleScope: Schema.optional(ScheduleScopeSchema),
 });
 export type DiscordContext = typeof DiscordContextSchema.Type;
 
@@ -519,6 +552,18 @@ export const InterruptRequestSchema = Schema.Struct({
 	threadId: Schema.String,
 	gone: Schema.optional(Schema.Boolean),
 });
+
+/** Whether one Discord user may take part in a scheduled conversation. */
+export const InteractRequestSchema = guildScoped({
+	threadId: Schema.String,
+	userId: Schema.String,
+});
+
+export const InteractResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type InteractResponse = typeof InteractResponseSchema.Type;
 
 export const PolicyGetRequestSchema = guildScoped({
 	channelId: Schema.String,

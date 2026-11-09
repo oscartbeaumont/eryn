@@ -25,6 +25,7 @@ export const ROUTES = {
 	prompt: "/prompt",
 	context: "/context",
 	interrupt: "/interrupt",
+	interact: "/interact",
 	policy: "/policy",
 	policySet: "/policy/set",
 	policyClear: "/policy/clear",

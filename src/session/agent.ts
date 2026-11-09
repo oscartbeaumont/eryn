@@ -11,7 +11,9 @@
 import { KEYS, log } from "../config";
 import { actionButton, buttonRow, linkButton } from "../discord/components";
 import { describeError } from "../errors";
-import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
+import { DEFAULT_THREAD_NAME, THREAD_TYPES, type DiscordRest } from "../discord/api";
+import { DiscordAuthority } from "../discord/authority";
+import { Permission } from "../discord/permissions";
 import { renderConversation, renderFailure, renderUserMessage } from "../discord/render";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
@@ -22,6 +24,7 @@ import type {
 	FormField,
 	FormView,
 	IntegrationOption,
+	InteractResponse,
 	ModelOption,
 	OAuthAttempt,
 	OAuthStatus,
@@ -30,6 +33,7 @@ import type {
 	PolicyState,
 	PromptRequest,
 } from "./models";
+import { scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
 import {
 	compilePermissions,
 	isDefaultPolicy,
@@ -47,7 +51,18 @@ export type { HostConfig };
 
 /** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
 const LOCATION = "/eryn";
+/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
+type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 const TURN_TIMEOUT_MS = 900_000;
+/**
+ * How recently a schedule must have fired to explain the turn starting now.
+ *
+ * The schedule table records `last_fired_at`; there is no direct link from an
+ * execution event back to its schedule. This window is a heuristic and can
+ * misattribute a human message that arrives immediately after a schedule fire
+ * in a conversation where this object had no active turn.
+ */
+const SCHEDULE_FIRE_WINDOW_MS = 60_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -150,6 +165,8 @@ export interface GuildAgentShape {
 	}): Promise<{ ok: boolean; message?: string }>;
 	/** Correct a conversation's stored context after Discord renames it. */
 	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
+	/** Whether one user covers every capability a scheduled conversation uses. */
+	canInteract(threadId: string, userId: string): Promise<InteractResponse>;
 	interrupt(threadId: string | undefined, gone: boolean, config?: HostConfig): Promise<boolean>;
 	/** Build the host if it is not up, so its schedule runner is running. */
 	ensureHost(config: HostConfig): Promise<void>;
@@ -201,6 +218,8 @@ class GuildAgentImpl implements GuildAgentShape {
 	private readonly pendingForms = new Map<string, PendingForm>();
 	/** The config last used to build the host, for policies and MCP modes. */
 	private currentConfig: HostConfig | undefined;
+	/** Per-guild Discord permission lookups, shared by tool checks and gating. */
+	private readonly authority: DiscordAuthority;
 
 	constructor(
 		private readonly env: Env,
@@ -209,7 +228,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		private readonly store: GuildStoreShape,
 		private readonly turnTimeoutMs: number,
 		private readonly guildId: string,
-	) {}
+	) {
+		this.authority = new DiscordAuthority(rest, guildId);
+	}
 
 	// --- Host -----------------------------------------------------------------
 
@@ -537,7 +558,11 @@ class GuildAgentImpl implements GuildAgentShape {
 					refreshed ??
 					this.contextByThread.get(request.threadId) ??
 					(await this.contextForSession(sessionID))?.context;
-				const discord = stored ? { ...stored, authorId: request.author?.id } : undefined;
+				// A prompt is a human turn boundary: it sets the speaker and clears
+				// any schedule-turn mark from the turn before it.
+				const discord = stored
+					? { ...stored, authorId: request.author?.id, scheduleTurn: undefined }
+					: undefined;
 				await this.applyDiscord(host, request.threadId, sessionID, discord);
 				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
 				if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
@@ -1113,6 +1138,134 @@ class GuildAgentImpl implements GuildAgentShape {
 		return { threadId, context };
 	}
 
+	// --- Schedule scope -------------------------------------------------------
+
+	/**
+	 * Whether this session's schedule fired recently enough to explain the turn
+	 * that is starting now.
+	 *
+	 * The schedule table's `last_fired_at` is the only signal available when the
+	 * object is cold and there is no prompt to carry the origin. A 60 second
+	 * window covers the gap between firing and the first execution event; it is
+	 * a heuristic, not a transaction, and is documented as such.
+	 */
+	private recentScheduleFire(sessionID: string): boolean {
+		try {
+			const rows = this.storage.sql
+				.exec(
+					`SELECT id, last_fired_at FROM schedule
+					 WHERE session_id = ? AND last_fired_at IS NOT NULL
+					 ORDER BY last_fired_at DESC LIMIT 1`,
+					sessionID,
+				)
+				.toArray() as { id?: unknown; last_fired_at?: unknown }[];
+			const fired = rows[0]?.last_fired_at;
+			return typeof fired === "number" && Date.now() - fired <= SCHEDULE_FIRE_WINDOW_MS;
+		} catch {
+			// The table only exists once a session has had schedules enabled.
+			return false;
+		}
+	}
+
+	/**
+	 * Mark a session's stored context as a schedule turn.
+	 *
+	 * Clears the speaker even when there is no scope: a schedule must never
+	 * inherit the last human's Discord permissions. When a scope exists it is
+	 * left in place for the Discord tools to enforce.
+	 */
+	private async attributeScheduleTurn(sessionID: string): Promise<boolean> {
+		const host = this.consumingHost;
+		if (!host || !this.recentScheduleFire(sessionID)) return false;
+		try {
+			const session = await host.sessions.get({ sessionID });
+			const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			if (!stored) return false;
+			if (stored.scheduleTurn === true && stored.authorId === undefined) return true;
+			const context: DiscordContext = { ...stored, authorId: undefined, scheduleTurn: true };
+			await this.saveDiscordContext(host, sessionID, session.metadata, context);
+			this.contextByThread.set(stored.thread.id, context);
+			this.requesterByThread.delete(stored.thread.id);
+			return true;
+		} catch (error) {
+			log("session", `could not attribute a schedule turn for ${sessionID}: ${describeError(error)}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Whether one Discord user may take part in a conversation whose schedules
+	 * have a capability scope.
+	 *
+	 * The schedule owner gets no exemption: the question is whether the user's
+	 * own effective permissions cover every capability the scope uses. A normal
+	 * conversation has no scope and is unchanged.
+	 */
+	async canInteract(threadId: string, userId: string): Promise<InteractResponse> {
+		const sessionID = await this.sessionFor(threadId);
+		if (!sessionID) return { ok: true };
+		try {
+			let host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+			if (!host) {
+				const settings = await this.store.settings();
+				const config: HostConfig = {
+					connections: await this.store.providers(),
+					model: settings.model,
+					links: await this.store.links(),
+				};
+				if (config.connections.length === 0) return { ok: true };
+				host = await this.hostFor(config, undefined, false);
+			}
+			const session = await host.sessions.get({ sessionID });
+			const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			const scope = context?.scheduleScope;
+			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
+
+			const actual: Record<string, ChannelCapabilities | undefined> = {};
+			for (const [channelId, required] of Object.entries(scope.channels)) {
+				const info = await this.rest.channel(channelId).catch(() => undefined);
+				// A channel that cannot be read is not covered. Omitting it makes
+				// the superset check below fail closed.
+				if (!info) continue;
+				const thread = THREAD_TYPES.has(info.type);
+				actual[channelId] = {
+					read:
+						!required.read ||
+						(await this.authority.can(
+							userId,
+							channelId,
+							Permission.ViewChannel | Permission.ReadMessageHistory,
+						)),
+					send:
+						!required.send ||
+						(await this.authority.can(
+							userId,
+							channelId,
+							Permission.ViewChannel |
+								(thread ? Permission.SendMessagesInThreads : Permission.SendMessages),
+						)),
+					manage:
+						!required.manage ||
+						(await this.authority.can(
+							userId,
+							channelId,
+							Permission.ViewChannel |
+								(thread ? Permission.ManageThreads : Permission.ManageMessages),
+						)),
+				};
+			}
+
+			if (scopeCoveredBy(scope, actual)) return { ok: true };
+			return {
+				ok: false,
+				message: "Only people who can access every channel this schedule uses can talk to Eryn here.",
+			};
+		} catch (error) {
+			log("session", `could not check access to ${threadId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		}
+	}
+
 	// --- MCP forms ------------------------------------------------------------
 
 	async formView(
@@ -1354,7 +1507,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<void> {
 		await host.sessions.update({
 			sessionID,
-			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord },
+			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord } as unknown as SessionMetadata,
 		});
 	}
 
@@ -1375,13 +1528,18 @@ class GuildAgentImpl implements GuildAgentShape {
 			return undefined;
 		});
 		if (!session) return;
-		// A rename event carries no speaker. Keep the author already stored so a
-		// rename between two messages does not erase who is allowed to act.
+		// A rename event carries no speaker or scope. Keep what the stored
+		// context already has so a rename between two messages neither erases
+		// who may act nor drops the schedules' capability scope.
 		const existing = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
-		const merged =
-			!discord.authorId && existing?.authorId
-				? { ...discord, authorId: existing.authorId }
-				: discord;
+		const merged: DiscordContext = {
+			...discord,
+			...(!discord.authorId && existing?.authorId ? { authorId: existing.authorId } : {}),
+			...(discord.scheduleTurn === undefined && existing?.scheduleTurn !== undefined
+				? { scheduleTurn: existing.scheduleTurn }
+				: {}),
+			...(!discord.scheduleScope && existing?.scheduleScope ? { scheduleScope: existing.scheduleScope } : {}),
+		};
 		await this.saveDiscordContext(host, sessionID, session.metadata, merged);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
 		// value cannot make the next prompt skip a needed write.
@@ -1618,7 +1776,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
-					this.handleEvent(event);
+					await this.handleEvent(event);
 				} catch (error) {
 					log("session", `event handling failed: ${describeError(error)}`);
 				}
@@ -1632,7 +1790,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.consuming = settled;
 	}
 
-	private handleEvent(event: unknown): void {
+	private async handleEvent(event: unknown): Promise<void> {
 		const shape = event as { type?: unknown; created?: unknown; data?: unknown };
 		if (typeof shape.type !== "string" || !shape.data || typeof shape.data !== "object") return;
 		const data = shape.data as Record<string, unknown>;
@@ -1657,6 +1815,14 @@ class GuildAgentImpl implements GuildAgentShape {
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
 			return;
+		}
+		// A start event with no turn of ours is either a schedule firing or a
+		// prompt this object did not see. Mark it before adopting, so the tools
+		// read the schedule scope rather than the previous speaker's access.
+		if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
+			const mapped = this.threadBySession.get(sessionID);
+			const active = mapped ? this.runs.get(mapped)?.turn : undefined;
+			if (!active) await this.attributeScheduleTurn(sessionID);
 		}
 		const threadId = this.threadBySession.get(sessionID);
 		if (!threadId) {
@@ -1695,11 +1861,17 @@ class GuildAgentImpl implements GuildAgentShape {
 				// A scheduled turn starts from metadata with no message to carry a
 				// rename, so correct the names before following the turn.
 				const refreshed = stored ? await this.refreshContext(stored) : undefined;
-				// A turn this object did not start has no speaker of its own. Drop
-				// the last human's id so a schedule cannot borrow their Discord
-				// permissions: the tools then allow only this conversation's own
-				// read/send and refuse cross-channel actions.
-				const context = refreshed ? { ...refreshed, authorId: undefined } : undefined;
+				// A turn this object did not start has no speaker of its own. Only
+				// a recent schedule fire may claim its stored scope; anything else
+				// clears the speaker and refuses cross-channel actions.
+				const scheduled = stored ? this.recentScheduleFire(sessionID) : false;
+				const context = refreshed
+					? {
+							...refreshed,
+							authorId: undefined,
+							scheduleTurn: scheduled ? true : undefined,
+						}
+					: undefined;
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
 				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {

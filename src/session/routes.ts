@@ -28,6 +28,7 @@ import {
 	FormReplyRequestSchema,
 	GuildRefSchema,
 	InterruptRequestSchema,
+	InteractRequestSchema,
 	LinkAddRequestSchema,
 	LinkRemoveRequestSchema,
 	McpAuthAttemptRequestSchema,
@@ -448,6 +449,11 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			const config = gone ? await loadConfig().catch(() => undefined) : undefined;
 			return json({ stopped: await agent.interrupt(body.threadId, gone, config) });
 		}),
+
+		/** Whether a speaker covers the capability scope of this conversation. */
+		[ROUTES.interact]: route(InteractRequestSchema, async (body) =>
+			json(await agent.canInteract(body.threadId, body.userId)),
+		),
 	};
 
 	return async (request: Request): Promise<Response> => {
