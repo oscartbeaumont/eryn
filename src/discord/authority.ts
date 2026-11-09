@@ -136,9 +136,12 @@ export class DiscordAuthority {
 		const now = Date.now();
 		const cached = this.threadMembers.get(key);
 		if (this.fresh(cached, now)) return cached.value;
-		// The REST helper already maps every failure to false; catching here
-		// keeps a future change to it from turning into a grant.
-		const member = await this.rest.isThreadMember(threadId, userId).catch(() => false);
+		// A failure is not a "no": ask once more, then deny this call without
+		// caching the answer, so a transient outage cannot lock a real thread
+		// member out after Discord recovers.
+		const first = await this.rest.isThreadMember(threadId, userId);
+		const member = first === undefined ? await this.rest.isThreadMember(threadId, userId) : first;
+		if (member === undefined) return false;
 		this.threadMembers.set(key, { value: member, expiresAt: now + THREAD_MEMBER_TTL_MS });
 		return member;
 	}
@@ -189,16 +192,33 @@ export class DiscordAuthority {
 	}
 
 	/**
-	 * The read/send/manage capabilities `userId` has in one channel.
+	 * The Discord capabilities `userId` has in one channel.
 	 *
-	 * Used when a schedule is created or its scope expands: the schedule must
-	 * not gain more Discord reach than the person creating or editing it.
+	 * Used when a schedule is created or its scope expands, and when a
+	 * participant is checked against that scope. The schedule must never gain
+	 * more reach than the person who set it up.
 	 */
-	async scopeCapabilities(
-		userId: string,
-		channel: DiscordChannelRef,
-	): Promise<{ read: boolean; send: boolean; manage: boolean }> {
+	async scopeCapabilities(userId: string, channel: DiscordChannelRef): Promise<{
+		read: boolean;
+		send: boolean;
+		manage: boolean;
+		createThread: boolean;
+		react: boolean;
+	}> {
 		const thread = THREAD_TYPES.has(channel.type);
+		// The scope has one management boolean for both moderation bits. Gate it
+		// on both so enabling it can never grant a bit the person lacks; a
+		// person with only one of the two loses the other, never gains it.
+		const manageMessages = await this.can(
+			userId,
+			channel.id,
+			Permission.ViewChannel | Permission.ManageMessages,
+		);
+		const manageThreads = await this.can(
+			userId,
+			channel.id,
+			Permission.ViewChannel | Permission.ManageThreads,
+		);
 		return {
 			read: await this.can(
 				userId,
@@ -211,10 +231,16 @@ export class DiscordAuthority {
 				Permission.ViewChannel |
 					(thread ? Permission.SendMessagesInThreads : Permission.SendMessages),
 			),
-			manage: await this.can(
+			manage: manageMessages && manageThreads,
+			createThread: await this.can(
 				userId,
 				channel.id,
-				Permission.ViewChannel | (thread ? Permission.ManageThreads : Permission.ManageMessages),
+				Permission.ViewChannel | Permission.CreatePublicThreads,
+			),
+			react: await this.can(
+				userId,
+				channel.id,
+				Permission.ViewChannel | Permission.AddReactions,
 			),
 		};
 	}

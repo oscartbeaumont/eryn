@@ -11,9 +11,8 @@
 import { KEYS, log } from "../config";
 import { actionButton, buttonRow, linkButton } from "../discord/components";
 import { describeError } from "../errors";
-import { DEFAULT_THREAD_NAME, THREAD_TYPES, type DiscordRest } from "../discord/api";
+import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
 import { DiscordAuthority } from "../discord/authority";
-import { Permission } from "../discord/permissions";
 import { renderConversation, renderFailure, renderUserMessage } from "../discord/render";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
@@ -33,7 +32,7 @@ import type {
 	PolicyState,
 	PromptRequest,
 } from "./models";
-import { scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
+import { addScheduleToScope, scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
 import {
 	compilePermissions,
 	isDefaultPolicy,
@@ -54,15 +53,6 @@ const LOCATION = "/eryn";
 /** The JSON metadata boundary: stored scope arrays are readonly for readers. */
 type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 const TURN_TIMEOUT_MS = 900_000;
-/**
- * How recently a schedule must have fired to explain the turn starting now.
- *
- * The schedule table records `last_fired_at`; there is no direct link from an
- * execution event back to its schedule. This window is a heuristic and can
- * misattribute a human message that arrives immediately after a schedule fire
- * in a conversation where this object had no active turn.
- */
-const SCHEDULE_FIRE_WINDOW_MS = 60_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -1154,40 +1144,63 @@ class GuildAgentImpl implements GuildAgentShape {
 	// --- Schedule scope -------------------------------------------------------
 
 	/**
-	 * Whether this session's schedule fired recently enough to explain the turn
-	 * that is starting now.
+	 * The schedule that woke this session, or undefined when the latest message
+	 * is not a schedule wake.
 	 *
-	 * The schedule table's `last_fired_at` is the only signal available when the
-	 * object is cold and there is no prompt to carry the origin. A 60 second
-	 * window covers the gap between firing and the first execution event; it is
-	 * a heuristic, not a transaction, and is documented as such.
+	 * OpenCode's schedule runner prompts the session with a user message whose
+	 * metadata carries `schedule`. The schedule row stores the exact id of that
+	 * message, so comparing it with the latest user message is an exact match:
+	 * no time window, and no way for a nearby human message to be mistaken for
+	 * a schedule. A cold object can still answer this from the message store.
 	 */
-	private recentScheduleFire(sessionID: string): boolean {
+	private async scheduleWake(sessionID: string): Promise<{ scheduleId: string } | undefined> {
+		const host = this.consumingHost;
+		if (!host) return undefined;
 		try {
+			const page = await host.message.list({ sessionID, order: "desc", limit: 5, type: "user" });
+			const latest = page.data[0];
+			if (!latest) return undefined;
+			const fromMetadata = scheduleIdOf(latest.metadata);
+			if (fromMetadata) return { scheduleId: fromMetadata };
+			// The metadata is the direct signal; the row's `last_message_id` is
+			// the same message id, so this remains exact if the list endpoint
+			// ever omits metadata.
 			const rows = this.storage.sql
 				.exec(
-					`SELECT id, last_fired_at FROM schedule
-					 WHERE session_id = ? AND last_fired_at IS NOT NULL
-					 ORDER BY last_fired_at DESC LIMIT 1`,
+					`SELECT id, last_message_id FROM schedule
+					 WHERE session_id = ? AND last_message_id IS NOT NULL`,
 					sessionID,
 				)
-				.toArray() as { id?: unknown; last_fired_at?: unknown }[];
-			const fired = rows[0]?.last_fired_at;
-			return typeof fired === "number" && Date.now() - fired <= SCHEDULE_FIRE_WINDOW_MS;
-		} catch {
-			// The table only exists once a session has had schedules enabled.
-			return false;
+				.toArray() as { id?: unknown; last_message_id?: unknown }[];
+			const row = rows.find((entry) => entry.last_message_id === latest.id);
+			return typeof row?.id === "string" ? { scheduleId: row.id } : undefined;
+		} catch (error) {
+			log("session", `could not attribute a start for ${sessionID}: ${describeError(error)}`);
+			return undefined;
 		}
+	}
+
+	/**
+	 * Add a fired schedule to an existing scope if its tool hook was missed.
+	 *
+	 * The create hook is the normal path. This only repairs an id that is
+	 * already missing from a scope that exists; it never invents a scope, so a
+	 * conversation whose first schedule was unrecorded still fails closed.
+	 */
+	private reconciled(stored: DiscordContext, scheduleId: string | undefined): DiscordContext {
+		const scope = stored.scheduleScope;
+		if (!scheduleId || !scope || scope.scheduleIds.includes(scheduleId)) return stored;
+		return { ...stored, scheduleScope: addScheduleToScope(scope, scheduleId) };
 	}
 
 	/**
 	 * Attribute a start event with no active turn of ours.
 	 *
-	 * A recent schedule fire marks the context as a schedule turn and keeps its
-	 * scope. Anything else is not provably human — it may be a schedule whose
-	 * fire time landed late, or a resumed turn — so it fails closed: the stored
-	 * speaker is cleared before the tools run. A real human prompt already has
-	 * an active turn and never reaches this path.
+	 * Only a message the schedule runner wrote marks the turn as scheduled.
+	 * Anything else is not provably human — it may be an adopted turn or a
+	 * resumed execution — so it fails closed: the stored speaker is cleared
+	 * before the tools run. A real human prompt already has an active turn and
+	 * never reaches this path.
 	 */
 	private async attributeScheduleTurn(sessionID: string): Promise<boolean> {
 		const host = this.consumingHost;
@@ -1196,14 +1209,20 @@ class GuildAgentImpl implements GuildAgentShape {
 			const session = await host.sessions.get({ sessionID });
 			const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 			if (!stored) return false;
-			const scheduled = this.recentScheduleFire(sessionID);
+			const wake = await this.scheduleWake(sessionID);
+			const scheduled = wake !== undefined;
 			if (!scheduled && stored.authorId === undefined && stored.scheduleTurn === undefined) return false;
-			if (scheduled && stored.scheduleTurn === true && stored.authorId === undefined) return true;
-			const context: DiscordContext = {
-				...stored,
-				authorId: undefined,
-				scheduleTurn: scheduled ? true : undefined,
-			};
+			const context = this.reconciled(
+				{
+					...stored,
+					authorId: undefined,
+					scheduleTurn: scheduled ? true : undefined,
+				},
+				wake?.scheduleId,
+			);
+			// Later steps of an already-attributed turn reach the same answer,
+			// so skip the metadata write without skipping reconciliation.
+			if (JSON.stringify(context) === JSON.stringify(stored)) return scheduled;
 			await this.saveDiscordContext(host, sessionID, session.metadata, context);
 			this.contextByThread.set(stored.thread.id, context);
 			this.requesterByThread.delete(stored.thread.id);
@@ -1243,37 +1262,12 @@ class GuildAgentImpl implements GuildAgentShape {
 			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
 
 			const actual: Record<string, ChannelCapabilities | undefined> = {};
-			for (const [channelId, required] of Object.entries(scope.channels)) {
+			for (const channelId of Object.keys(scope.channels)) {
 				const info = await this.rest.channel(channelId).catch(() => undefined);
 				// A channel that cannot be read is not covered. Omitting it makes
 				// the superset check below fail closed.
 				if (!info) continue;
-				const thread = THREAD_TYPES.has(info.type);
-				actual[channelId] = {
-					read:
-						!required.read ||
-						(await this.authority.can(
-							userId,
-							channelId,
-							Permission.ViewChannel | Permission.ReadMessageHistory,
-						)),
-					send:
-						!required.send ||
-						(await this.authority.can(
-							userId,
-							channelId,
-							Permission.ViewChannel |
-								(thread ? Permission.SendMessagesInThreads : Permission.SendMessages),
-						)),
-					manage:
-						!required.manage ||
-						(await this.authority.can(
-							userId,
-							channelId,
-							Permission.ViewChannel |
-								(thread ? Permission.ManageThreads : Permission.ManageMessages),
-						)),
-				};
+				actual[channelId] = await this.authority.scopeCapabilities(userId, info);
 			}
 
 			if (scopeCoveredBy(scope, actual)) return { ok: true };
@@ -1883,15 +1877,19 @@ class GuildAgentImpl implements GuildAgentShape {
 				// rename, so correct the names before following the turn.
 				const refreshed = stored ? await this.refreshContext(stored) : undefined;
 				// A turn this object did not start has no speaker of its own. Only
-				// a recent schedule fire may claim its stored scope; anything else
+				// a schedule wake message may claim its stored scope; anything else
 				// clears the speaker and refuses cross-channel actions.
-				const scheduled = stored ? this.recentScheduleFire(sessionID) : false;
+				const wake = stored ? await this.scheduleWake(sessionID) : undefined;
+				const scheduled = wake !== undefined;
 				const context = refreshed
-					? {
-							...refreshed,
-							authorId: undefined,
-							scheduleTurn: scheduled ? true : undefined,
-						}
+					? this.reconciled(
+							{
+								...refreshed,
+								authorId: undefined,
+								scheduleTurn: scheduled ? true : undefined,
+							},
+							wake?.scheduleId,
+						)
 					: undefined;
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
@@ -1922,6 +1920,20 @@ class GuildAgentImpl implements GuildAgentShape {
 			}
 		})();
 	}
+}
+
+/**
+ * The schedule id on a wake message's metadata, if this is one.
+ *
+ * The runner writes `{ schedule: { id, run, dueAt, ... } }` when it prompts a
+ * session. A human message has no such key.
+ */
+function scheduleIdOf(metadata: unknown): string | undefined {
+	if (!metadata || typeof metadata !== "object") return undefined;
+	const schedule = (metadata as { schedule?: unknown }).schedule;
+	if (!schedule || typeof schedule !== "object") return undefined;
+	const id = (schedule as { id?: unknown }).id;
+	return typeof id === "string" ? id : undefined;
 }
 
 /** A one-line, human-readable description of what an approval is for. */

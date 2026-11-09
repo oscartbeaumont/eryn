@@ -256,6 +256,39 @@ export function discordTools(
 	};
 
 	/**
+	 * Let a schedule use a thread it just created inside a channel it can use.
+	 *
+	 * A thread inherits its parent channel's Discord permissions, so this adds
+	 * no reach the scope did not already have. It is not an arbitrary scope
+	 * expansion: the capabilities are copied from the parent, never widened,
+	 * and only happen on a schedule turn.
+	 */
+	const inheritThreadScope = async (
+		sessionID: string,
+		parentId: string,
+		threadId: string,
+	): Promise<void> => {
+		const context = await sessionContext(sessionID);
+		if (!context.scheduleTurn) return;
+		const parent = context.scheduleScope?.channels[parentId];
+		if (!parent) return;
+		await updateScheduleScope(sessionID, (scope) =>
+			addChannelToScope(
+				scope,
+				threadId,
+				{
+					read: parent.read,
+					send: parent.send,
+					manage: parent.manage,
+					createThread: false,
+					react: parent.react === true,
+				},
+				Date.now(),
+			),
+		);
+	};
+
+	/**
 	 * A message that may grow a thread.
 	 *
 	 * Watching or threading a bot's own message can make the gateway prompt
@@ -456,9 +489,13 @@ export function discordTools(
 				// Threading a bot's message is another way to make a bot-authored
 				// thread, so refuse it here as well as in the message watch.
 				if (messageId) await requireHumanMessage(channelId, messageId);
-				return messageId
+				const created = messageId
 					? await rest.createThread(channelId, messageId, name)
 					: await rest.startThread(channelId, name);
+				// A schedule may then post in the thread it made, under the same
+				// capabilities it had in the parent channel.
+				await inheritThreadScope(call.sessionID, channelId, created.id);
+				return created;
 			},
 		},
 

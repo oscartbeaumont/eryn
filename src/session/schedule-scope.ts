@@ -3,8 +3,9 @@
  *
  * Schedules run without a person, so they cannot borrow someone's permissions.
  * Instead they carry a capability scope: the channels they may read, send in,
- * and manage. The scope is deliberately separate from the conversation policy;
- * MCP, workspace, web, and subagents remain governed by that policy.
+ * manage, create threads in, and react in. The scope is deliberately separate
+ * from the conversation policy; MCP, workspace, web, and subagents remain
+ * governed by that policy.
  */
 
 import { Permission } from "../discord/permissions.ts";
@@ -13,7 +14,19 @@ import { Permission } from "../discord/permissions.ts";
 export interface ScopeChannelCapabilities {
 	readonly read: boolean;
 	readonly send: boolean;
+	/**
+	 * Editing, deleting, pinning, and archiving beyond Eryn's own messages.
+	 * True only when the person could both manage messages and manage threads,
+	 * so the single boolean never grants a moderation bit they lacked.
+	 */
 	readonly manage: boolean;
+	/**
+	 * Creating public threads in the channel. Optional because scopes written
+	 * before this capability existed decode without it; absence means "no".
+	 */
+	readonly createThread?: boolean;
+	/** Adding reactions. Optional for the same reason as `createThread`. */
+	readonly react?: boolean;
 }
 
 /** A schedule scope as it is stored in session metadata. */
@@ -30,8 +43,8 @@ export type ChannelCapabilities = ScopeChannelCapabilities;
 
 /**
  * The scope a new schedule starts with: only the conversation itself, using
- * the capabilities the creator actually has there. Managing messages or
- * reaching other channels is an explicit later decision on a human turn.
+ * exactly the capabilities the creator has there. Reaching other channels is
+ * an explicit later decision on a human turn.
  */
 export function defaultScheduleScope(input: {
 	ownerId: string;
@@ -44,7 +57,7 @@ export function defaultScheduleScope(input: {
 	return {
 		ownerId: input.ownerId,
 		scheduleIds: [input.scheduleId],
-		channels: { [input.conversationId]: { ...input.capabilities, manage: false } },
+		channels: { [input.conversationId]: { ...input.capabilities } },
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -71,7 +84,9 @@ export function scopeAllows(
 		Permission.SendMessages |
 		Permission.SendMessagesInThreads |
 		Permission.ManageMessages |
-		Permission.ManageThreads;
+		Permission.ManageThreads |
+		Permission.CreatePublicThreads |
+		Permission.AddReactions;
 	if ((required & ~known) !== 0n) return false;
 	if ((required & Permission.ReadMessageHistory) !== 0n && !allowed.read) return false;
 	if (
@@ -83,6 +98,8 @@ export function scopeAllows(
 	if ((required & (Permission.ManageMessages | Permission.ManageThreads)) !== 0n && !allowed.manage) {
 		return false;
 	}
+	if ((required & Permission.CreatePublicThreads) !== 0n && allowed.createThread !== true) return false;
+	if ((required & Permission.AddReactions) !== 0n && allowed.react !== true) return false;
 	return true;
 }
 
@@ -102,7 +119,9 @@ export function scopeCoveredBy(
 		return (
 			(!required.read || have.read) &&
 			(!required.send || have.send) &&
-			(!required.manage || have.manage)
+			(!required.manage || have.manage) &&
+			(!required.createThread || have.createThread === true) &&
+			(!required.react || have.react === true)
 		);
 	});
 }
@@ -140,7 +159,7 @@ export function addChannelToScope(
 	if (scope.channels[channelId]) return scope;
 	return {
 		...scope,
-		channels: { ...scope.channels, [channelId]: { ...capabilities, manage: false } },
+		channels: { ...scope.channels, [channelId]: { ...capabilities } },
 		updatedAt: now,
 	};
 }

@@ -25,6 +25,10 @@ export const ScheduleChannelScopeSchema = Schema.Struct({
 	read: Schema.Boolean,
 	send: Schema.Boolean,
 	manage: Schema.Boolean,
+	/** Absent on scopes stored before thread creation was a capability. */
+	createThread: Schema.optional(Schema.Boolean),
+	/** Absent on scopes stored before reactions were a capability. */
+	react: Schema.optional(Schema.Boolean),
 });
 
 /**
@@ -68,8 +72,9 @@ export const DiscordContextSchema = Schema.Struct({
 	/**
 	 * Whether the current turn was started by a schedule rather than a person.
 	 *
-	 * Set from the schedule table's last-fire time for a turn this object
-	 * adopts. A human prompt clears it.
+	 * Set when the turn's latest message is the wake message the schedule
+	 * runner created for this session (matched by id, not by time). A human
+	 * prompt clears it.
 	 */
 	scheduleTurn: Schema.optional(Schema.Boolean),
 	/** The capability scope every schedule in this conversation runs under. */

@@ -61,10 +61,11 @@ async function readContext(
 }
 
 /**
- * The creator's actual read/send reach in the conversation.
+ * The creator's actual reach in the conversation.
  *
- * Managing messages stays off until a human explicitly edits the scope. A
- * missing channel or failed lookup returns undefined so creation fails closed.
+ * A missing channel or failed lookup returns undefined so creation fails
+ * closed. The scope gets exactly these capabilities, so a schedule can never
+ * do more in the conversation than the person who created it.
  */
 async function conversationCapabilities(
 	rest: DiscordRest,
@@ -75,8 +76,7 @@ async function conversationCapabilities(
 ): Promise<ScopeChannelCapabilities | undefined> {
 	const info = await rest.channel(context.thread.id).catch(() => undefined);
 	if (!info || info.guild_id !== guildId) return undefined;
-	const capabilities = await authority.scopeCapabilities(authorId, info);
-	return { read: capabilities.read, send: capabilities.send, manage: false };
+	return await authority.scopeCapabilities(authorId, info);
 }
 
 async function writeScope(

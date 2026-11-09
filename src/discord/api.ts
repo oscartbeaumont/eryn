@@ -443,16 +443,18 @@ export function discordRest(token: string) {
 		 * Whether a user is a member of a thread.
 		 *
 		 * A private thread is only readable by its members (or managers), so this
-		 * is part of resolving the speaker's permissions there. Every failure,
-		 * including a 404, means "not a member": failing closed is the only safe
-		 * answer when membership cannot be proven.
+		 * is part of resolving the speaker's permissions there. Discord answering
+		 * 404 is a definite "not a member". `undefined` means the question could
+		 * not be answered right now: callers must deny the attempt but must not
+		 * remember it, because a transient REST failure is not evidence that
+		 * someone lost thread membership.
 		 */
-		async isThreadMember(threadId: string, userId: string): Promise<boolean> {
+		async isThreadMember(threadId: string, userId: string): Promise<boolean | undefined> {
 			try {
 				const result = await request<unknown>("GET", `/channels/${threadId}/thread-members/${userId}`);
 				return result !== undefined;
 			} catch {
-				return false;
+				return undefined;
 			}
 		},
 

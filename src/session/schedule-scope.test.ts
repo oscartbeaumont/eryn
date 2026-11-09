@@ -20,7 +20,13 @@ import {
 	type ScheduleScopeShape,
 } from "./schedule-scope.ts";
 
-const CAPABILITIES = { read: true, send: true, manage: false };
+const CAPABILITIES = {
+	read: true,
+	send: true,
+	manage: false,
+	createThread: true,
+	react: true,
+};
 
 const scope = (): ScheduleScopeShape =>
 	defaultScheduleScope({
@@ -31,10 +37,10 @@ const scope = (): ScheduleScopeShape =>
 		now: 1,
 	});
 
-test("a new scope covers only the conversation, with the creator's read and send", () => {
+test("a new scope covers only the conversation, with the creator's capabilities", () => {
 	const created = scope();
 	assert.deepEqual(created.channels, {
-		conversation: { read: true, send: true, manage: false },
+		conversation: { read: true, send: true, manage: false, createThread: true, react: true },
 	});
 	assert.equal(created.ownerId, "owner");
 	assert.deepEqual(created.scheduleIds, ["schedule-1"]);
@@ -42,18 +48,24 @@ test("a new scope covers only the conversation, with the creator's read and send
 	assert.equal(created.updatedAt, 1);
 });
 
-test("the default scope stores capabilities instead of forcing read and send", () => {
+test("the default scope stores every capability instead of forcing any off", () => {
 	const created = defaultScheduleScope({
 		ownerId: "owner",
 		conversationId: "conversation",
 		scheduleId: "schedule-1",
-		capabilities: { read: true, send: false, manage: true },
+		capabilities: { read: true, send: false, manage: true, createThread: false, react: true },
 		now: 1,
 	});
-	assert.deepEqual(created.channels.conversation, { read: true, send: false, manage: false });
+	assert.deepEqual(created.channels.conversation, {
+		read: true,
+		send: false,
+		manage: true,
+		createThread: false,
+		react: true,
+	});
 });
 
-test("read, send and manage map to the scope booleans", () => {
+test("read, send, manage, thread creation and reactions map to scope booleans", () => {
 	const created = scope();
 	assert.equal(
 		scopeAllows(created, "conversation", Permission.ViewChannel | Permission.ReadMessageHistory),
@@ -66,11 +78,40 @@ test("read, send and manage map to the scope booleans", () => {
 	);
 	assert.equal(scopeAllows(created, "conversation", Permission.ViewChannel | Permission.ManageMessages), false);
 	assert.equal(scopeAllows(created, "conversation", Permission.ViewChannel | Permission.ManageThreads), false);
+	assert.equal(
+		scopeAllows(created, "conversation", Permission.ViewChannel | Permission.CreatePublicThreads),
+		true,
+	);
+	assert.equal(scopeAllows(created, "conversation", Permission.ViewChannel | Permission.AddReactions), true);
+	const limited = defaultScheduleScope({
+		ownerId: "owner",
+		conversationId: "conversation",
+		scheduleId: "schedule-1",
+		capabilities: { read: true, send: true, manage: false, createThread: false, react: false },
+		now: 1,
+	});
+	assert.equal(
+		scopeAllows(limited, "conversation", Permission.ViewChannel | Permission.CreatePublicThreads),
+		false,
+	);
+	assert.equal(scopeAllows(limited, "conversation", Permission.ViewChannel | Permission.AddReactions), false);
 });
 
 test("adding a channel stores the editor's capabilities", () => {
-	const created = addChannelToScope(scope(), "other", { read: true, send: false, manage: true });
-	assert.deepEqual(created.channels.other, { read: true, send: false, manage: false });
+	const created = addChannelToScope(scope(), "other", {
+		read: true,
+		send: false,
+		manage: true,
+		createThread: false,
+		react: true,
+	});
+	assert.deepEqual(created.channels.other, {
+		read: true,
+		send: false,
+		manage: true,
+		createThread: false,
+		react: true,
+	});
 });
 
 test("a channel outside the scope is always denied", () => {
@@ -84,27 +125,53 @@ test("an unknown permission bit fails closed", () => {
 test("a participant must cover the scope, with extra permission allowed", () => {
 	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	const equal = {
-		conversation: { read: true, send: true, manage: false },
-		other: { read: true, send: true, manage: false },
+		conversation: { read: true, send: true, manage: false, createThread: true, react: true },
+		other: { read: true, send: true, manage: false, createThread: true, react: true },
 	};
 	const higher = {
-		conversation: { read: true, send: true, manage: true },
-		other: { read: true, send: true, manage: true },
+		conversation: { read: true, send: true, manage: true, createThread: true, react: true },
+		other: { read: true, send: true, manage: true, createThread: true, react: true },
 	};
 	const lower = {
-		conversation: { read: true, send: false, manage: false },
-		other: { read: true, send: true, manage: false },
+		conversation: { read: true, send: false, manage: false, createThread: true, react: true },
+		other: { read: true, send: true, manage: false, createThread: true, react: true },
+	};
+	const noThreads = {
+		conversation: { read: true, send: true, manage: false, createThread: false, react: true },
+		other: { read: true, send: true, manage: false, createThread: true, react: true },
+	};
+	const noReactions = {
+		conversation: { read: true, send: true, manage: false, createThread: true, react: false },
+		other: { read: true, send: true, manage: false, createThread: true, react: true },
 	};
 	assert.equal(scopeCoveredBy(created, equal), true);
 	assert.equal(scopeCoveredBy(created, higher), true);
 	assert.equal(scopeCoveredBy(created, lower), false);
+	assert.equal(scopeCoveredBy(created, noThreads), false);
+	assert.equal(scopeCoveredBy(created, noReactions), false);
+});
+
+test("a scope stored before newer capabilities does not require them", () => {
+	const old = defaultScheduleScope({
+		ownerId: "owner",
+		conversationId: "conversation",
+		scheduleId: "schedule-1",
+		capabilities: { read: true, send: true, manage: false },
+		now: 1,
+	});
+	assert.equal(
+		scopeCoveredBy(old, {
+			conversation: { read: true, send: true, manage: false },
+		}),
+		true,
+	);
 });
 
 test("a missing channel does not cover the scope", () => {
 	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	assert.equal(
 		scopeCoveredBy(created, {
-			conversation: { read: true, send: true, manage: false },
+			conversation: { read: true, send: true, manage: false, createThread: true, react: true },
 		}),
 		false,
 	);

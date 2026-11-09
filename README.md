@@ -61,13 +61,18 @@ automated turn has no speaker, so it cannot use cross-channel tools.
 ### Schedules
 
 A schedule runs as a capability scope, not as the person who created it. Its
-scope starts as the conversation only, with the creator's own read and send
-permissions there. The scope owner or someone with Manage Server can add another
-channel with `discord_join_channel` or `discord_subscribe_message`, which stores
-the editor's read and send permissions in that channel; a schedule turn cannot
-change its own scope.
+scope starts as the conversation only, with the creator's own read, send,
+thread-creation, reaction, and moderation permissions there. The scope
+owner or someone with Manage Server can add another channel with
+`discord_join_channel` or `discord_subscribe_message`, which stores the editor's
+permissions in that channel; a schedule turn cannot change its own scope.
 People talking to the conversation must cover that scope with their own Discord
-permissions, or their message is not forwarded to the agent.
+permissions, or their message is not forwarded to the agent. A scope that
+includes message management therefore makes the conversation moderator-only.
+
+A schedule turn is identified by the wake message OpenCode's runner writes, not
+by a time window, so a human message sent right after a schedule fires is still
+treated as a human turn.
 
 Schedules are **public by default**: a public thread or channel stays public,
 and the scope is not a visibility feature. Private content needs a private
