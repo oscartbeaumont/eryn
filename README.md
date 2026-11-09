@@ -70,7 +70,9 @@ except that a thread it creates inside an in-scope channel inherits that
 channel's capabilities. People talking to the conversation must cover that scope
 with their own Discord
 permissions, or their message is not forwarded to the agent. A scope that
-includes message management therefore makes the conversation moderator-only.
+includes message management therefore makes the conversation moderator-only,
+and one that can create threads also requires members to be able to send in
+threads.
 
 A schedule turn is identified by the wake message OpenCode's runner writes, not
 by a time window, so a human message sent right after a schedule fires is still

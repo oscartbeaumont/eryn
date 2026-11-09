@@ -127,7 +127,10 @@ export function scopeCoveredBy(
 		return (
 			(!required.read || have.read) &&
 			(!required.send || have.send) &&
-			(!required.sendInThreads || have.sendInThreads === true) &&
+			// Thread creation is the only way this capability becomes reachable;
+			// without it, requiring thread-send would exclude people for nothing.
+			(!(required.createThread === true && required.sendInThreads === true) ||
+				have.sendInThreads === true) &&
 			(!required.manage || have.manage) &&
 			(!required.createThread || have.createThread === true) &&
 			(!required.react || have.react === true)

@@ -568,7 +568,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (!base) return undefined;
 		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
 		const stored = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
-		const scope = stored?.scheduleScope ?? base.scheduleScope;
+		// The stored context is authoritative. Falling back to the gateway's
+		// snapshot when a session exists could resurrect a scope that was
+		// cleared since that snapshot was taken.
+		const scope = stored ? stored.scheduleScope : base.scheduleScope;
 		const pending = await this.scheduleWakePending(host, sessionID);
 		// A cold start can resume a suspended schedule execution asynchronously,
 		// and `sessions.active()` does not see it yet. An unfinished turn whose
@@ -695,25 +698,44 @@ class GuildAgentImpl implements GuildAgentShape {
 			// harmless; assume it is running and let the wait decide.
 			known = false;
 		}
-		if (!active) return false;
-		await host.sessions.interrupt({ sessionID }).catch(() => undefined);
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<boolean>((resolve) => {
-			timer = setTimeout(() => resolve(false), 10_000);
-		});
-		const idle = await Promise.race([
-			host.sessions.wait({ sessionID }).then(
-				() => true,
-				() => false,
-			),
-			timeout,
-		]);
-		if (timer) clearTimeout(timer);
-		if (!idle) throw new Error("A scheduled turn is still running in this conversation.");
+		if (active) {
+			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const timeout = new Promise<boolean>((resolve) => {
+				timer = setTimeout(() => resolve(false), 10_000);
+			});
+			const idle = await Promise.race([
+				host.sessions.wait({ sessionID }).then(
+					() => true,
+					() => false,
+				),
+				timeout,
+			]);
+			if (timer) clearTimeout(timer);
+			if (!idle) throw new Error("A scheduled turn is still running in this conversation.");
+		}
+		// Settle the in-memory turn that was following the old execution before a
+		// new turn replaces it. Otherwise its `runTurn` waits for the full turn
+		// timeout and interrupts whatever is running by then.
+		const previous = this.runs.get(threadId)?.turn;
+		if (previous && !previous.done) {
+			let settleTimer: ReturnType<typeof setTimeout> | undefined;
+			const settled = await Promise.race([
+				previous.completed.then(() => true),
+				new Promise<boolean>((resolve) => {
+					settleTimer = setTimeout(() => resolve(false), 1_000);
+				}),
+			]);
+			if (settleTimer) clearTimeout(settleTimer);
+			if (!settled && !previous.done) {
+				previous.done = true;
+				previous.resolve();
+			}
+		}
 		// The execution is idle, but its final events may still be in the event
 		// loop. Drop them, or they can complete the human turn that starts next.
 		this.turnFloor.set(threadId, Date.now());
-		return known;
+		return known && active;
 	}
 
 	/**
@@ -1510,33 +1532,39 @@ class GuildAgentImpl implements GuildAgentShape {
 				return { ok: false, message: "Eryn could not verify your access to this conversation." };
 			}
 
-			let effective = scope;
+			let effective: typeof scope | undefined = scope;
 			if (missing.length > 0) {
 				// Re-read under the write lock so a concurrent scope expansion or
 				// a deleted last schedule is not overwritten by this prune.
 				effective = await this.withPrincipalLock(sessionID, async () => {
 					const fresh = await host.sessions.get({ sessionID }).catch(() => undefined);
+					if (!fresh) return undefined;
 					const freshContext = readDiscordContext(
-						fresh?.metadata as Record<string, unknown> | undefined,
+						fresh.metadata as Record<string, unknown> | undefined,
 					);
-					const freshScope = freshContext?.scheduleScope ?? scope;
-					const channels = { ...freshScope.channels };
+					// The last schedule was deleted while this check ran. Do not
+					// write the old scope back; there is nothing left to enforce.
+					if (!freshContext?.scheduleScope) return undefined;
+					const channels = { ...freshContext.scheduleScope.channels };
 					for (const channelId of missing) delete channels[channelId];
-					const pruned = { ...freshScope, channels, updatedAt: Date.now() };
-					if (fresh && freshContext) {
-						await this.saveDiscordContext(host, sessionID, fresh.metadata, {
-							...freshContext,
-							scheduleScope: pruned,
-						}).catch((error) =>
-							log(
-								"session",
-								`could not prune deleted scope channels for ${threadId}: ${describeError(error)}`,
-							),
-						);
-					}
+					const pruned = {
+						...freshContext.scheduleScope,
+						channels,
+						updatedAt: Date.now(),
+					};
+					await this.saveDiscordContext(host, sessionID, fresh.metadata, {
+						...freshContext,
+						scheduleScope: pruned,
+					}).catch((error) =>
+						log(
+							"session",
+							`could not prune deleted scope channels for ${threadId}: ${describeError(error)}`,
+						),
+					);
 					this.appliedContext.delete(threadId);
 					return pruned;
 				});
+				if (!effective) return { ok: true };
 			}
 
 			if (scopeCoveredBy(effective, actual)) return { ok: true };
