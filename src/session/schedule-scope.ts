@@ -127,6 +127,7 @@ export function scopeCoveredBy(
 		return (
 			(!required.read || have.read) &&
 			(!required.send || have.send) &&
+			(!required.sendInThreads || have.sendInThreads === true) &&
 			(!required.manage || have.manage) &&
 			(!required.createThread || have.createThread === true) &&
 			(!required.react || have.react === true)

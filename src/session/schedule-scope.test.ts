@@ -135,30 +135,35 @@ test("an unknown permission bit fails closed", () => {
 test("a participant must cover the scope, with extra permission allowed", () => {
 	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	const equal = {
-		conversation: { read: true, send: true, manage: false, createThread: true, react: true },
-		other: { read: true, send: true, manage: false, createThread: true, react: true },
+		conversation: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
+		other: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
 	};
 	const higher = {
-		conversation: { read: true, send: true, manage: true, createThread: true, react: true },
-		other: { read: true, send: true, manage: true, createThread: true, react: true },
+		conversation: { read: true, send: true, sendInThreads: true, manage: true, createThread: true, react: true },
+		other: { read: true, send: true, sendInThreads: true, manage: true, createThread: true, react: true },
 	};
 	const lower = {
-		conversation: { read: true, send: false, manage: false, createThread: true, react: true },
-		other: { read: true, send: true, manage: false, createThread: true, react: true },
+		conversation: { read: true, send: false, sendInThreads: true, manage: false, createThread: true, react: true },
+		other: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
 	};
 	const noThreads = {
-		conversation: { read: true, send: true, manage: false, createThread: false, react: true },
-		other: { read: true, send: true, manage: false, createThread: true, react: true },
+		conversation: { read: true, send: true, sendInThreads: true, manage: false, createThread: false, react: true },
+		other: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
 	};
 	const noReactions = {
-		conversation: { read: true, send: true, manage: false, createThread: true, react: false },
-		other: { read: true, send: true, manage: false, createThread: true, react: true },
+		conversation: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: false },
+		other: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
+	};
+	const noThreadSend = {
+		conversation: { read: true, send: true, sendInThreads: false, manage: false, createThread: true, react: true },
+		other: { read: true, send: true, sendInThreads: true, manage: false, createThread: true, react: true },
 	};
 	assert.equal(scopeCoveredBy(created, equal), true);
 	assert.equal(scopeCoveredBy(created, higher), true);
 	assert.equal(scopeCoveredBy(created, lower), false);
 	assert.equal(scopeCoveredBy(created, noThreads), false);
 	assert.equal(scopeCoveredBy(created, noReactions), false);
+	assert.equal(scopeCoveredBy(created, noThreadSend), false);
 });
 
 test("a scope stored before newer capabilities does not require them", () => {
