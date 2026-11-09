@@ -25,4 +25,10 @@ export const ROUTES = {
 	prompt: "/prompt",
 	context: "/context",
 	interrupt: "/interrupt",
+	policy: "/policy",
+	policySet: "/policy/set",
+	policyClear: "/policy/clear",
+	approval: "/approval",
+	form: "/form",
+	formReply: "/form/reply",
 } as const;

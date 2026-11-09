@@ -50,7 +50,7 @@ export class BotSessionV5 extends DurableObject<Env> {
 		this.guildId = state.id.name ?? "";
 		this.rest = discordRest(env.DISCORD_BOT_TOKEN?.trim() ?? "");
 		this.store = guildStore(state.storage, env.ENCRYPTION_KEY);
-		this.agent = createGuildAgent(env, state.storage, this.rest, this.guildId);
+		this.agent = createGuildAgent(env, state.storage, this.rest, this.store, this.guildId);
 		this.router = buildRoutes({
 			env,
 			guildId: this.guildId,

@@ -308,10 +308,16 @@ export function discordRest(token: string) {
 			await request<void>("PUT", `/channels/${channelId}/thread-members/${userId}`);
 		},
 
-		async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+		async editMessage(
+			channelId: string,
+			messageId: string,
+			content: string,
+			options: { components?: readonly DiscordComponent[] } = {},
+		): Promise<void> {
 			await request<void>("PATCH", messagePath(channelId, messageId), {
 				content,
 				allowed_mentions: { parse: [] },
+				...(options.components ? { components: options.components } : {}),
 			});
 		},
 

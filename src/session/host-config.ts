@@ -15,6 +15,7 @@ import { log, publicOrigin } from "../config";
 import { withDeploy } from "../deploy";
 import type { DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
+import { supportsElicitationParam, withElicitation } from "../mcp/elicitation";
 import {
 	agentInstructionsPlugin,
 	discordPlugin,
@@ -103,7 +104,7 @@ function mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {
 	for (const link of links) {
 		servers[link.name] = {
 			type: "remote",
-			url: link.url,
+			url: supportsElicitationParam(link.url) ? withElicitation(link.url, link.elicitation) : link.url,
 			oauth: false,
 			// Leave codemode unset. OpenCode uses Code Mode for normal MCP
 			// servers and keeps Executor/PostHog direct because they already
@@ -125,7 +126,7 @@ export function connectionSignature(connections: readonly ProviderConnection[]):
 /** Signature of the linked MCP servers, so adding one rebuilds the host. */
 export function linkSignature(links: readonly McpLink[]): string {
 	return links
-		.map((link) => `${link.id}:${link.url}:${link.token ?? ""}`)
+		.map((link) => `${link.id}:${link.url}:${link.elicitation ?? ""}:${link.token ?? ""}`)
 		.sort()
 		.join("|");
 }

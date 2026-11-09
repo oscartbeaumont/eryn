@@ -20,8 +20,11 @@ import { probeServer } from "../mcp/probe";
 import type { GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
 import {
+	ApprovalReplyRequestSchema,
 	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
+	FormGetRequestSchema,
+	FormReplyRequestSchema,
 	GuildRefSchema,
 	InterruptRequestSchema,
 	LinkAddRequestSchema,
@@ -32,6 +35,9 @@ import {
 	McpProbeRequestSchema,
 	McpTestRequestSchema,
 	ModelRequestSchema,
+	PolicyClearRequestSchema,
+	PolicyGetRequestSchema,
+	PolicySetRequestSchema,
 	PromptRequestSchema,
 	ProviderConnectRequestSchema,
 	type McpLink,
@@ -398,6 +404,34 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			}
 			return json({ ok: true });
 		}),
+
+		[ROUTES.policy]: route(PolicyGetRequestSchema, async (body) =>
+			json(
+				await agent.policyState({
+					channelId: body.channelId,
+					...(body.threadId ? { threadId: body.threadId } : {}),
+				}),
+			),
+		),
+
+		[ROUTES.policySet]: route(PolicySetRequestSchema, async (body) => {
+			const state = await agent.setPolicy(body);
+			return json({ ok: true, state });
+		}),
+
+		[ROUTES.policyClear]: route(PolicyClearRequestSchema, async (body) => {
+			const state = await agent.clearPolicy(body);
+			return json({ ok: true, state });
+		}),
+
+		[ROUTES.approval]: route(ApprovalReplyRequestSchema, async (body) => json(await agent.replyApproval(body))),
+
+		[ROUTES.form]: route(FormGetRequestSchema, async (body) => {
+			const view = await agent.formView(body.formId);
+			return view ? json(view) : json({ error: "That form is no longer waiting." }, 404);
+		}),
+
+		[ROUTES.formReply]: route(FormReplyRequestSchema, async (body) => json(await agent.replyForm(body))),
 
 		[ROUTES.interrupt]: openRoute(InterruptRequestSchema, async (body) => {
 			const gone = body.gone === true;

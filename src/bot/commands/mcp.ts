@@ -18,7 +18,13 @@ import {
 	type DiscordSelectOption,
 } from "../../discord/components";
 import { describeTools } from "../../mcp/describe";
-import type { McpLink, McpProbeResponse, PublicLink } from "../../session/models";
+import {
+	elicitationOf,
+	parseElicitation,
+	supportsElicitationParam,
+	withElicitation,
+} from "../../mcp/elicitation";
+import type { ElicitationMode, McpLink, McpProbeResponse, PublicLink } from "../../session/models";
 import { SETUP_MENU_ID, payloadId } from "../ids";
 import {
 	claim,
@@ -67,6 +73,12 @@ function mcpAddModal(): DiscordModal {
 			label: "Access token (optional)",
 			max_length: 500,
 			placeholder: "Leave blank unless the server gave you one",
+		}),
+		textInput({
+			custom_id: "elicitation",
+			label: "Approvals (discord, browser, agent, off)",
+			max_length: 10,
+			placeholder: "discord",
 		}),
 	]);
 }
@@ -176,20 +188,31 @@ async function removeLink(request: InteractionRequest, linkId: string): Promise<
 /** Probe a URL, then either link it or start the sign-in it asked for. */
 async function addLink(request: InteractionRequest, values: Record<string, string>): Promise<void> {
 	const answer = responder(request);
-	const url = values.url?.trim();
-	if (!url) {
+	const rawUrl = values.url?.trim();
+	if (!rawUrl) {
 		await answer.reply("An MCP server URL is required.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	let endpoint: URL;
 	try {
-		endpoint = new URL(url);
+		endpoint = new URL(rawUrl);
 	} catch {
 		await answer.reply("That URL is not valid.", [backRow(request, MCP_SCREEN_ID)]);
 		return;
 	}
 	const name = values.name?.trim() || endpoint.host;
 	const token = values.token?.trim();
+	const requested = parseElicitation(values.elicitation);
+	const fromUrl = elicitationOf(rawUrl);
+	const elicitation: ElicitationMode = requested ?? fromUrl ?? "discord";
+	// The mode is part of the connection a server grants, not a local setting:
+	// write it into the URL now so the probe, sign-in, and agent all see the
+	// same one. Leave a URL that never asked for the parameter untouched unless
+	// the admin named a mode or the host is known to understand it.
+	const url =
+		requested || fromUrl || supportsElicitationParam(endpoint.toString())
+			? withElicitation(endpoint.toString(), elicitation)
+			: endpoint.toString();
 
 	// Testing is a round trip to someone else's server, so acknowledge first and
 	// edit the ephemeral reply when there is an answer.
@@ -212,6 +235,7 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 		id: crypto.randomUUID(),
 		name,
 		url,
+		elicitation,
 		createdAt: Date.now(),
 		...(token ? { token } : {}),
 	};
@@ -403,7 +427,9 @@ function formatLinks(links: readonly PublicLink[]): string {
 		].join("\n");
 	}
 	const shown = links.slice(0, 15);
-	const lines = shown.map((link) => `• **${link.name}** — ${hostOf(link.url)}`);
+	const lines = shown.map(
+		(link) => `• **${link.name}** — ${hostOf(link.url)} · approvals: **${link.elicitation ?? "discord"}**`,
+	);
 	if (links.length > shown.length) lines.push(`…and ${links.length - shown.length} more.`);
 	return ["**MCP servers**", ...lines].join("\n");
 }

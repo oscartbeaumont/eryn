@@ -70,6 +70,8 @@ export const McpLinkSchema = Schema.Struct({
 	 * never set it.
 	 */
 	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
+	/** Where this server's approval or input question is answered. */
+	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	token: Schema.optional(Schema.String),
 	oauth: Schema.optional(McpOAuthSchema),
 	createdAt: Schema.Number,
@@ -82,6 +84,7 @@ export const PublicLinkSchema = Schema.Struct({
 	name: Schema.String,
 	url: Schema.String,
 	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
+	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	createdAt: Schema.Number,
 });
 export type PublicLink = typeof PublicLinkSchema.Type;
@@ -193,6 +196,93 @@ export const GuildStatusSchema = Schema.Struct({
 	links: Schema.Array(PublicLinkSchema),
 });
 export type GuildStatus = typeof GuildStatusSchema.Type;
+
+// --- Conversation policy -------------------------------------------------------
+
+/**
+ * What a tool group may do.
+ *
+ * `allow` runs without asking, `ask` posts a card in the conversation, and
+ * `block` hides the tool from the agent entirely.
+ */
+export const PolicyEffectSchema = Schema.Literals(["allow", "ask", "block"]);
+export type PolicyEffect = typeof PolicyEffectSchema.Type;
+
+/** The four starting points the policy menu offers. */
+export const PolicyPresetSchema = Schema.Literals(["full", "chat", "read-only", "locked"]);
+export type PolicyPreset = typeof PolicyPresetSchema.Type;
+
+/** How an approval or MCP input request is delivered. */
+export const ElicitationModeSchema = Schema.Literals(["off", "discord", "browser", "agent"]);
+export type ElicitationMode = typeof ElicitationModeSchema.Type;
+
+/**
+ * One scope's policy patch.
+ *
+ * A patch is sparse: only the values an admin chose at this scope. The
+ * effective policy is built by layering server, channel, and thread patches,
+ * then expanding a preset into the groups it implies.
+ */
+export const PolicySchema = Schema.Struct({
+	preset: Schema.optional(PolicyPresetSchema),
+	/** Group or exact tool name to an effect. */
+	tools: Schema.optional(Schema.Record(Schema.String, PolicyEffectSchema)),
+	/** MCP server name to an effect; `*` is every server. */
+	mcp: Schema.optional(Schema.Record(Schema.String, PolicyEffectSchema)),
+	elicitation: Schema.optional(ElicitationModeSchema),
+	updatedAt: Schema.optional(Schema.Number),
+});
+export type Policy = typeof PolicySchema.Type;
+
+/** What the policy menu reads: the scope, its own patch, and the layered result. */
+export const PolicyStateSchema = Schema.Struct({
+	scope: Schema.Literals(["guild", "channel", "thread"]),
+	channelId: Schema.String,
+	threadId: Schema.optional(Schema.String),
+	/** The patch stored at this scope, before inheritance. */
+	own: Schema.optional(PolicySchema),
+	/** The resolved result after inheritance and preset expansion. */
+	effective: PolicySchema,
+	/** The MCP servers the policy can name. */
+	mcpServers: Schema.Array(Schema.String),
+});
+export type PolicyState = typeof PolicyStateSchema.Type;
+
+/** Where a policy card lives, so a later edit can replace it. */
+export const PolicyCardSchema = Schema.Struct({
+	channelId: Schema.String,
+	messageId: Schema.String,
+});
+export type PolicyCard = typeof PolicyCardSchema.Type;
+
+/** The policy applied to a conversation after a change, for callers to render. */
+export const PolicyChangeResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	state: PolicyStateSchema,
+	message: Schema.optional(Schema.String),
+});
+export type PolicyChangeResponse = typeof PolicyChangeResponseSchema.Type;
+
+/** One field an MCP form asks for, as Discord can render it. */
+export const FormFieldSchema = Schema.Struct({
+	key: Schema.String,
+	title: Schema.String,
+	type: Schema.String,
+	required: Schema.Boolean,
+	description: Schema.optional(Schema.String),
+	placeholder: Schema.optional(Schema.String),
+	url: Schema.optional(Schema.String),
+	options: Schema.optional(Schema.Array(Schema.String)),
+});
+export type FormField = typeof FormFieldSchema.Type;
+
+/** The button a Discord interaction raises to open an MCP form. */
+export const FormViewSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	fields: Schema.Array(FormFieldSchema),
+});
+export type FormView = typeof FormViewSchema.Type;
 
 // --- Provider catalogue --------------------------------------------------------
 
@@ -416,4 +506,49 @@ export const ContextUpdateRequestSchema = guildScoped({
 export const InterruptRequestSchema = Schema.Struct({
 	threadId: Schema.String,
 	gone: Schema.optional(Schema.Boolean),
+});
+
+export const PolicyGetRequestSchema = guildScoped({
+	channelId: Schema.String,
+	threadId: Schema.optional(Schema.String),
+});
+
+export const PolicySetRequestSchema = guildScoped({
+	scope: Schema.Literals(["guild", "channel", "thread"]),
+	channelId: Schema.String,
+	threadId: Schema.optional(Schema.String),
+	policy: PolicySchema,
+});
+
+export const PolicyClearRequestSchema = guildScoped({
+	scope: Schema.Literals(["guild", "channel", "thread"]),
+	channelId: Schema.String,
+	threadId: Schema.optional(Schema.String),
+});
+
+/** A decision on an approval card. `block` also writes a deny rule. */
+export const ApprovalReplyRequestSchema = guildScoped({
+	threadId: Schema.String,
+	requestId: Schema.String,
+	decision: Schema.Literals(["once", "always", "block"]),
+	userId: Schema.optional(Schema.String),
+	manager: Schema.optional(Schema.Boolean),
+});
+
+export const ApprovalReplyResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+
+export const FormGetRequestSchema = guildScoped({ formId: Schema.String });
+
+export const FormReplyRequestSchema = guildScoped({
+	formId: Schema.String,
+	/** Keyed `f0`, `f1`, … in field order; the agent maps them back. */
+	values: Schema.Record(Schema.String, Schema.String),
+});
+
+export const FormReplyResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
 });

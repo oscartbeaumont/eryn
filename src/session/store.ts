@@ -19,11 +19,15 @@ import {
 	McpLinkSchema,
 	PendingMcpAuthSchema,
 	PendingOAuthSchema,
+	PolicyCardSchema,
+	PolicySchema,
 	ProviderConnectionSchema,
 	type GuildSettings,
 	type McpLink,
 	type PendingMcpAuth,
 	type PendingOAuth,
+	type Policy,
+	type PolicyCard,
 	type ProviderConnection,
 } from "./models";
 
@@ -151,6 +155,30 @@ class GuildStoreImpl {
 
 	async removeAuthAttempt(id: string): Promise<void> {
 		await this.storage.delete(KEYS.mcpAuth + id);
+	}
+
+	async policy(key: string): Promise<Policy | undefined> {
+		return await this.plain(key, PolicySchema);
+	}
+
+	async putPolicy(key: string, policy: Policy): Promise<void> {
+		await this.storage.put(key, Schema.encodeSync(PolicySchema)(policy));
+	}
+
+	async removePolicy(key: string): Promise<void> {
+		await this.storage.delete(key);
+	}
+
+	async policyCard(key: string): Promise<PolicyCard | undefined> {
+		return await this.plain(key, PolicyCardSchema);
+	}
+
+	async putPolicyCard(key: string, card: PolicyCard): Promise<void> {
+		await this.storage.put(key, Schema.encodeSync(PolicyCardSchema)(card));
+	}
+
+	async removePolicyCard(key: string): Promise<void> {
+		await this.storage.delete(key);
 	}
 
 	async putPendingOAuth(pending: PendingOAuth): Promise<void> {
