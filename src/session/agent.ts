@@ -67,7 +67,7 @@ export interface GuildAgentShape {
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
 	/** Correct a conversation's stored context after Discord renames it. */
 	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
-	interrupt(threadId: string | undefined, gone: boolean): Promise<boolean>;
+	interrupt(threadId: string | undefined, gone: boolean, config?: HostConfig): Promise<boolean>;
 	/** Build the host if it is not up, so its schedule runner is running. */
 	ensureHost(config: HostConfig): Promise<void>;
 	/** Whether a host is in memory and holding timers or streams. */
@@ -86,6 +86,8 @@ class GuildAgentImpl implements GuildAgentShape {
 	private consumingHost: HostInterface | undefined;
 	/** Sessions whose out-of-band turn is being adopted, so two events cannot race. */
 	private readonly adopting = new Set<string>();
+	/** Sessions whose Discord conversation was deleted, so no event may adopt one. */
+	private readonly discarded = new Set<string>();
 	/** The model catalogue for the current host, fetched at most once per host. */
 	private modelCache: ModelOption[] | undefined;
 
@@ -119,16 +121,16 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * The embedded OpenCode host for this guild, built on first use and rebuilt
 	 * when the provider set, the model, or the linked MCP servers change.
 	 */
-	private async hostFor(config: HostConfig, excludeThreadId?: string): Promise<HostInterface> {
+	private async hostFor(
+		config: HostConfig,
+		excludeThreadId?: string,
+		schedulesOverride?: boolean,
+	): Promise<HostInterface> {
 		const connections = connectionSignature(config.connections);
 		const mcp = linkSignature(config.links);
-		const schedules = this.hasSchedules();
 
 		const changed =
-			this.host !== undefined &&
-			(this.host.connections !== connections ||
-				this.host.mcp !== mcp ||
-				(schedules && !this.host.schedules));
+			this.host !== undefined && (this.host.connections !== connections || this.host.mcp !== mcp);
 		// A config change must not tear down a host that has another thread's turn
 		// streaming on it. The turn being started is allowed through.
 		const busy = [...this.runs].some(
@@ -144,9 +146,8 @@ class GuildAgentImpl implements GuildAgentShape {
 				rest: this.rest,
 				guildId: this.guildId,
 				directory: LOCATION,
-				schedules,
 			});
-			this.host = { promise, connections, mcp, schedules };
+			this.host = { promise, connections, mcp, schedules: false };
 			this.consuming = undefined;
 			// A different provider set means a different catalogue.
 			this.modelCache = undefined;
@@ -155,7 +156,18 @@ class GuildAgentImpl implements GuildAgentShape {
 				.catch((error) => log("session", `could not start the event stream: ${describeError(error)}`));
 			void previous?.then((host) => host.close()).catch(() => undefined);
 		}
-		return this.host.promise;
+		const current = this.host;
+		const host = await current.promise;
+		// A host is only rebuilt for a changed config; a schedule can appear
+		// during a turn, so check the live host rather than rebuilding it.
+		if (this.host === current && schedulesOverride !== false && !current.schedules) {
+			const started = await host.ensureSchedules().catch((error) => {
+				log("session", `could not start the schedule runner: ${describeError(error)}`);
+				return false;
+			});
+			if (started) current.schedules = true;
+		}
+		return host;
 	}
 
 	// --- Catalogue ------------------------------------------------------------
@@ -169,16 +181,6 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	hasHost(): boolean {
 		return this.host !== undefined;
-	}
-
-	/** Whether any active schedule exists, so the host needs its runner. */
-	private hasSchedules(): boolean {
-		try {
-			return this.storage.sql.exec("SELECT 1 FROM schedule WHERE status = 'active' LIMIT 1").toArray().length > 0;
-		} catch {
-			// The table only exists once a host has enabled schedules.
-			return false;
-		}
 	}
 
 	busy(): boolean {
@@ -209,6 +211,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.threadBySession.clear();
 		this.appliedModels.clear();
 		this.appliedContext.clear();
+		this.discarded.clear();
 
 		if (!host) return;
 		await host.promise
@@ -631,30 +634,132 @@ class GuildAgentImpl implements GuildAgentShape {
 	/**
 	 * Cancel a thread's running turn, keeping its session for later messages.
 	 * `gone` means the thread itself was deleted, so the reply is dropped rather
-	 * than attempted.
+	 * than attempted, and the conversation's schedules and session go with it.
 	 */
-	async interrupt(threadId: string | undefined, gone: boolean): Promise<boolean> {
-		const run = threadId ? this.runs.get(threadId) : undefined;
-		const sessionID = threadId ? await this.sessionFor(threadId) : undefined;
-		if (!run?.turn || !this.host || !sessionID) {
-			// With no turn in flight there is no completion event left to wait for,
-			// so a deleted thread can be discarded now. A live turn discards itself
-			// in `prompt`'s finally, once it has actually settled.
-			if (gone && threadId) await this.discardThread(threadId);
-			return false;
+	async interrupt(threadId: string | undefined, gone: boolean, config?: HostConfig): Promise<boolean> {
+		if (!threadId) return false;
+		const run = this.runs.get(threadId);
+		const sessionID = await this.sessionFor(threadId);
+
+		if (gone) {
+			// A deleted conversation can never show a reply, so no schedule may
+			// wake this guild to run a turn for it. Delete them before anything
+			// else, in case the current turn takes a while to settle.
+			if (sessionID) await this.clearSchedules(sessionID, config);
+			if (run?.turn) run.turn.gone = true;
+			// Stop inference now. A scheduled turn can be running without an
+			// in-memory run for it, so this cannot depend on `run.turn`.
+			const stopped = await this.interruptSession(sessionID);
+			// A tracked turn discards the thread once it has settled; with no turn
+			// there is nothing left to wait for, so clean up immediately.
+			if (!run?.turn) await this.discardThread(threadId, config);
+			return stopped;
 		}
-		if (gone) run.turn.gone = true;
+
+		if (!run?.turn || !this.host || !sessionID) return false;
 		await (await this.host.promise).sessions.interrupt({ sessionID });
 		return true;
 	}
 
-	/** Forget everything about a thread whose Discord thread is gone. */
-	private async discardThread(threadId: string): Promise<void> {
+	/**
+	 * Stop whatever a Session is running, even a turn this object does not track.
+	 *
+	 * A schedule can start a turn after an eviction, before this object has
+	 * adopted it, so the in-memory run map is not enough to know whether there
+	 * is inference to cancel.
+	 */
+	private async interruptSession(sessionID: string | undefined): Promise<boolean> {
+		if (!sessionID || !this.host) return false;
+		try {
+			const result = await (await this.host.promise).sessions.interrupt({ sessionID });
+			return result.interrupted;
+		} catch (error) {
+			log("session", `could not interrupt ${sessionID}: ${describeError(error)}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Delete every schedule that would fire into a conversation that no longer
+	 * exists.
+	 *
+	 * Uses the host's schedule API rather than the `schedule` table so a change
+	 * to OpenCode's schema does not break the cleanup. A cold object builds a
+	 * host with the runner disabled: there is no reason to start it just to
+	 * delete the schedules it would have run.
+	 */
+	private async clearSchedules(sessionID: string, config?: HostConfig): Promise<void> {
+		const host = await this.cleanupHost(config);
+		if (!host) return;
+		try {
+			const schedules = await host.experimental.schedule.list({ sessionID });
+			await Promise.all(
+				schedules.map((schedule) =>
+					host.experimental.schedule.delete({ scheduleID: schedule.id }).catch((error) =>
+						log("session", `could not delete schedule ${schedule.id}: ${describeError(error)}`),
+					),
+				),
+			);
+		} catch (error) {
+			log("session", `could not delete the schedules for ${sessionID}: ${describeError(error)}`);
+		}
+	}
+
+	/**
+	 * The host to use for cleaning up a deleted conversation.
+	 *
+	 * A cold object builds one with the schedule runner disabled, so cleanup
+	 * does not start the runner only to delete what it would have fired.
+	 */
+	private async cleanupHost(config?: HostConfig): Promise<HostInterface | undefined> {
+		try {
+			if (this.host) return await this.host.promise;
+			return config ? await this.hostFor(config, undefined, false) : undefined;
+		} catch (error) {
+			log("session", `could not build a host for cleanup: ${describeError(error)}`);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Forget everything about a thread whose Discord conversation is gone.
+	 *
+	 * Schedules are deleted explicitly because Durable Object SQLite does not
+	 * enable foreign keys, so deleting the Session never cascades to them.
+	 * Removing the Session also cancels work it still has running and releases
+	 * its messages and child sessions.
+	 */
+	private async discardThread(threadId: string, config?: HostConfig): Promise<void> {
+		const sessionID = await this.sessionFor(threadId);
 		this.forget(threadId);
 		this.runs.delete(threadId);
 		this.appliedModels.delete(threadId);
 		this.appliedContext.delete(threadId);
 		await this.storage.delete(KEYS.session + threadId).catch(() => undefined);
+		if (!sessionID) return;
+		this.discarded.add(sessionID);
+		// The turn that just settled may have created a schedule after the first
+		// pass, so clear them again before the Session is removed.
+		await this.clearSchedules(sessionID, config);
+		await this.removeSession(sessionID, config);
+	}
+
+	/**
+	 * Delete a conversation's Session once its Discord conversation is gone.
+	 *
+	 * A host that is not in memory has no running work to stop, but it may have
+	 * left a suspended Session that the next boot would resume, so it is built
+	 * from `config` to remove the Session properly. That also releases the
+	 * Session's messages and child sessions.
+	 */
+	private async removeSession(sessionID: string, config?: HostConfig): Promise<void> {
+		const host = await this.cleanupHost(config);
+		if (!host) return;
+		try {
+			await host.sessions.remove({ sessionID });
+		} catch (error) {
+			log("session", `could not remove the session for a deleted conversation: ${describeError(error)}`);
+		}
 	}
 
 	private async wait(turn: Turn): Promise<boolean> {
@@ -776,7 +881,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private adopt(sessionID: string): void {
 		const host = this.consumingHost;
-		if (!host || this.adopting.has(sessionID)) return;
+		if (!host || this.adopting.has(sessionID) || this.discarded.has(sessionID)) return;
 		this.adopting.add(sessionID);
 		void (async () => {
 			try {
@@ -786,7 +891,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				// rename, so correct the names before following the turn.
 				const context = stored ? await this.refreshContext(stored) : undefined;
 				const threadId = context?.thread.id;
-				if (!threadId || this.runs.get(threadId)?.turn) return;
+				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
 				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
 					await this.saveDiscordContext(host, sessionID, session.metadata, context).catch((error) =>
 						log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`),

@@ -132,7 +132,12 @@ export class BotSessionV5 extends DurableObject<Env> {
 		return this.inFlight > 0 || this.agent.busy() || this.scheduleBusy();
 	}
 
-	/** When the next active schedule is due, from the host's own SQLite. */
+	/**
+	 * When the next active schedule is due, from the host's own SQLite.
+	 *
+	 * The schedule API needs a host and a session id, but this runs while the
+	 * object is deciding whether to wake at all, so it reads the table directly.
+	 */
 	private scheduleDueAt(): number | null {
 		try {
 			const row = this.ctx.storage.sql
@@ -162,7 +167,12 @@ export class BotSessionV5 extends DurableObject<Env> {
 		await new Promise((resolve) => setTimeout(resolve, 8_000));
 	}
 
-	/** Whether a Session is mid-turn or suspended, so this object should wake again. */
+	/**
+	 * Whether a Session is mid-turn or suspended, so this object should wake again.
+	 *
+	 * A suspended Session lives in SQLite and is resumed when the host boots, so
+	 * no in-memory API can answer this without building a host first.
+	 */
 	private scheduleBusy(): boolean {
 		try {
 			const row = this.ctx.storage.sql

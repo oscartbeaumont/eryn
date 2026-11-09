@@ -24,16 +24,21 @@ import { EmbeddedHost } from "@opencode/sdk/internal/host";
 
 type CreateOptions = Parameters<typeof OpenCodeWorkerd.create>[0];
 
-export interface HostOptions extends Omit<CreateOptions, "instances"> {
-	/** Start the schedule runner, so `experimental.schedules` actually fires. */
-	readonly schedules?: boolean;
-}
+export type HostOptions = Omit<CreateOptions, "instances">;
 
 /** The host interface both the promise SDK and this builder return. */
-export type HostInterface = OpenCodeWorkerd.Interface;
+export interface HostInterface extends OpenCodeWorkerd.Interface {
+	/**
+	 * Start the schedule runner if this host has an active schedule.
+	 *
+	 * Returns whether the runner is running. Starting is idempotent, so a host
+	 * can be checked again after a turn creates a schedule.
+	 */
+	ensureSchedules(): Promise<boolean>;
+}
 
 export async function createHost(options: HostOptions): Promise<HostInterface> {
-	const { plugins = [], schedules = false, ...rest } = options;
+	const { plugins = [], ...rest } = options;
 
 	// The profile wrapper in the SDK JSON-encodes the config and splits the
 	// server options from the workerd replacements; both come from the same
@@ -59,10 +64,27 @@ export async function createHost(options: HostOptions): Promise<HostInterface> {
 	// is another such fiber on the host runtime: OpenCode's Node server starts
 	// it, the workerd profile does not, and it is not reachable from a plugin
 	// because plugins see the client services rather than Core's.
-	if (schedules) {
-		const services = await Effect.runPromise(host.runtime.contextEffect);
-		host.runtime.runFork(Context.get(services, Schedule.Service).run);
-	}
+	let schedule: Schedule.Interface | undefined;
+	let schedulesStarted = false;
+	const scheduleService = async () => {
+		if (!schedule) {
+			const services = await Effect.runPromise(host.runtime.contextEffect);
+			schedule = Context.get(services, Schedule.Service);
+		}
+		return schedule;
+	};
+	const startSchedules = async () => {
+		if (schedulesStarted) return;
+		schedulesStarted = true;
+		host.runtime.runFork((await scheduleService()).run);
+	};
+	const ensureSchedules = async () => {
+		if (schedulesStarted) return true;
+		const active = await host.runtime.runPromise((await scheduleService()).list());
+		if (!active.some((entry) => entry.status === "active")) return false;
+		await startSchedules();
+		return true;
+	};
 
 	const client = OpenCode.make({ baseUrl: "http://opencode.local", fetch: host.fetch });
 	const register = (plugin: PromisePlugin.Plugin) =>
@@ -73,6 +95,7 @@ export async function createHost(options: HostOptions): Promise<HostInterface> {
 		sessions: client.session,
 		events: client.event,
 		plugin: Object.assign(register, client.plugin),
+		ensureSchedules,
 		close: host.close,
 		[Symbol.asyncDispose]: host.close,
 	};

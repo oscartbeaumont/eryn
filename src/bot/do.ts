@@ -611,7 +611,9 @@ export class BotGatewayV5 extends DurableObject<Env> {
 	/**
 	 * A deleted thread or channel can never receive the reply, so a turn still
 	 * running in it is cancelled rather than left to finish into nothing, and
-	 * the record that says we own the conversation goes with it.
+	 * the record that says we own the conversation goes with it. The session
+	 * object also deletes the conversation's schedules and session, so nothing
+	 * wakes later to run a turn for a conversation nobody can see.
 	 */
 	private async onChannelDelete(channel: DiscordChannel): Promise<void> {
 		const guildId = channel.guild_id;

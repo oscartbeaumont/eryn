@@ -399,9 +399,14 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			return json({ ok: true });
 		}),
 
-		[ROUTES.interrupt]: openRoute(InterruptRequestSchema, async (body) =>
-			json({ stopped: await agent.interrupt(body.threadId, body.gone === true) }),
-		),
+		[ROUTES.interrupt]: openRoute(InterruptRequestSchema, async (body) => {
+			const gone = body.gone === true;
+			// A deleted conversation has to be cleaned up even when this object
+			// was cold, so the config lets the agent build the host it needs to
+			// remove the Session and stop a suspended turn from resuming.
+			const config = gone ? await loadConfig().catch(() => undefined) : undefined;
+			return json({ stopped: await agent.interrupt(body.threadId, gone, config) });
+		}),
 	};
 
 	return async (request: Request): Promise<Response> => {
