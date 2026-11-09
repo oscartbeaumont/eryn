@@ -28,7 +28,7 @@ import {
 	type DiscordMessageView,
 	type DiscordRest,
 } from "../../discord/api";
-import { DiscordAuthority } from "../../discord/authority";
+import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
@@ -83,11 +83,8 @@ export function discordTools(
 	guildId: string,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
+	authority: DiscordAuthority,
 ) {
-	// One per host/guild. A cache shared across guilds would let a role id from
-	// one server be read as a role in another.
-	const authority = new DiscordAuthority(rest, guildId);
-
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await rest.channel(channelId);
@@ -237,8 +234,16 @@ export function discordTools(
 	/** Add a channel to the schedule scope when this speaker may do so. */
 	const expandScheduleScope = async (sessionID: string, channelId: string): Promise<void> => {
 		const context = await sessionContext(sessionID);
-		if (!(await canEditScope(context))) return;
-		await updateScheduleScope(sessionID, (scope) => addChannelToScope(scope, channelId, Date.now()));
+		if (!context.authorId || !(await canEditScope(context))) return;
+		const info = await rest.channel(channelId).catch(() => undefined);
+		if (!info) return;
+		// The schedule gets only what this editor can actually do here; it does
+		// not inherit a broader grant from the bot or from the scope owner.
+		const capabilities = await authority.scopeCapabilities(context.authorId, info);
+		if (!capabilities.read && !capabilities.send) return;
+		await updateScheduleScope(sessionID, (scope) =>
+			addChannelToScope(scope, channelId, capabilities, Date.now()),
+		);
 	};
 
 	/** Remove a channel from the schedule scope, never the conversation itself. */

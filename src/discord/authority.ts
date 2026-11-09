@@ -189,6 +189,37 @@ export class DiscordAuthority {
 	}
 
 	/**
+	 * The read/send/manage capabilities `userId` has in one channel.
+	 *
+	 * Used when a schedule is created or its scope expands: the schedule must
+	 * not gain more Discord reach than the person creating or editing it.
+	 */
+	async scopeCapabilities(
+		userId: string,
+		channel: DiscordChannelRef,
+	): Promise<{ read: boolean; send: boolean; manage: boolean }> {
+		const thread = THREAD_TYPES.has(channel.type);
+		return {
+			read: await this.can(
+				userId,
+				channel.id,
+				Permission.ViewChannel | Permission.ReadMessageHistory,
+			),
+			send: await this.can(
+				userId,
+				channel.id,
+				Permission.ViewChannel |
+					(thread ? Permission.SendMessagesInThreads : Permission.SendMessages),
+			),
+			manage: await this.can(
+				userId,
+				channel.id,
+				Permission.ViewChannel | (thread ? Permission.ManageThreads : Permission.ManageMessages),
+			),
+		};
+	}
+
+	/**
 	 * The channels `userId` can view, preserving the caller's order.
 	 *
 	 * Member roles and the guild are resolved once, but every channel still

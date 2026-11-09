@@ -29,23 +29,22 @@ export interface ScheduleScopeShape {
 export type ChannelCapabilities = ScopeChannelCapabilities;
 
 /**
- * The scope a new schedule starts with: only the conversation itself, with
- * read and send. Managing messages or reaching other channels is an explicit
- * later decision on a human turn.
+ * The scope a new schedule starts with: only the conversation itself, using
+ * the capabilities the creator actually has there. Managing messages or
+ * reaching other channels is an explicit later decision on a human turn.
  */
-export const DEFAULT_SCOPE = { read: true, send: true, manage: false } as const;
-
 export function defaultScheduleScope(input: {
 	ownerId: string;
 	conversationId: string;
 	scheduleId: string;
+	capabilities: ScopeChannelCapabilities;
 	now?: number;
 }): ScheduleScopeShape {
 	const now = input.now ?? Date.now();
 	return {
 		ownerId: input.ownerId,
 		scheduleIds: [input.scheduleId],
-		channels: { [input.conversationId]: { ...DEFAULT_SCOPE } },
+		channels: { [input.conversationId]: { ...input.capabilities, manage: false } },
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -131,16 +130,17 @@ export function canCreateSchedule(
 	return scope === undefined || scope.ownerId === authorId;
 }
 
-/** Add a channel to a scope, leaving an existing entry unchanged. */
+/** Add a channel to a scope with the capabilities the editor actually has. */
 export function addChannelToScope(
 	scope: ScheduleScopeShape,
 	channelId: string,
+	capabilities: ScopeChannelCapabilities,
 	now = Date.now(),
 ): ScheduleScopeShape {
 	if (scope.channels[channelId]) return scope;
 	return {
 		...scope,
-		channels: { ...scope.channels, [channelId]: { ...DEFAULT_SCOPE } },
+		channels: { ...scope.channels, [channelId]: { ...capabilities, manage: false } },
 		updatedAt: now,
 	};
 }

@@ -554,14 +554,27 @@ class GuildAgentImpl implements GuildAgentShape {
 				// (an older message watch, for example) must not borrow the previous
 				// speaker's Discord authority. A session with no context stays
 				// without one: this does not invent a conversation.
-				const stored =
-					refreshed ??
+				const fallback =
 					this.contextByThread.get(request.threadId) ??
 					(await this.contextForSession(sessionID))?.context;
+				// The gateway's `request.discord` never carries the schedule scope.
+				// Read the persisted context directly and merge its scope back in,
+				// or one human message would erase the schedules' reach.
+				const persisted = await host.sessions
+					.get({ sessionID })
+					.then((session) => readDiscordContext(session.metadata as Record<string, unknown> | undefined))
+					.catch(() => undefined);
+				const scheduleScope = persisted ? persisted.scheduleScope : fallback?.scheduleScope;
+				const base = refreshed ?? fallback;
 				// A prompt is a human turn boundary: it sets the speaker and clears
 				// any schedule-turn mark from the turn before it.
-				const discord = stored
-					? { ...stored, authorId: request.author?.id, scheduleTurn: undefined }
+				const discord = base
+					? {
+							...base,
+							authorId: request.author?.id,
+							scheduleTurn: undefined,
+							...(scheduleScope ? { scheduleScope } : {}),
+						}
 					: undefined;
 				await this.applyDiscord(host, request.threadId, sessionID, discord);
 				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
@@ -1168,27 +1181,35 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	/**
-	 * Mark a session's stored context as a schedule turn.
+	 * Attribute a start event with no active turn of ours.
 	 *
-	 * Clears the speaker even when there is no scope: a schedule must never
-	 * inherit the last human's Discord permissions. When a scope exists it is
-	 * left in place for the Discord tools to enforce.
+	 * A recent schedule fire marks the context as a schedule turn and keeps its
+	 * scope. Anything else is not provably human — it may be a schedule whose
+	 * fire time landed late, or a resumed turn — so it fails closed: the stored
+	 * speaker is cleared before the tools run. A real human prompt already has
+	 * an active turn and never reaches this path.
 	 */
 	private async attributeScheduleTurn(sessionID: string): Promise<boolean> {
 		const host = this.consumingHost;
-		if (!host || !this.recentScheduleFire(sessionID)) return false;
+		if (!host) return false;
 		try {
 			const session = await host.sessions.get({ sessionID });
 			const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 			if (!stored) return false;
-			if (stored.scheduleTurn === true && stored.authorId === undefined) return true;
-			const context: DiscordContext = { ...stored, authorId: undefined, scheduleTurn: true };
+			const scheduled = this.recentScheduleFire(sessionID);
+			if (!scheduled && stored.authorId === undefined && stored.scheduleTurn === undefined) return false;
+			if (scheduled && stored.scheduleTurn === true && stored.authorId === undefined) return true;
+			const context: DiscordContext = {
+				...stored,
+				authorId: undefined,
+				scheduleTurn: scheduled ? true : undefined,
+			};
 			await this.saveDiscordContext(host, sessionID, session.metadata, context);
 			this.contextByThread.set(stored.thread.id, context);
 			this.requesterByThread.delete(stored.thread.id);
-			return true;
+			return scheduled;
 		} catch (error) {
-			log("session", `could not attribute a schedule turn for ${sessionID}: ${describeError(error)}`);
+			log("session", `could not attribute a start for ${sessionID}: ${describeError(error)}`);
 			return false;
 		}
 	}
@@ -1817,8 +1838,8 @@ class GuildAgentImpl implements GuildAgentShape {
 			return;
 		}
 		// A start event with no turn of ours is either a schedule firing or a
-		// prompt this object did not see. Mark it before adopting, so the tools
-		// read the schedule scope rather than the previous speaker's access.
+		// prompt this object did not see. Attribute or clear the speaker before
+		// adopting, so the tools never read the previous speaker's access.
 		if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
 			const mapped = this.threadBySession.get(sessionID);
 			const active = mapped ? this.runs.get(mapped)?.turn : undefined;

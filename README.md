@@ -61,9 +61,11 @@ automated turn has no speaker, so it cannot use cross-channel tools.
 ### Schedules
 
 A schedule runs as a capability scope, not as the person who created it. Its
-scope starts as the conversation only, with read and send. The scope owner or
-someone with Manage Server can add another channel with `discord_join_channel`
-or `discord_subscribe_message`; a schedule turn cannot change its own scope.
+scope starts as the conversation only, with the creator's own read and send
+permissions there. The scope owner or someone with Manage Server can add another
+channel with `discord_join_channel` or `discord_subscribe_message`, which stores
+the editor's read and send permissions in that channel; a schedule turn cannot
+change its own scope.
 People talking to the conversation must cover that scope with their own Discord
 permissions, or their message is not forwarded to the agent.
 

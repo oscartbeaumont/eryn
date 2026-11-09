@@ -20,10 +20,18 @@ import {
 	type ScheduleScopeShape,
 } from "./schedule-scope.ts";
 
-const scope = (): ScheduleScopeShape =>
-	defaultScheduleScope({ ownerId: "owner", conversationId: "conversation", scheduleId: "schedule-1", now: 1 });
+const CAPABILITIES = { read: true, send: true, manage: false };
 
-test("a new scope covers only the conversation, with read and send", () => {
+const scope = (): ScheduleScopeShape =>
+	defaultScheduleScope({
+		ownerId: "owner",
+		conversationId: "conversation",
+		scheduleId: "schedule-1",
+		capabilities: CAPABILITIES,
+		now: 1,
+	});
+
+test("a new scope covers only the conversation, with the creator's read and send", () => {
 	const created = scope();
 	assert.deepEqual(created.channels, {
 		conversation: { read: true, send: true, manage: false },
@@ -32,6 +40,17 @@ test("a new scope covers only the conversation, with read and send", () => {
 	assert.deepEqual(created.scheduleIds, ["schedule-1"]);
 	assert.equal(created.createdAt, 1);
 	assert.equal(created.updatedAt, 1);
+});
+
+test("the default scope stores capabilities instead of forcing read and send", () => {
+	const created = defaultScheduleScope({
+		ownerId: "owner",
+		conversationId: "conversation",
+		scheduleId: "schedule-1",
+		capabilities: { read: true, send: false, manage: true },
+		now: 1,
+	});
+	assert.deepEqual(created.channels.conversation, { read: true, send: false, manage: false });
 });
 
 test("read, send and manage map to the scope booleans", () => {
@@ -49,6 +68,11 @@ test("read, send and manage map to the scope booleans", () => {
 	assert.equal(scopeAllows(created, "conversation", Permission.ViewChannel | Permission.ManageThreads), false);
 });
 
+test("adding a channel stores the editor's capabilities", () => {
+	const created = addChannelToScope(scope(), "other", { read: true, send: false, manage: true });
+	assert.deepEqual(created.channels.other, { read: true, send: false, manage: false });
+});
+
 test("a channel outside the scope is always denied", () => {
 	assert.equal(scopeAllows(scope(), "elsewhere", Permission.ViewChannel), false);
 });
@@ -58,7 +82,7 @@ test("an unknown permission bit fails closed", () => {
 });
 
 test("a participant must cover the scope, with extra permission allowed", () => {
-	const created = addChannelToScope(scope(), "other");
+	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	const equal = {
 		conversation: { read: true, send: true, manage: false },
 		other: { read: true, send: true, manage: false },
@@ -77,7 +101,7 @@ test("a participant must cover the scope, with extra permission allowed", () => 
 });
 
 test("a missing channel does not cover the scope", () => {
-	const created = addChannelToScope(scope(), "other");
+	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	assert.equal(
 		scopeCoveredBy(created, {
 			conversation: { read: true, send: true, manage: false },
@@ -108,7 +132,7 @@ test("removing the last schedule leaves an empty id list for the caller to clear
 });
 
 test("the conversation channel is never removed from the scope", () => {
-	const created = addChannelToScope(scope(), "other");
+	const created = addChannelToScope(scope(), "other", CAPABILITIES);
 	assert.deepEqual(removeChannelFromScope(created, "conversation", "conversation", 2).channels, created.channels);
 	const without = removeChannelFromScope(created, "other", "conversation", 2);
 	assert.equal(without.channels.other, undefined);
