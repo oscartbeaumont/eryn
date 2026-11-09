@@ -19,14 +19,12 @@ flowchart LR
     end
 
     agent[OpenCode]
-    services[Inference and MCP]
 
     discord -->|commands| routes
     routes --> bot
     discord <-->|gateway socket| bot
     bot --> session
     session --> agent
-    agent --> services
 ```
 
 Eryn is one Cloudflare Worker and two Durable Objects. The Worker answers
