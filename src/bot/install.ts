@@ -15,12 +15,30 @@
  */
 
 import { actionButton, buttonRow } from "../discord/components";
-import { DiscordError, type DiscordRest } from "../discord/api";
+import { DiscordError, type DiscordAuditEntry, type DiscordRest } from "../discord/api";
 import { log } from "../config";
 import { SETUP_MENU_ID } from "./ids";
 
 /** Only a very recent install is announced; a READY replay of old guilds is not. */
 const RECENT_MS = 10 * 60_000;
+
+/** Discord's epoch, which every snowflake counts milliseconds from. */
+const DISCORD_EPOCH_MS = 1_420_070_400_000n;
+
+/**
+ * When an audit entry was created, from its snowflake id.
+ *
+ * Audit log entries carry no `created_at` field, so anything that reads one is
+ * judging the entry by a timestamp Discord never sends. The id is a snowflake,
+ * and its top 42 bits are milliseconds since Discord's epoch.
+ */
+function createdAtOf(entry: DiscordAuditEntry): number | undefined {
+	try {
+		return Number((BigInt(entry.id) >> 22n) + DISCORD_EPOCH_MS);
+	} catch {
+		return undefined;
+	}
+}
 
 /** Guild channel types the greeting may be posted in: text and announcement. */
 const WRITABLE_TYPES = new Set([0, 5]);
@@ -73,13 +91,17 @@ export async function maybeAnnounceInstall(
 	// announcement, and the marker is left unset so a later replay can retry.
 	const entry = await rest.botAddEntry(guild.id).catch(() => undefined);
 	if (!entry) return;
-	if (entry.target_id && botUserId && entry.target_id !== botUserId) return;
+	// `target_id` is the bot that was added. Without a positive match we cannot
+	// know this entry is about us, so another bot joining must not be greeted as
+	// Eryn's install.
+	if (!botUserId || entry.target_id !== botUserId) return;
 
 	// A READY replay lists every guild the bot is already in; only a join that
-	// happened just now is worth announcing. Old installs are marked so they
-	// are not looked at again on every replay.
-	const createdAt = entry.created_at ? Date.parse(entry.created_at) : Number.NaN;
-	if (Number.isFinite(createdAt) && Date.now() - createdAt > RECENT_MS) {
+	// happened just now is worth announcing. An entry whose age cannot be read is
+	// left unmarked so a later replay can retry rather than guessed at.
+	const createdAt = createdAtOf(entry);
+	if (createdAt === undefined) return;
+	if (Date.now() - createdAt > RECENT_MS) {
 		await storage.put(marker(guild.id), Date.now());
 		return;
 	}

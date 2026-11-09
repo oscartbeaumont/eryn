@@ -79,10 +79,11 @@ export interface DiscordRole {
 
 /** One entry of a guild's audit log, as far as the bot reads it. */
 export interface DiscordAuditEntry {
+	/** A snowflake, whose timestamp is the entry's creation time. */
+	id: string;
 	action_type: number;
 	user_id?: string;
 	target_id?: string;
-	created_at?: string;
 }
 
 /** An error raised by a non-retryable Discord response. */
@@ -97,10 +98,10 @@ export class DiscordError extends Error {
 }
 
 const DiscordAuditEntrySchema = Schema.Struct({
+	id: Schema.String,
 	action_type: Schema.Number,
 	user_id: Schema.optional(Schema.String),
 	target_id: Schema.optional(Schema.String),
-	created_at: Schema.optional(Schema.String),
 });
 
 const AuditLogSchema = Schema.Struct({

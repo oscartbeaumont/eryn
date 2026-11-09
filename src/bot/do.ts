@@ -499,7 +499,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
 			return;
 		}
-		if (!(await this.guildReady(guildId))) {
+		if ((await this.guildReady(guildId)) === false) {
 			await this.requireSetup(threadId);
 			return;
 		}
@@ -633,12 +633,20 @@ export class BotGatewayV5 extends DurableObject<Env> {
 		return new SessionClient(this.env, guildId);
 	}
 
-	/** Whether the guild has connected a provider yet. */
-	private async guildReady(guildId: string): Promise<boolean> {
-		return await this.session(guildId)
-			.config()
-			.then((status) => status.ready)
-			.catch(() => false);
+	/**
+	 * Whether the guild has connected a provider yet.
+	 *
+	 * `undefined` means the session could not be asked — it was restarting,
+	 * evicted, or answered badly. That is not the same as "no provider", so it
+	 * must not be turned into setup advice.
+	 */
+	private async guildReady(guildId: string): Promise<boolean | undefined> {
+		try {
+			return (await this.session(guildId).config()).ready;
+		} catch (error) {
+			log(`could not read whether guild ${guildId} has a provider: ${describeError(error)}`);
+			return undefined;
+		}
 	}
 
 	/** Ask a server admin to connect a key before the agent can run. */
@@ -669,7 +677,7 @@ export class BotGatewayV5 extends DurableObject<Env> {
 			await this.stopThread(guildId, channel.id);
 			return;
 		}
-		if (!(await this.guildReady(guildId))) {
+		if ((await this.guildReady(guildId)) === false) {
 			await this.requireSetup(channel.id);
 			return;
 		}
