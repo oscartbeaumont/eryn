@@ -804,10 +804,17 @@ class GuildAgentImpl implements GuildAgentShape {
 		// A cold Location activates config plugins asynchronously, so the host
 		// list may not have them yet. It still supplies built-ins. Skip it when
 		// the live host is for older files (another turn is still busy).
-		if (!this.host || this.host.workspace === config.workspace) {
+		const warm = this.host !== undefined && this.host.workspace === config.workspace;
+		if (!this.host || warm) {
 			try {
 				const host = await this.hostFor(config);
-				const listed = await host.command.list({ location: { directory } });
+				let listed = await host.command.list({ location: { directory } });
+				if (!warm) {
+					// A just-built Location activates its post plugins a moment
+					// after the first read. One short retry fills in built-ins.
+					await new Promise((resolve) => setTimeout(resolve, 100));
+					listed = await host.command.list({ location: { directory } });
+				}
 				for (const command of listed.data) {
 					merged.set(command.name, {
 						name: command.name,

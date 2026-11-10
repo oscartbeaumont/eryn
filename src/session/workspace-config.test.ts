@@ -226,4 +226,10 @@ test("the workspace signature changes when a config file changes", async () => {
 	assert.ok(after.includes(DEFAULT_AGENTS_PATH));
 	assert.ok((await fileStore(storage as unknown as DurableObjectStorage).get(DEFAULT_CONFIG_PATH)));
 	assert.ok((await fileStore(storage as unknown as DurableObjectStorage).get(DEFAULT_EXPLAIN_COMMAND_PATH)));
+
+	// A skill's supporting file changes what the agent can read, not the host.
+	await write(storage, "/eryn/.opencode/skills/release/references/policy.md", "Policy");
+	assert.equal(await workspaceSignature(storage as unknown as DurableObjectStorage), after);
+	await write(storage, "/eryn/.opencode/skills/release/SKILL.md", "Release");
+	assert.notEqual(await workspaceSignature(storage as unknown as DurableObjectStorage), after);
 });

@@ -276,7 +276,17 @@ export async function workspaceSignature(storage: DurableObjectStorage): Promise
 	const store = fileStore(storage);
 	const entries = await store.list(CONFIG_ROOT);
 	return entries
+		.filter((entry) => shapesHost(entry.path))
 		.map((entry) => `${entry.path}:${entry.file.m}:${entry.file.b.length}`)
 		.sort()
 		.join("|");
+}
+
+/** Whether a file affects a host build; supporting scripts only affect the agent. */
+function shapesHost(path: string): boolean {
+	if (path === CONFIG_PATH || path === LEGACY_CONFIG_PATH || path === INSTRUCTIONS_PATH) return true;
+	if (path.startsWith(`${COMMANDS_ROOT}/`) && path.endsWith(".md")) return true;
+	if (!path.startsWith(`${SKILLS_ROOT}/`) || !path.endsWith(".md")) return false;
+	const relative = path.slice(SKILLS_ROOT.length + 1);
+	return relative.endsWith("/SKILL.md") || !relative.includes("/");
 }
