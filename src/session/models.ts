@@ -20,6 +20,36 @@ export const DiscordRefSchema = Schema.Struct({
 	name: Schema.optional(Schema.String),
 });
 
+/** What a schedule may do in one Discord channel. */
+export const ScheduleChannelScopeSchema = Schema.Struct({
+	read: Schema.Boolean,
+	send: Schema.Boolean,
+	/** Absent on scopes stored before inherited threads needed this bit. */
+	sendInThreads: Schema.optional(Schema.Boolean),
+	manage: Schema.Boolean,
+	/** Absent on scopes stored before thread creation was a capability. */
+	createThread: Schema.optional(Schema.Boolean),
+	/** Absent on scopes stored before reactions were a capability. */
+	react: Schema.optional(Schema.Boolean),
+});
+
+/**
+ * A schedule's Discord capability scope.
+ *
+ * One scope covers every schedule in a conversation. It is persisted beside
+ * the Discord context rather than rendered into the prompt: it is an
+ * authorization input, not something the model needs to see.
+ */
+export const ScheduleScopeSchema = Schema.Struct({
+	/** The person who created the schedules, for scope edits and audit. */
+	ownerId: Schema.String,
+	scheduleIds: Schema.Array(Schema.String),
+	channels: Schema.Record(Schema.String, ScheduleChannelScopeSchema),
+	createdAt: Schema.Number,
+	updatedAt: Schema.Number,
+});
+export type ScheduleScope = typeof ScheduleScopeSchema.Type;
+
 export const DiscordContextSchema = Schema.Struct({
 	/** The server the bot was invoked in. */
 	guild: DiscordRefSchema,
@@ -32,6 +62,25 @@ export const DiscordContextSchema = Schema.Struct({
 	thread: DiscordRefSchema,
 	/** Whether replies land in a thread or directly in a subscribed channel. */
 	kind: Schema.optional(Schema.Literals(["thread", "channel"])),
+	/**
+	 * The Discord account that prompted the current turn.
+	 *
+	 * The Discord tools act with the bot's token, which can reach more than the
+	 * person talking to Eryn. This id is what lets them hold the turn to the
+	 * speaker's own permissions. A scheduled turn has no speaker, so the field
+	 * is absent and cross-channel actions are refused.
+	 */
+	authorId: Schema.optional(Schema.String),
+	/**
+	 * Whether the current turn was started by a schedule rather than a person.
+	 *
+	 * Set when the turn's latest message is the wake message the schedule
+	 * runner created for this session (matched by id, not by time). A human
+	 * prompt clears it.
+	 */
+	scheduleTurn: Schema.optional(Schema.Boolean),
+	/** The capability scope every schedule in this conversation runs under. */
+	scheduleScope: Schema.optional(ScheduleScopeSchema),
 });
 export type DiscordContext = typeof DiscordContextSchema.Type;
 
@@ -510,6 +559,29 @@ export const InterruptRequestSchema = Schema.Struct({
 	threadId: Schema.String,
 	gone: Schema.optional(Schema.Boolean),
 });
+
+/** Whether one Discord user may take part in a scheduled conversation. */
+export const InteractRequestSchema = guildScoped({
+	threadId: Schema.String,
+	userId: Schema.String,
+});
+
+export const InteractResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type InteractResponse = typeof InteractResponseSchema.Type;
+
+/** Trigger a manual compaction of one conversation's history. */
+export const CompactRequestSchema = guildScoped({
+	threadId: Schema.String,
+});
+
+export const CompactResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type CompactResponse = typeof CompactResponseSchema.Type;
 
 export const PolicyGetRequestSchema = guildScoped({
 	channelId: Schema.String,

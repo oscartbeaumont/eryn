@@ -11,17 +11,26 @@
 import { KEYS, log } from "../config";
 import { actionButton, buttonRow, linkButton } from "../discord/components";
 import { describeError } from "../errors";
-import { DEFAULT_THREAD_NAME, type DiscordRest } from "../discord/api";
+import {
+	DEFAULT_THREAD_NAME,
+	DiscordError,
+	type DiscordChannelRef,
+	type DiscordRest,
+} from "../discord/api";
+import { DiscordAuthority } from "../discord/authority";
 import { renderConversation, renderFailure, renderUserMessage } from "../discord/render";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
 import type { HostInterface } from "./host";
+import { channelProjectDirectory, LOCATION } from "./locations";
 import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
 import type {
+	CompactResponse,
 	DiscordContext,
 	FormField,
 	FormView,
 	IntegrationOption,
+	InteractResponse,
 	ModelOption,
 	OAuthAttempt,
 	OAuthStatus,
@@ -30,6 +39,7 @@ import type {
 	PolicyState,
 	PromptRequest,
 } from "./models";
+import { addScheduleToScope, scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
 import {
 	compilePermissions,
 	isDefaultPolicy,
@@ -45,9 +55,11 @@ import { applyTurnEvent, createTurn, type Turn } from "./turn";
 
 export type { HostConfig };
 
-/** Namespace used for every session in this Worker. The workerd profile has no real filesystem. */
-const LOCATION = "/eryn";
+/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
+type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 const TURN_TIMEOUT_MS = 900_000;
+/** How long a manual compaction may take before the command answers anyway. */
+const COMPACTION_TIMEOUT_MS = 120_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -109,6 +121,8 @@ export interface GuildAgentShape {
 	oauthCancel(config: HostConfig, integrationID: string, attemptID: string): Promise<void>;
 	disconnect(config: HostConfig, integrationID: string): Promise<number>;
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
+	/** Compact one conversation's history, at a member's request. */
+	compact(threadId: string, config: HostConfig): Promise<CompactResponse>;
 	/** The policy in effect in one channel or thread, before the menu renders it. */
 	policyState(input: { channelId: string; threadId?: string }): Promise<PolicyState>;
 	setPolicy(input: {
@@ -150,6 +164,8 @@ export interface GuildAgentShape {
 	}): Promise<{ ok: boolean; message?: string }>;
 	/** Correct a conversation's stored context after Discord renames it. */
 	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
+	/** Whether one user covers every capability a scheduled conversation uses. */
+	canInteract(threadId: string, userId: string): Promise<InteractResponse>;
 	interrupt(threadId: string | undefined, gone: boolean, config?: HostConfig): Promise<boolean>;
 	/** Build the host if it is not up, so its schedule runner is running. */
 	ensureHost(config: HostConfig): Promise<void>;
@@ -193,14 +209,28 @@ class GuildAgentImpl implements GuildAgentShape {
 	private readonly appliedPolicies = new Map<string, string>();
 	/** The conversation context last seen for a thread, for approvals and cards. */
 	private readonly contextByThread = new Map<string, DiscordContext>();
+	/** Serialises writes that decide which authority a turn acts under. */
+	private readonly principalLocks = new Map<string, Promise<void>>();
+	/** Host events older than this belong to a turn that was interrupted. */
+	private readonly turnFloor = new Map<string, number>();
 	/** The account that most recently prompted a thread, so approvals can name them. */
 	private readonly requesterByThread = new Map<string, string>();
 	/** Permission cards currently waiting for a click. */
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	/** MCP forms currently waiting for a modal reply. */
 	private readonly pendingForms = new Map<string, PendingForm>();
+	/** Manual compactions waiting for the runner's end event, keyed by session. */
+	private readonly compactions = new Map<
+		string,
+		{
+			readonly resolve: (outcome: "ended" | "failed") => void;
+			readonly timer: ReturnType<typeof setTimeout>;
+		}
+	>();
 	/** The config last used to build the host, for policies and MCP modes. */
 	private currentConfig: HostConfig | undefined;
+	/** Per-guild Discord permission lookups, shared by tool checks and gating. */
+	private readonly authority: DiscordAuthority;
 
 	constructor(
 		private readonly env: Env,
@@ -209,7 +239,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		private readonly store: GuildStoreShape,
 		private readonly turnTimeoutMs: number,
 		private readonly guildId: string,
-	) {}
+	) {
+		this.authority = new DiscordAuthority(rest, guildId);
+	}
 
 	// --- Host -----------------------------------------------------------------
 
@@ -513,22 +545,122 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	// --- A turn ---------------------------------------------------------------
 
+	/** Run one context write at a time per session, so writers cannot clobber. */
+	private withPrincipalLock<T>(sessionID: string, task: () => Promise<T>): Promise<T> {
+		const previous = this.principalLocks.get(sessionID) ?? Promise.resolve();
+		const next = previous.then(task, task);
+		const tail = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.principalLocks.set(sessionID, tail);
+		void tail.finally(() => {
+			if (this.principalLocks.get(sessionID) === tail) this.principalLocks.delete(sessionID);
+		});
+		return next;
+	}
+
+	/**
+	 * Decide who a human prompt acts as.
+	 *
+	 * Normally the speaker. But if a schedule wake is still waiting in the
+	 * inbox, or a schedule turn did not settle (a cold start can resume one
+	 * asynchronously), the message will join that schedule execution. Keep the
+	 * schedule's principal then, so the scheduled instruction can never use the
+	 * speaker's Discord permissions. An unreadable inbox fails closed the same
+	 * way: the turn is restricted rather than granted.
+	 */
+	private async promptContext(
+		host: HostInterface,
+		sessionID: string,
+		base: DiscordContext | undefined,
+		authorId: string | undefined,
+		considerUnsettled: boolean,
+	): Promise<DiscordContext | undefined> {
+		if (!base) return undefined;
+		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
+		const stored = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+		// The stored context is authoritative. Falling back to the gateway's
+		// snapshot when a session exists could resurrect a scope that was
+		// cleared since that snapshot was taken.
+		const scope = stored ? stored.scheduleScope : base.scheduleScope;
+		const pending = await this.scheduleWakePending(host, sessionID);
+		// A cold start can resume a suspended schedule execution asynchronously,
+		// and `sessions.active()` does not see it yet. An unfinished turn whose
+		// stored principal is a schedule is treated as still scheduled. When we
+		// just stopped an execution and waited for idle, that question is moot.
+		const unsettled =
+			considerUnsettled &&
+			session !== undefined &&
+			session.time.busy !== undefined &&
+			(session.time.idle === undefined || session.time.busy > session.time.idle);
+		// An unfinished turn is the schedule's if it was marked as one, or if
+		// the message it was running is still the latest schedule wake. The
+		// latter also covers a crash before attribution could be written.
+		const unfinishedSchedule =
+			unsettled &&
+			(stored?.scheduleTurn === true || (await this.scheduleWake(sessionID)) !== undefined);
+		const keepSchedule = pending !== false || unfinishedSchedule;
+		return {
+			...base,
+			authorId: keepSchedule ? undefined : authorId,
+			scheduleTurn: keepSchedule ? true : undefined,
+			...(scope ? { scheduleScope: scope } : {}),
+		};
+	}
+
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
+		const host = await this.hostFor(config, request.threadId);
+		// The completion signal arrives as an event, so a subscription that
+		// died since the last turn has to be replaced before this one starts.
+		this.startConsuming(host);
+		const sessionID = await this.ensureSession(
+			host,
+			request.threadId,
+			request.title ?? DEFAULT_THREAD_NAME,
+			channelProjectDirectory(request.discord?.channel.id),
+		);
+		// A schedule may be running in this session. A prompt is delivered with
+		// `steer`, so without this the human message would join the schedule's
+		// execution and the schedule's later tool calls would read this
+		// speaker's id. Stop it before the human turn writes its context.
+		const interrupted = await this.stopRunningTurn(host, sessionID, request.threadId);
 		await this.runTurn(
 			request.threadId,
 			"prompt",
 			async () => {
-				const host = await this.hostFor(config, request.threadId);
-				// The completion signal arrives as an event, so a subscription that
-				// died since the last turn has to be replaced before this one starts.
-				this.startConsuming(host);
-				const sessionID = await this.ensureSession(host, request.threadId, request.title ?? DEFAULT_THREAD_NAME);
 				// A rename is not replayed to the agent, and the gateway's copy can
 				// predate it, so re-read the conversation rather than trusting it.
-				const discord = request.discord ? await this.refreshContext(request.discord) : undefined;
-				await this.applyDiscord(host, request.threadId, sessionID, discord);
+				// The speaker is recorded on the same context: the tools read it
+				// back to hold the turn to that person's Discord permissions.
+				const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
+				// Keep the conversation's stored context when the prompt carries
+				// none, but set or clear the speaker on it. A turn with no speaker
+				// (an older message watch, for example) must not borrow the previous
+				// speaker's Discord authority. A session with no context stays
+				// without one: this does not invent a conversation.
+				const fallback =
+					this.contextByThread.get(request.threadId) ??
+					(await this.contextForSession(sessionID))?.context;
+				const base = refreshed ?? fallback;
+				// The decision and the write share a lock. A schedule wake can be
+				// enqueued between them, and if it joins this turn its scope must
+				// not be overwritten by the speaker's context.
+				const discord = await this.withPrincipalLock(sessionID, async () => {
+					const context = await this.promptContext(
+						host,
+						sessionID,
+						base,
+						request.author?.id,
+						!interrupted,
+					);
+					await this.applyDiscord(host, request.threadId, sessionID, context);
+					return context;
+				});
 				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
-				if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
+				if (discord?.scheduleTurn === true) this.requesterByThread.delete(request.threadId);
+				else if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
+				else this.requesterByThread.delete(request.threadId);
 				await this.applyModel(host, request.threadId, sessionID, config.model);
 
 				const attached = await fetchAttachmentFiles(request.attachments);
@@ -556,6 +688,132 @@ class GuildAgentImpl implements GuildAgentShape {
 			},
 			() => this.interrupt(request.threadId, false).catch(() => undefined),
 		);
+	}
+
+	/**
+	 * Compact one conversation's history.
+	 *
+	 * Compaction runs as its own execution and reports `session.compaction.ended`
+	 * or `.failed` rather than a normal turn, so it is tracked here instead of
+	 * with `runTurn`. The command waits for that outcome so the member gets a
+	 * real answer, but the timeout keeps a stuck summarisation from holding the
+	 * interaction open indefinitely.
+	 */
+	async compact(threadId: string, config: HostConfig): Promise<CompactResponse> {
+		const sessionID = await this.sessionFor(threadId);
+		if (!sessionID) return { ok: false, message: "There is no Eryn conversation here yet." };
+		if (this.compactions.has(sessionID)) {
+			return { ok: false, message: "A compaction is already running in this conversation." };
+		}
+		try {
+			const host = await this.hostFor(config, threadId);
+			this.startConsuming(host);
+			const outcome = await new Promise<"ended" | "failed" | "timeout">((resolve) => {
+				const timer = setTimeout(() => {
+					this.compactions.delete(sessionID);
+					resolve("timeout");
+				}, COMPACTION_TIMEOUT_MS);
+				this.compactions.set(sessionID, {
+					resolve: (result) => {
+						clearTimeout(timer);
+						resolve(result);
+					},
+					timer,
+				});
+				// Queue it behind any turn in progress: compacting halfway through
+				// a step would rewrite the context the running turn is using.
+				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error) => {
+					log("session", `could not compact ${threadId}: ${describeError(error)}`);
+					if (this.compactions.delete(sessionID)) {
+						clearTimeout(timer);
+						resolve("failed");
+					}
+				});
+			});
+			if (outcome === "ended") return { ok: true };
+			if (outcome === "failed") {
+				return { ok: false, message: "Compaction failed; the conversation history is unchanged." };
+			}
+			return { ok: false, message: "Compaction is taking longer than expected. It may still finish." };
+		} catch (error) {
+			log("session", `could not compact ${threadId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not compact this conversation." };
+		}
+	}
+
+	/** Resolve the command waiting on a manual compaction, if there is one. */
+	private settleCompaction(data: Record<string, unknown>, ended: boolean): void {
+		if (data.reason !== "manual" || typeof data.sessionID !== "string") return;
+		const pending = this.compactions.get(data.sessionID);
+		if (!pending) return;
+		this.compactions.delete(data.sessionID);
+		clearTimeout(pending.timer);
+		pending.resolve(ended ? "ended" : "failed");
+	}
+
+	/**
+	 * Stop an execution that is already running in this session.
+	 *
+	 * A human prompt steers into an active execution. If a schedule is running,
+	 * the human message would join it and the schedule's later tool calls would
+	 * read the human's `authorId`, acting outside its scope with their
+	 * permissions. Interrupting and waiting for idle keeps the turns separate.
+	 * Human prompts are serialised by the gateway, so whatever is running here
+	 * is not another human turn.
+	 */
+	private async stopRunningTurn(
+		host: HostInterface,
+		sessionID: string,
+		threadId: string,
+	): Promise<boolean> {
+		let active = true;
+		let known = true;
+		try {
+			const running = await host.sessions.active();
+			active = running?.[sessionID] !== undefined;
+		} catch {
+			// If activity cannot be read, interrupting an idle session is
+			// harmless; assume it is running and let the wait decide.
+			known = false;
+		}
+		if (active) {
+			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const timeout = new Promise<boolean>((resolve) => {
+				timer = setTimeout(() => resolve(false), 10_000);
+			});
+			const idle = await Promise.race([
+				host.sessions.wait({ sessionID }).then(
+					() => true,
+					() => false,
+				),
+				timeout,
+			]);
+			if (timer) clearTimeout(timer);
+			if (!idle) throw new Error("A scheduled turn is still running in this conversation.");
+		}
+		// Settle the in-memory turn that was following the old execution before a
+		// new turn replaces it. Otherwise its `runTurn` waits for the full turn
+		// timeout and interrupts whatever is running by then.
+		const previous = this.runs.get(threadId)?.turn;
+		if (previous && !previous.done) {
+			let settleTimer: ReturnType<typeof setTimeout> | undefined;
+			const settled = await Promise.race([
+				previous.completed.then(() => true),
+				new Promise<boolean>((resolve) => {
+					settleTimer = setTimeout(() => resolve(false), 1_000);
+				}),
+			]);
+			if (settleTimer) clearTimeout(settleTimer);
+			if (!settled && !previous.done) {
+				previous.done = true;
+				previous.resolve();
+			}
+		}
+		// The execution is idle, but its final events may still be in the event
+		// loop. Drop them, or they can complete the human turn that starts next.
+		this.turnFloor.set(threadId, Date.now());
+		return known && active;
 	}
 
 	/**
@@ -1100,6 +1358,304 @@ class GuildAgentImpl implements GuildAgentShape {
 		return { threadId, context };
 	}
 
+	// --- Schedule scope -------------------------------------------------------
+
+	/**
+	 * The schedule that woke this session, or undefined when the latest message
+	 * is not a schedule wake.
+	 *
+	 * OpenCode's schedule runner prompts the session with a user message whose
+	 * metadata carries `schedule`. The schedule row stores the exact id of that
+	 * message, so comparing it with the latest user message is an exact match:
+	 * no time window, and no way for a nearby human message to be mistaken for
+	 * a schedule. A cold object can still answer this from the message store.
+	 */
+	private async scheduleWake(sessionID: string): Promise<{ scheduleId: string } | undefined> {
+		const host = this.consumingHost;
+		if (!host) return undefined;
+		let latestId: string | undefined;
+		try {
+			const page = await host.message.list({ sessionID, order: "desc", limit: 5, type: "user" });
+			const latest = page.data[0];
+			latestId = latest?.id;
+			const fromMetadata = scheduleIdOf(latest?.metadata);
+			if (fromMetadata) return { scheduleId: fromMetadata };
+		} catch (error) {
+			log("session", `could not read messages for ${sessionID}: ${describeError(error)}`);
+		}
+		// `execution.started` can be published before the wake message is
+		// projected into the message store. The inbox item is admitted first
+		// and carries the same metadata, so it closes that window.
+		try {
+			const inbox = await host.sessions.inbox.list({ sessionID });
+			for (const item of inbox) {
+				if (item.type !== "user") continue;
+				const fromInbox = scheduleIdOf(item.payload.metadata);
+				if (fromInbox) return { scheduleId: fromInbox };
+			}
+		} catch (error) {
+			log("session", `could not read the inbox for ${sessionID}: ${describeError(error)}`);
+		}
+		if (!latestId) return undefined;
+		// The metadata is the direct signal; the row's `last_message_id` is the
+		// same message id, so this remains exact if the list endpoint ever omits
+		// metadata or the inbox has already drained.
+		try {
+			const rows = this.storage.sql
+				.exec(
+					`SELECT id, last_message_id FROM schedule
+					 WHERE session_id = ? AND last_message_id IS NOT NULL`,
+					sessionID,
+				)
+				.toArray() as { id?: unknown; last_message_id?: unknown }[];
+			const row = rows.find((entry) => entry.last_message_id === latestId);
+			return typeof row?.id === "string" ? { scheduleId: row.id } : undefined;
+		} catch {
+			// The table only exists once a session has had schedules enabled.
+			return undefined;
+		}
+	}
+
+	/**
+	 * Whether a schedule wake is waiting in the session inbox.
+	 *
+	 * A pending steer will be promoted into the next execution, so a human
+	 * prompt that starts while one is pending must not claim the human
+	 * principal. Undefined means the inbox could not be read; callers fail
+	 * closed and keep the schedule principal.
+	 */
+	private async scheduleWakePending(
+		host: HostInterface,
+		sessionID: string,
+	): Promise<boolean | undefined> {
+		try {
+			const inbox = await host.sessions.inbox.list({ sessionID });
+			return inbox.some(
+				(item) => item.type === "user" && scheduleIdOf(item.payload.metadata) !== undefined,
+			);
+		} catch (error) {
+			log("session", `could not read the inbox for ${sessionID}: ${describeError(error)}`);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Add a fired schedule to an existing scope if its tool hook was missed.
+	 *
+	 * The create hook is the normal path. This only repairs an id that is
+	 * already missing from a scope that exists; it never invents a scope, so a
+	 * conversation whose first schedule was unrecorded still fails closed.
+	 */
+	private reconciled(stored: DiscordContext, scheduleId: string | undefined): DiscordContext {
+		const scope = stored.scheduleScope;
+		if (!scheduleId || !scope || scope.scheduleIds.includes(scheduleId)) return stored;
+		return { ...stored, scheduleScope: addScheduleToScope(scope, scheduleId) };
+	}
+
+	/**
+	 * Notice a schedule wake steered into a human turn that is already running.
+	 *
+	 * The runner delivers wakes with `steer`, so if a person is mid-turn the
+	 * schedule's instruction joins their execution. Leaving the human speaker
+	 * in place would let the schedule act with that person's permissions,
+	 * outside its scope. Flip the turn to the schedule's scope instead. The
+	 * human's already-finished steps are unaffected; later ones are restricted,
+	 * and they can retry a cross-channel request after the turn.
+	 */
+	private async onScheduleSteered(data: Record<string, unknown>): Promise<void> {
+		const sessionID = data.sessionID;
+		const item = data.item as
+			| { type?: unknown; payload?: { metadata?: unknown } }
+			| undefined;
+		if (typeof sessionID !== "string" || item?.type !== "user") return;
+		const scheduleId = scheduleIdOf(item.payload?.metadata);
+		if (!scheduleId) return;
+		const threadId = this.threadBySession.get(sessionID);
+		const turn = threadId ? this.runs.get(threadId)?.turn : undefined;
+		// An idle wake is handled by the normal start attribution; only a wake
+		// that is joining an active turn needs to change that turn's principal.
+		if (!turn || turn.done) return;
+		const host = this.consumingHost;
+		if (!host) return;
+		try {
+			await this.withPrincipalLock(sessionID, async () => {
+				const session = await host.sessions.get({ sessionID });
+				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				if (!stored) return;
+				if (stored.scheduleTurn === true && stored.authorId === undefined) return;
+				const context = this.reconciled(
+					{ ...stored, authorId: undefined, scheduleTurn: true },
+					scheduleId,
+				);
+				await this.saveDiscordContext(host, sessionID, session.metadata, context);
+				this.contextByThread.set(stored.thread.id, context);
+				this.requesterByThread.delete(stored.thread.id);
+				this.appliedContext.delete(stored.thread.id);
+			});
+		} catch (error) {
+			log("session", `could not switch ${sessionID} to its schedule scope: ${describeError(error)}`);
+			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Attribute a start event with no active turn of ours.
+	 *
+	 * Only a message the schedule runner wrote marks the turn as scheduled.
+	 * Anything else is not provably human — it may be an adopted turn or a
+	 * resumed execution — so it fails closed: the stored speaker is cleared
+	 * before the tools run. A real human prompt already has an active turn and
+	 * never reaches this path.
+	 */
+	private async attributeScheduleTurn(sessionID: string): Promise<boolean> {
+		const host = this.consumingHost;
+		if (!host) return false;
+		try {
+			return await this.withPrincipalLock(sessionID, async () => {
+				const session = await host.sessions.get({ sessionID });
+				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				if (!stored) return false;
+				const wake = await this.scheduleWake(sessionID);
+				const scheduled = wake !== undefined;
+				if (!scheduled && stored.authorId === undefined && stored.scheduleTurn === undefined) return false;
+				const context = this.reconciled(
+					{
+						...stored,
+						authorId: undefined,
+						scheduleTurn: scheduled ? true : undefined,
+					},
+					wake?.scheduleId,
+				);
+				// Attribution wrote (or may have written) outside the prompt path,
+				// so the prompt path's signature is stale: the next human prompt
+				// must write its own speaker even when the names are unchanged.
+				this.appliedContext.delete(stored.thread.id);
+				// Later steps of an already-attributed turn reach the same answer,
+				// so skip the metadata write without skipping reconciliation.
+				if (JSON.stringify(context) === JSON.stringify(stored)) return scheduled;
+				await this.saveDiscordContext(host, sessionID, session.metadata, context);
+				this.contextByThread.set(stored.thread.id, context);
+				this.requesterByThread.delete(stored.thread.id);
+				return scheduled;
+			});
+		} catch (error) {
+			log("session", `could not attribute a start for ${sessionID}: ${describeError(error)}`);
+			// Do not let the turn continue with whatever speaker was stored: if
+			// this is a schedule, that speaker may be a human with more access.
+			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+			return false;
+		}
+	}
+
+	/**
+	 * Whether one Discord user may take part in a conversation whose schedules
+	 * have a capability scope.
+	 *
+	 * The schedule owner gets no exemption: the question is whether the user's
+	 * own effective permissions cover every capability the scope uses. A normal
+	 * conversation has no scope and is unchanged.
+	 */
+	async canInteract(threadId: string, userId: string): Promise<InteractResponse> {
+		const sessionID = await this.sessionFor(threadId);
+		if (!sessionID) return { ok: true };
+		try {
+			let host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+			if (!host) {
+				const settings = await this.store.settings();
+				const config: HostConfig = {
+					connections: await this.store.providers(),
+					model: settings.model,
+					links: await this.store.links(),
+				};
+				if (config.connections.length === 0) return { ok: true };
+				host = await this.hostFor(config, undefined, false);
+			}
+			const session = await host.sessions.get({ sessionID });
+			const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			const scope = context?.scheduleScope;
+			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
+
+			const actual: Record<string, ChannelCapabilities | undefined> = {};
+			const missing: string[] = [];
+			for (const channelId of Object.keys(scope.channels)) {
+				let info: DiscordChannelRef | undefined;
+				try {
+					info = await this.rest.channel(channelId);
+				} catch (error) {
+					// A 403/404 means the bot cannot use the channel at all, so it
+					// grants nothing; drop it instead of blocking every member of
+					// the conversation forever. Anything else is transient: keep
+					// the requirement and deny this attempt.
+					if (
+						error instanceof DiscordError &&
+						(error.status === 403 || error.status === 404)
+					) {
+						missing.push(channelId);
+						continue;
+					}
+					return { ok: false, message: "Eryn could not verify your access to this conversation." };
+				}
+				if (!info) {
+					missing.push(channelId);
+					continue;
+				}
+				actual[channelId] = await this.authority.scopeCapabilities(userId, info);
+			}
+
+			// The conversation itself is not a channel the scope may drop: if it
+			// cannot be read, the conversation is over as far as Discord is
+			// concerned, and everyone should get the denial instead.
+			const conversationIds = new Set([context.thread.id, context.channel.id]);
+			if (missing.some((channelId) => conversationIds.has(channelId))) {
+				return { ok: false, message: "Eryn could not verify your access to this conversation." };
+			}
+
+			let effective: typeof scope | undefined = scope;
+			if (missing.length > 0) {
+				// Re-read under the write lock so a concurrent scope expansion or
+				// a deleted last schedule is not overwritten by this prune.
+				effective = await this.withPrincipalLock(sessionID, async () => {
+					const fresh = await host.sessions.get({ sessionID }).catch(() => undefined);
+					if (!fresh) return undefined;
+					const freshContext = readDiscordContext(
+						fresh.metadata as Record<string, unknown> | undefined,
+					);
+					// The last schedule was deleted while this check ran. Do not
+					// write the old scope back; there is nothing left to enforce.
+					if (!freshContext?.scheduleScope) return undefined;
+					const channels = { ...freshContext.scheduleScope.channels };
+					for (const channelId of missing) delete channels[channelId];
+					const pruned = {
+						...freshContext.scheduleScope,
+						channels,
+						updatedAt: Date.now(),
+					};
+					await this.saveDiscordContext(host, sessionID, fresh.metadata, {
+						...freshContext,
+						scheduleScope: pruned,
+					}).catch((error) =>
+						log(
+							"session",
+							`could not prune deleted scope channels for ${threadId}: ${describeError(error)}`,
+						),
+					);
+					this.appliedContext.delete(threadId);
+					return pruned;
+				});
+				if (!effective) return { ok: true };
+			}
+
+			if (scopeCoveredBy(effective, actual)) return { ok: true };
+			return {
+				ok: false,
+				message: "Only people who can access every channel this schedule uses can talk to Eryn here.",
+			};
+		} catch (error) {
+			log("session", `could not check access to ${threadId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		}
+	}
+
 	// --- MCP forms ------------------------------------------------------------
 
 	async formView(
@@ -1341,7 +1897,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<void> {
 		await host.sessions.update({
 			sessionID,
-			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord },
+			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord } as unknown as SessionMetadata,
 		});
 	}
 
@@ -1362,7 +1918,19 @@ class GuildAgentImpl implements GuildAgentShape {
 			return undefined;
 		});
 		if (!session) return;
-		await this.saveDiscordContext(host, sessionID, session.metadata, discord);
+		// A rename event carries no speaker or scope. Keep what the stored
+		// context already has so a rename between two messages neither erases
+		// who may act nor drops the schedules' capability scope.
+		const existing = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+		const merged: DiscordContext = {
+			...discord,
+			...(!discord.authorId && existing?.authorId ? { authorId: existing.authorId } : {}),
+			...(discord.scheduleTurn === undefined && existing?.scheduleTurn !== undefined
+				? { scheduleTurn: existing.scheduleTurn }
+				: {}),
+			...(!discord.scheduleScope && existing?.scheduleScope ? { scheduleScope: existing.scheduleScope } : {}),
+		};
+		await this.saveDiscordContext(host, sessionID, session.metadata, merged);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
 		// value cannot make the next prompt skip a needed write.
 		this.appliedContext.delete(threadId);
@@ -1566,9 +2134,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		const sessionID = this.sessionByThread.get(threadId);
 		if (sessionID !== undefined) this.threadBySession.delete(sessionID);
 		this.sessionByThread.delete(threadId);
+		this.turnFloor.delete(threadId);
 	}
 
-	private async ensureSession(host: HostInterface, threadId: string, title: string): Promise<string> {
+	private async ensureSession(
+		host: HostInterface,
+		threadId: string,
+		title: string,
+		directory: string,
+	): Promise<string> {
 		const existing = await this.sessionFor(threadId);
 		if (existing) {
 			try {
@@ -1579,7 +2153,9 @@ class GuildAgentImpl implements GuildAgentShape {
 			}
 		}
 
-		const session = await host.sessions.create({ title, location: { directory: LOCATION } });
+		// The location groups the session into the channel's project. It is not a
+		// filesystem boundary: the agent's files live in the shared workspace.
+		const session = await host.sessions.create({ title, location: { directory } });
 		this.remember(threadId, session.id);
 		await this.storage.put(KEYS.session + threadId, session.id);
 		return session.id;
@@ -1598,7 +2174,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
-					this.handleEvent(event);
+					await this.handleEvent(event);
 				} catch (error) {
 					log("session", `event handling failed: ${describeError(error)}`);
 				}
@@ -1612,7 +2188,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.consuming = settled;
 	}
 
-	private handleEvent(event: unknown): void {
+	private async handleEvent(event: unknown): Promise<void> {
 		const shape = event as { type?: unknown; created?: unknown; data?: unknown };
 		if (typeof shape.type !== "string" || !shape.data || typeof shape.data !== "object") return;
 		const data = shape.data as Record<string, unknown>;
@@ -1630,13 +2206,29 @@ class GuildAgentImpl implements GuildAgentShape {
 			this.onFormSettled(data, shape.type === "form.replied" ? "replied" : "cancelled");
 			return;
 		}
+		if (shape.type === "session.inbox.enqueued") {
+			await this.onScheduleSteered(data);
+			return;
+		}
 		const sessionID = data.sessionID;
 		if (typeof sessionID !== "string") return;
+		if (shape.type === "session.compaction.ended" || shape.type === "session.compaction.failed") {
+			this.settleCompaction(data, shape.type === "session.compaction.ended");
+			return;
+		}
 		if (shape.type === "permission.asked") {
 			void this.onPermissionAsked(data).catch((error) =>
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
 			return;
+		}
+		// A start event with no turn of ours is either a schedule firing or a
+		// prompt this object did not see. Attribute or clear the speaker before
+		// adopting, so the tools never read the previous speaker's access.
+		if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
+			const mapped = this.threadBySession.get(sessionID);
+			const active = mapped ? this.runs.get(mapped)?.turn : undefined;
+			if (!active) await this.attributeScheduleTurn(sessionID);
 		}
 		const threadId = this.threadBySession.get(sessionID);
 		if (!threadId) {
@@ -1651,6 +2243,10 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		const turn = this.runs.get(threadId)?.turn;
 		if (!turn || turn.done) return;
+		// Ignore events from an execution that was interrupted just before this
+		// turn: its late `execution.interrupted` must not complete the new turn.
+		const floor = this.turnFloor.get(threadId);
+		if (floor !== undefined && typeof shape.created === "number" && shape.created < floor) return;
 		// Ignore events that predate this turn, such as the previous one going idle.
 		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
 
@@ -1674,16 +2270,44 @@ class GuildAgentImpl implements GuildAgentShape {
 				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 				// A scheduled turn starts from metadata with no message to carry a
 				// rename, so correct the names before following the turn.
-				const context = stored ? await this.refreshContext(stored) : undefined;
+				const refreshed = stored ? await this.refreshContext(stored) : undefined;
+				// A turn this object did not start has no speaker of its own. Only
+				// a schedule wake message may claim its stored scope; anything else
+				// clears the speaker and refuses cross-channel actions.
+				const wake = stored ? await this.scheduleWake(sessionID) : undefined;
+				const scheduled = wake !== undefined;
+				const context = refreshed
+					? this.reconciled(
+							{
+								...refreshed,
+								authorId: undefined,
+								scheduleTurn: scheduled ? true : undefined,
+							},
+							wake?.scheduleId,
+						)
+					: undefined;
 				const threadId = context?.thread.id;
 				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
 				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
-					await this.saveDiscordContext(host, sessionID, session.metadata, context).catch((error) =>
-						log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`),
-					);
+					try {
+						await this.saveDiscordContext(host, sessionID, session.metadata, context);
+					} catch (error) {
+						// Without the attribution write the tools would read the
+						// previous speaker. Stop the turn instead of running it with
+						// authority that may not belong to it.
+						log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
+						await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+						return;
+					}
 				}
+				// This context was written outside the prompt path, so the next
+				// human prompt must not trust a matching signature.
+				this.appliedContext.delete(threadId);
 
 				this.remember(threadId, sessionID);
+				// Approvals during a scheduled turn must not name, or be approved
+				// by, whoever happened to speak last.
+				this.requesterByThread.delete(threadId);
 				if (context) {
 					this.contextByThread.set(threadId, context);
 					if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
@@ -1703,6 +2327,20 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 }
 
+/**
+ * The schedule id on a wake message's metadata, if this is one.
+ *
+ * The runner writes `{ schedule: { id, run, dueAt, ... } }` when it prompts a
+ * session. A human message has no such key.
+ */
+function scheduleIdOf(metadata: unknown): string | undefined {
+	if (!metadata || typeof metadata !== "object") return undefined;
+	const schedule = (metadata as { schedule?: unknown }).schedule;
+	if (!schedule || typeof schedule !== "object") return undefined;
+	const id = (schedule as { id?: unknown }).id;
+	return typeof id === "string" ? id : undefined;
+}
+
 /** A one-line, human-readable description of what an approval is for. */
 function describeApproval(
 	action: string,
@@ -1715,7 +2353,9 @@ function describeApproval(
 	const command = typeof input?.command === "string" ? input.command : undefined;
 	const path = typeof input?.filePath === "string" ? input.filePath : first;
 	let detail: string;
-	if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
+	if (action === "discord.cross-channel" && typeof metadata?.targetChannelId === "string") {
+		detail = `Act in another Discord channel: <#${metadata.targetChannelId}>`;
+	} else if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
 	else if ((action === "edit" || action === "write" || action === "read") && path) detail = `${action === "read" ? "Read" : "Change"} \`${path}\``;
 	else if (message) detail = message;
 	else detail = `Use **${action}**${first ? ` on \`${first}\`` : ""}`;

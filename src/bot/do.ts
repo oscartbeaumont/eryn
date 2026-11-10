@@ -688,6 +688,23 @@ export class BotGateway extends DurableObject<Env> {
 			await this.requireSetup(channel.id);
 			return;
 		}
+		// A scheduled conversation has a capability scope. A member below that
+		// scope may still read a public thread, but must not steer the session.
+		const authorId = message.author?.id;
+		if (!authorId) return;
+		const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
+			log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		});
+		if (!allowed.ok) {
+			await this.rest
+				.sendMessage(
+					channel.id,
+					allowed.message ?? "Only people who can access every channel this schedule uses can talk to Eryn here.",
+				)
+				.catch(() => undefined);
+			return;
+		}
 		await this.forward(
 			guildId,
 			channel.id,

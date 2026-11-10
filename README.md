@@ -39,6 +39,57 @@ which owns the OpenCode host, the provider credentials, the MCP links, and a
 virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
 and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
 
+### Projects and workspace
+
+Each Discord channel gets its own OpenCode project at
+`/eryn/channels/<channel id>`. Threads in that channel share the project, so
+the project list is grouped by channel instead of being one flat list of
+conversations. The agent's files live in a separate shared virtual workspace,
+not inside that project directory, so the grouping does not stop it reading or
+writing elsewhere.
+
+### Commands
+
+- `/eryn setup` — providers, models, MCP servers, and status (needs Manage Server)
+- `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)
+- `/eryn stop` — stop the run in this conversation
+- `/eryn compact` — compact this conversation's history
+- `/eryn help` — show the command list
+
+## Permissions
+
+`/eryn policy` sets per-channel and per-thread tool limits. A policy is a
+ceiling, not the whole decision: every Discord tool also checks the Discord
+permissions of the member who prompted the turn, so a Full policy cannot let
+someone read a channel they cannot see themselves. Actions outside the current
+conversation are a separate **Cross-channel Discord** policy group, and an
+automated turn has no speaker, so it cannot use cross-channel tools.
+
+### Schedules
+
+A schedule runs as a capability scope, not as the person who created it. Its
+scope starts as the conversation only, with the creator's own read, send,
+thread-creation, reaction, and moderation permissions there. The scope
+owner or someone with Manage Server can add another channel with
+`discord_join_channel` or `discord_subscribe_message`, which stores the editor's
+permissions in that channel; a schedule turn cannot change its own scope,
+except that a thread it creates inside an in-scope channel inherits that
+channel's capabilities. People talking to the conversation must cover that scope
+with their own Discord
+permissions, or their message is not forwarded to the agent. A scope that
+includes message management therefore makes the conversation moderator-only,
+and one that can create threads also requires members to be able to send in
+threads.
+
+A schedule turn is identified by the wake message OpenCode's runner writes, not
+by a time window, so a human message sent right after a schedule fires is still
+treated as a human turn.
+
+Schedules are **public by default**: a public thread or channel stays public,
+and the scope is not a visibility feature. Private content needs a private
+thread or channel. The scope only covers Discord channels; workspace, shell,
+web, subagents, and MCP remain governed by the conversation policy.
+
 ## Self-hosting
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/oscartbeaumont/eryn)

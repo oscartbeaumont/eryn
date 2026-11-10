@@ -20,9 +20,11 @@ import { Plugin } from "@opencode/plugin";
 
 import { log } from "../../config";
 import type { DiscordRest } from "../../discord/api";
+import { DiscordAuthority } from "../../discord/authority";
 import { describeError } from "../../errors";
 import { appendToSystemPrompt } from "../hooks";
 import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./context";
+import { registerScheduleScope } from "./schedule";
 import { discordTools, type SetMessageSubscription } from "./tools";
 
 export function discordPlugin(
@@ -31,13 +33,17 @@ export function discordPlugin(
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
 ) {
-	const tools = discordTools(rest, guildId, setSubscription, setMessageSubscription);
+	// One per host/guild. A cache shared across guilds would let a role id from
+	// one server be read as a role in another.
+	const authority = new DiscordAuthority(rest, guildId);
+	const tools = discordTools(rest, guildId, setSubscription, setMessageSubscription, authority);
 
 	return Plugin.define({
 		id: "eryn.discord",
 		async setup(ctx) {
 			await Promise.all([
 				tools.setup(ctx),
+				registerScheduleScope(ctx, rest, guildId, authority),
 				// The hook carries no session metadata, so it is read from the session
 				// itself. A failure to read it must not fail the request: a missing
 				// context only costs the agent some awareness, while a thrown error
