@@ -12,14 +12,14 @@
 
 import { Plugin } from "@opencode/plugin";
 
+import { WORKSPACE_ROOT } from "../../session/locations";
 import { objectSchema, toolRun, type ToolSpec } from "../tool";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes";
 import { resolvePath } from "./paths";
 import { runShell } from "./shell";
 import { fileStore, type FileStore, type StoredFile } from "./store";
 
-/** Where the agent's project lives. Mirrors OpenCode's own `/workspace` convention. */
-export const WORKSPACE_ROOT = "/workspace";
+export { WORKSPACE_ROOT };
 
 /** Built-in tools this plugin supersedes (the rest are untouched). */
 const OVERRIDDEN = ["read", "write", "edit", "patch", "bash", "list", "glob", "grep"];

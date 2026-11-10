@@ -23,6 +23,10 @@ export const ROUTES = {
 	linkOauthUrl: "/link/oauth/url",
 	linkOauthComplete: "/link/oauth/complete",
 	prompt: "/prompt",
+	/** Run one OpenCode command in a conversation. */
+	command: "/command",
+	/** List the commands available to a conversation. */
+	commands: "/commands",
 	context: "/context",
 	interrupt: "/interrupt",
 	compact: "/compact",

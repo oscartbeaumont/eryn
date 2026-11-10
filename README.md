@@ -54,6 +54,8 @@ writing elsewhere.
 - `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)
 - `/eryn stop` — stop the run in this conversation
 - `/eryn compact` — compact this conversation's history
+- `/eryn command <name> [arguments]` — run an OpenCode command
+- `/eryn commands` — list this conversation's OpenCode commands
 - `/eryn help` — show the command list
 
 ## Permissions

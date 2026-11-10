@@ -23,7 +23,9 @@ import { refreshLinks } from "../mcp/links";
 import { createGuildAgent, type GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
 import { buildRoutes } from "./routes";
+import { seedWorkspace } from "./seed";
 import { guildStore, type GuildStoreShape } from "./store";
+import { workspaceSignature } from "./workspace-config";
 
 /** Keep a warm host briefly after the last request, then let the object hibernate. */
 const HOST_IDLE_MS = 5 * 60_000;
@@ -219,7 +221,15 @@ export class BotSession extends DurableObject<Env> {
 		const connections = await this.store.providers();
 		const stored = await this.store.links();
 		const links = refresh ? await refreshLinks(this.store, stored) : stored;
-		return { connections, model: settings.model, links };
+		// Seed before signing so a fresh guild's first host build and the
+		// signature it is compared against agree.
+		await seedWorkspace(this.ctx.storage);
+		return {
+			connections,
+			model: settings.model,
+			links,
+			workspace: await workspaceSignature(this.ctx.storage),
+		};
 	}
 
 	/**

@@ -8,29 +8,32 @@
  * rebuild it.
  */
 
-import type { Configuration } from "@opencode/sdk/workerd";
-
 import { CATALOGUE_PATH } from "../catalogue";
 import { log } from "../config";
 import { withDeploy } from "../deploy";
 import type { DiscordRest } from "../discord/api";
 import { resolveOrigin } from "../discord/application";
 import { describeError } from "../errors";
-import { supportsElicitationParam, withElicitation } from "../mcp/elicitation";
 import {
 	agentInstructionsPlugin,
 	discordPlugin,
+	guildMcpPlugin,
 	mcpGuidancePlugin,
 	workspacePlugin,
+	workspaceSkillsPlugin,
 } from "../plugins";
 import { createHost, type HostInterface } from "./host";
 import type { DiscordContext, McpLink, ProviderConnection } from "./models";
+import { seedWorkspace } from "./seed";
+import { readWorkspaceConfig } from "./workspace-config";
 
 /** Everything the host needs to be built, and to decide whether to rebuild. */
 export interface HostConfig {
 	readonly connections: readonly ProviderConnection[];
 	readonly model: string;
 	readonly links: readonly McpLink[];
+	/** A signature of the guild's config files at read time. */
+	readonly workspace: string;
 }
 
 /** The pieces of the guild object the host is built against. */
@@ -49,14 +52,6 @@ export interface HostBuildOptions {
  */
 const INTEGRATION_PROVIDERS: Record<string, readonly string[]> = {
 	opencode: ["opencode-go"],
-};
-
-/** The shape the host's config wants for a remote MCP server. */
-type RemoteMcpServer = {
-	type: "remote";
-	url: string;
-	headers?: Record<string, string>;
-	oauth: false;
 };
 
 /** POST one internal body to the bot gateway, throwing when it refuses. */
@@ -100,22 +95,6 @@ async function setMessageSubscription(
 	await postToGateway(env, "/message-watch", { guildId, ...watch, subscribed });
 }
 
-function mcpConfig(links: readonly McpLink[]): Configuration["mcp"] {
-	const servers: Record<string, RemoteMcpServer> = {};
-	for (const link of links) {
-		servers[link.name] = {
-			type: "remote",
-			url: supportsElicitationParam(link.url) ? withElicitation(link.url, link.elicitation) : link.url,
-			oauth: false,
-			// Leave codemode unset. OpenCode uses Code Mode for normal MCP
-			// servers and keeps Executor/PostHog direct because they already
-			// expose their own execute tool.
-			...(link.token ? { headers: { Authorization: `Bearer ${link.token}` } } : {}),
-		};
-	}
-	return Object.keys(servers).length ? { servers } : undefined;
-}
-
 /** Signature of the provider set, so a changed or rotated credential rebuilds the host. */
 export function connectionSignature(connections: readonly ProviderConnection[]): string {
 	return connections
@@ -137,10 +116,16 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	const { env, storage, rest, guildId, directory } = options;
 	const location = { directory };
 
+	// The guild filesystem is the source of truth for config, skills, commands,
+	// and instructions. Seed it before reading so a fresh guild starts from the
+	// documented defaults.
+	await seedWorkspace(storage);
+	const workspace = await readWorkspaceConfig(storage);
+
 	// Every plugin is the promise API, which is what this host accepts.
 	const plugins = [
-		agentInstructionsPlugin(),
 		workspacePlugin(storage),
+		agentInstructionsPlugin(() => workspace.instructions),
 		discordPlugin(
 			rest,
 			guildId,
@@ -148,6 +133,10 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
 		),
 	];
+	const skills = workspaceSkillsPlugin(workspace.skills);
+	if (skills) plugins.push(skills);
+	const mcp = guildMcpPlugin(config.links);
+	if (mcp) plugins.push(mcp);
 	const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
 	if (guidance) plugins.push(guidance);
 
@@ -177,16 +166,7 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			fetch: true,
 			url: `${origin}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
 		},
-		config: {
-			model: config.model,
-			default_agent: "build",
-			// Sessions are only read through the bot, so generating a title is
-			// pure token overhead.
-			agents: { title: { disabled: true } },
-			permissions: [{ action: "*", resource: "*", effect: "allow" }],
-			mcp: mcpConfig(config.links),
-			experimental: { schedules: true },
-		},
+		config: workspace.config,
 		plugins,
 	});
 

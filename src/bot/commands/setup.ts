@@ -102,6 +102,8 @@ export function helpText(): string {
 		"• `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)",
 		"• `/eryn stop` — stop the run in this thread",
 		"• `/eryn compact` — compact this conversation's history",
+		"• `/eryn command <name> [arguments]` — run an OpenCode command",
+		"• `/eryn commands` — list this conversation's commands",
 		"• `/eryn help` — show this",
 	].join("\n");
 }

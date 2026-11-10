@@ -544,6 +544,40 @@ export const PromptRequestSchema = guildScoped({
 });
 export type PromptRequest = typeof PromptRequestSchema.Type;
 
+/** Run one of this guild's OpenCode commands. */
+export const CommandRequestSchema = guildScoped({
+	threadId: Schema.String,
+	title: Schema.optional(Schema.String),
+	/** The OpenCode command name, such as `review` or `team/review`. */
+	command: Schema.String,
+	/** The raw argument text the command template expands. */
+	text: Schema.String,
+	author: Schema.optional(PromptUserSchema),
+	discord: Schema.optional(DiscordContextSchema),
+});
+export type CommandRequest = typeof CommandRequestSchema.Type;
+
+export const CommandResponseSchema = Schema.Struct({
+	ok: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type CommandResponse = typeof CommandResponseSchema.Type;
+
+/** List the commands available in one conversation's project. */
+export const CommandListRequestSchema = guildScoped({
+	channelId: Schema.optional(Schema.String),
+});
+
+export const CommandInfoSchema = Schema.Struct({
+	name: Schema.String,
+	description: Schema.optional(Schema.String),
+});
+export type CommandInfo = typeof CommandInfoSchema.Type;
+
+export const CommandListResponseSchema = Schema.Struct({
+	commands: Schema.Array(CommandInfoSchema),
+});
+
 /**
  * A fresh description of a conversation, written when Discord renames it.
  *

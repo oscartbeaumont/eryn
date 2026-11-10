@@ -15,6 +15,7 @@ import type {
 	DiscordTextInput,
 } from "../../discord/components";
 import type { DiscordInteraction } from "../../discord/socket";
+import type { DiscordContext } from "../../session/models";
 import { SETUP_CLOSE_ID } from "../ids";
 import type { SessionClient } from "../client";
 
@@ -31,6 +32,8 @@ export interface CommandContext {
 	readonly applicationId: string;
 	readonly session: (guildId: string) => SessionClient;
 	readonly ownsConversation: (channelId: string) => Promise<boolean>;
+	/** Describe a channel or thread as the session's Discord context. */
+	readonly context: (guildId: string, channelId: string) => Promise<DiscordContext | undefined>;
 	/** Remove the guild's public install greeting, whose job the setup flow has finished. */
 	readonly dismissGreeting: (guildId: string) => Promise<void>;
 	readonly rest: DiscordRest;

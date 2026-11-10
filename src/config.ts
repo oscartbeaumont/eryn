@@ -5,7 +5,7 @@
  * gateway object and every guild session agree on.
  */
 
-import { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public";
+import { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public.ts";
 
 /** The default model when a guild does not choose one. */
 export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
@@ -73,6 +73,8 @@ export const KEYS = {
 	pendingOAuth: "config:oauth",
 	/** The guild's virtual filesystem, one key per absolute path. */
 	fs: "fs:",
+	/** The default files already written into the virtual filesystem. */
+	workspaceSeed: "config:workspace-seed",
 	/** The server-wide policy patch. */
 	policyGuild: "policy:guild",
 	/** One channel's policy patch. */

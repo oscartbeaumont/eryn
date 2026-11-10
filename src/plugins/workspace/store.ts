@@ -7,7 +7,7 @@
  * keeps the workspace consistent no matter which tool the model picks.
  */
 
-import { KEYS } from "../../config";
+import { KEYS } from "../../config.ts";
 
 export interface StoredFile {
 	/** Base64-encoded file bytes. */
@@ -45,8 +45,14 @@ export function fileStore(storage: DurableObjectStorage): FileStore {
 			await storage.delete(key(path));
 		},
 		async list(prefix) {
+			const root = prefix === "/" ? "/" : prefix.replace(/\/+$/, "");
 			const entries = await storage.list<StoredFile>({ prefix: key(prefix) });
-			return [...entries].map(([stored, file]) => ({ path: stored.slice(KEY_PREFIX.length), file }));
+			return [...entries]
+				.map(([stored, file]) => ({ path: stored.slice(KEY_PREFIX.length), file }))
+				.filter((entry) => {
+					if (root === "/") return entry.path.startsWith("/");
+					return entry.path === root || entry.path.startsWith(`${root}/`);
+				});
 		},
 	};
 }

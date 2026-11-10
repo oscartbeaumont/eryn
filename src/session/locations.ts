@@ -14,6 +14,17 @@
 /** The embedded host's deployment namespace. */
 export const LOCATION = "/eryn";
 
+/** Where the agent's project lives. Mirrors OpenCode's own `/workspace` convention. */
+export const WORKSPACE_ROOT = "/workspace";
+
+/** The guild's editable OpenCode files, outside the agent's project. */
+export const CONFIG_ROOT = LOCATION;
+export const CONFIG_PATH = `${CONFIG_ROOT}/opencode.jsonc`;
+export const LEGACY_CONFIG_PATH = `${CONFIG_ROOT}/opencode.json`;
+export const COMMANDS_ROOT = `${CONFIG_ROOT}/.opencode/commands`;
+export const SKILLS_ROOT = `${CONFIG_ROOT}/.opencode/skills`;
+export const INSTRUCTIONS_PATH = `${CONFIG_ROOT}/AGENTS.md`;
+
 /**
  * The project directory for a Discord channel.
  *

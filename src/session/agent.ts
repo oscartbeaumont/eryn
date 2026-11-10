@@ -25,6 +25,9 @@ import type { HostInterface } from "./host";
 import { channelProjectDirectory, LOCATION } from "./locations";
 import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
 import type {
+	CommandInfo,
+	CommandRequest,
+	CommandResponse,
 	CompactResponse,
 	DiscordContext,
 	FormField,
@@ -50,8 +53,10 @@ import {
 	withOverride,
 } from "./policy";
 import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
+import { seedWorkspace } from "./seed";
 import type { GuildStoreShape } from "./store";
 import { applyTurnEvent, createTurn, type Turn } from "./turn";
+import { readWorkspaceConfig, workspaceSignature } from "./workspace-config";
 
 export type { HostConfig };
 
@@ -72,6 +77,8 @@ interface Host {
 	connections: string;
 	/** Signature of the linked MCP servers, at the time the host was built. */
 	mcp: string;
+	/** Signature of the guild's config files, at the time the host was built. */
+	workspace: string;
 	/** Whether this host has the schedule runner running. */
 	schedules: boolean;
 }
@@ -121,6 +128,10 @@ export interface GuildAgentShape {
 	oauthCancel(config: HostConfig, integrationID: string, attemptID: string): Promise<void>;
 	disconnect(config: HostConfig, integrationID: string): Promise<number>;
 	prompt(request: PromptRequest, config: HostConfig): Promise<void>;
+	/** Run one OpenCode command in a conversation. */
+	command(request: CommandRequest, config: HostConfig): Promise<CommandResponse>;
+	/** The commands available in a conversation's project. */
+	commands(config: HostConfig, directory: string): Promise<CommandInfo[]>;
 	/** Compact one conversation's history, at a member's request. */
 	compact(threadId: string, config: HostConfig): Promise<CompactResponse>;
 	/** The policy in effect in one channel or thread, before the menu renders it. */
@@ -259,7 +270,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		const mcp = linkSignature(config.links);
 
 		const changed =
-			this.host !== undefined && (this.host.connections !== connections || this.host.mcp !== mcp);
+			this.host !== undefined &&
+			(this.host.connections !== connections ||
+				this.host.mcp !== mcp ||
+				this.host.workspace !== config.workspace);
 		// A config change must not tear down a host that has another thread's turn
 		// streaming on it. The turn being started is allowed through.
 		const busy = [...this.runs].some(
@@ -276,7 +290,15 @@ class GuildAgentImpl implements GuildAgentShape {
 				guildId: this.guildId,
 				directory: LOCATION,
 			});
-			this.host = { promise, connections, mcp, schedules: false };
+			// A rejected build must not stay cached until the idle close: the next
+			// request should retry (a missing origin or a transient storage error
+			// is recoverable).
+			let retry: Promise<HostInterface>;
+			retry = promise.catch((error) => {
+				if (this.host?.promise === retry) this.host = undefined;
+				throw error;
+			});
+			this.host = { promise: retry, connections, mcp, workspace: config.workspace, schedules: false };
 			this.consuming = undefined;
 			// A different provider set means a different catalogue.
 			this.modelCache = undefined;
@@ -297,6 +319,18 @@ class GuildAgentImpl implements GuildAgentShape {
 			if (started) current.schedules = true;
 		}
 		return host;
+	}
+
+	/** Read the guild's current host inputs, including its editable files. */
+	private async loadHostConfig(): Promise<HostConfig> {
+		await seedWorkspace(this.storage);
+		const settings = await this.store.settings();
+		return {
+			connections: await this.store.providers(),
+			model: settings.model,
+			links: await this.store.links(),
+			workspace: await workspaceSignature(this.storage),
+		};
 	}
 
 	// --- Catalogue ------------------------------------------------------------
@@ -619,6 +653,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			request.threadId,
 			request.title ?? DEFAULT_THREAD_NAME,
 			channelProjectDirectory(request.discord?.channel.id),
+			config.model,
 		);
 		// A schedule may be running in this session. A prompt is delivered with
 		// `steer`, so without this the human message would join the schedule's
@@ -688,6 +723,114 @@ class GuildAgentImpl implements GuildAgentShape {
 			},
 			() => this.interrupt(request.threadId, false).catch(() => undefined),
 		);
+	}
+
+	/**
+	 * Run one OpenCode command in the conversation.
+	 *
+	 * A command is a prompt template with its own expansion rules, so it goes
+	 * through `session.command` rather than `session.prompt`. The same Discord
+	 * context, policy, and model setup applies, and the resulting turn streams
+	 * back through the usual event path.
+	 */
+	async command(request: CommandRequest, config: HostConfig): Promise<CommandResponse> {
+		const host = await this.hostFor(config, request.threadId);
+		this.startConsuming(host);
+		const sessionID = await this.ensureSession(
+			host,
+			request.threadId,
+			request.title ?? request.command,
+			channelProjectDirectory(request.discord?.channel.id),
+			config.model,
+		);
+		const interrupted = await this.stopRunningTurn(host, sessionID, request.threadId);
+		const before = await host.sessions.get({ sessionID }).catch(() => undefined);
+		const workspace = await readWorkspaceConfig(this.storage);
+		const defaultAgent =
+			before?.agent ??
+			(typeof workspace.config.default_agent === "string" ? workspace.config.default_agent : "build");
+		try {
+			return await this.runTurn(
+				request.threadId,
+				`command ${request.command}`,
+				async () => {
+					const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
+					const fallback =
+						this.contextByThread.get(request.threadId) ??
+						(await this.contextForSession(sessionID))?.context;
+					const base = refreshed ?? fallback;
+					const discord = await this.withPrincipalLock(sessionID, async () => {
+						const context = await this.promptContext(
+							host,
+							sessionID,
+							base,
+							request.author?.id,
+							!interrupted,
+						);
+						await this.applyDiscord(host, request.threadId, sessionID, context);
+						return context;
+					});
+					await this.applyPolicy(host, request.threadId, sessionID, discord, config);
+					if (discord?.scheduleTurn === true) this.requesterByThread.delete(request.threadId);
+					else if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
+					else this.requesterByThread.delete(request.threadId);
+					await this.applyModel(host, request.threadId, sessionID, config.model);
+					await host.sessions.command({
+						sessionID,
+						name: request.command,
+						text: request.text,
+					});
+				},
+				() => this.interrupt(request.threadId, false).catch(() => undefined),
+			);
+		} finally {
+			// A command may switch the session model or agent. Forget the cached
+			// model and restore the agent so the next prompt uses the guild's
+			// choices, not the command's.
+			this.appliedModels.delete(request.threadId);
+			await host.sessions
+				.switchAgent({ sessionID, agent: defaultAgent as never })
+				.catch((error) => log("session", `could not restore the session agent: ${describeError(error)}`));
+		}
+	}
+
+	/** The commands available in one conversation's project. */
+	async commands(config: HostConfig, directory: string): Promise<CommandInfo[]> {
+		// Read the guild files first: they work without a provider or a host, so
+		// `/eryn commands` still answers when a host build fails.
+		const workspace = await readWorkspaceConfig(this.storage);
+		const merged = new Map<string, CommandInfo>();
+
+		// A cold Location activates config plugins asynchronously, so the host
+		// list may not have them yet. It still supplies built-ins. Skip it when
+		// the live host is for older files (another turn is still busy).
+		if (!this.host || this.host.workspace === config.workspace) {
+			try {
+				const host = await this.hostFor(config);
+				const listed = await host.command.list({ location: { directory } });
+				for (const command of listed.data) {
+					merged.set(command.name, {
+						name: command.name,
+						...(command.description ? { description: command.description } : {}),
+					});
+				}
+			} catch (error) {
+				log("session", `could not list the host's commands: ${describeError(error)}`);
+			}
+		}
+
+		// File-backed commands win by name and are always current.
+		for (const [name, info] of Object.entries(
+			(workspace.config.commands ?? {}) as Record<string, { description?: unknown }>,
+		)) {
+			merged.set(name, {
+				name,
+				...(typeof info.description === "string" && info.description
+					? { description: info.description }
+					: {}),
+			});
+		}
+		return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	/**
@@ -829,7 +972,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		label: string,
 		start: () => Promise<void>,
 		onTimeout: () => Promise<unknown>,
-	): Promise<void> {
+	): Promise<{ ok: boolean; message?: string }> {
 		const turn = this.beginTurn(threadId);
 		let failure: string | undefined;
 
@@ -858,6 +1001,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// Report the failure where the turn was triggered, once the run itself
 		// has been released.
 		if (failure && !turn.gone) await this.postFailure(threadId, failure);
+		return failure ? { ok: false, message: failure } : { ok: true };
 	}
 
 	/** Send a turn failure to the conversation that triggered it. */
@@ -1043,14 +1187,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		threadId?: string;
 	}): Promise<void> {
 		let config = this.currentConfig;
-		if (!config) {
-			const settings = await this.store.settings();
-			config = {
-				connections: await this.store.providers(),
-				model: settings.model,
-				links: await this.store.links(),
-			};
-		}
+		if (!config) config = await this.loadHostConfig();
 		if (config.connections.length === 0) return;
 		let host: HostInterface | undefined;
 		try {
@@ -1561,12 +1698,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		try {
 			let host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
 			if (!host) {
-				const settings = await this.store.settings();
-				const config: HostConfig = {
-					connections: await this.store.providers(),
-					model: settings.model,
-					links: await this.store.links(),
-				};
+				const config = await this.loadHostConfig();
 				if (config.connections.length === 0) return { ok: true };
 				host = await this.hostFor(config, undefined, false);
 			}
@@ -2142,6 +2274,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		threadId: string,
 		title: string,
 		directory: string,
+		model: string,
 	): Promise<string> {
 		const existing = await this.sessionFor(threadId);
 		if (existing) {
@@ -2155,7 +2288,15 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		// The location groups the session into the channel's project. It is not a
 		// filesystem boundary: the agent's files live in the shared workspace.
-		const session = await host.sessions.create({ title, location: { directory } });
+		// The model is set on the session itself rather than in the host config,
+		// so the user-editable config is not shadowed by Eryn's guild choice.
+		const ref = parseModelRef(model);
+		const session = await host.sessions.create({
+			title,
+			location: { directory },
+			...(ref ? { model: ref } : {}),
+		});
+		if (ref) this.appliedModels.set(threadId, model);
 		this.remember(threadId, session.id);
 		await this.storage.put(KEYS.session + threadId, session.id);
 		return session.id;

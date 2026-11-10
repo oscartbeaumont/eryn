@@ -13,6 +13,7 @@ import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
 import type { DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
 import { describeError } from "../../errors";
+import type { PromptUser } from "../../session/models";
 import { scopedId, unmarshalId } from "../ids";
 import {
 	canManage,
@@ -45,6 +46,26 @@ export function erynCommand(): DiscordCommand {
 			},
 			{ name: "stop", description: "Stop the Eryn run in this thread", type: 1 },
 			{ name: "compact", description: "Compact this conversation's history", type: 1 },
+			{
+				name: "command",
+				description: "Run an OpenCode command in this conversation",
+				type: 1,
+				options: [
+					{
+						name: "name",
+						description: "The command name, such as review",
+						type: 3,
+						required: true,
+					},
+					{
+						name: "arguments",
+						description: "Arguments passed to the command",
+						type: 3,
+						required: false,
+					},
+				],
+			},
+			{ name: "commands", description: "List this conversation's OpenCode commands", type: 1 },
 			{ name: "policy", description: "Restrict what Eryn may do in this channel or thread", type: 1 },
 			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
@@ -139,6 +160,49 @@ function requestFor(
 
 // --- Application commands ------------------------------------------------------
 
+/** One resolved string option on a subcommand. */
+function optionValue(sub: unknown, name: string): string | undefined {
+	const options = (sub as { options?: readonly { name?: string; value?: unknown }[] } | undefined)
+		?.options;
+	const value = options?.find((option) => option.name === name)?.value;
+	return typeof value === "string" ? value : undefined;
+}
+
+/** The accounts an interaction can carry; a guild member or a DM user. */
+function authorOf(interaction: DiscordInteraction): PromptUser | undefined {
+	const user = interaction.member?.user ?? interaction.user;
+	if (!user) return undefined;
+	const username = user.username?.trim();
+	return {
+		name:
+			interaction.member?.nick?.trim() ||
+			user.global_name?.trim() ||
+			username ||
+			"someone",
+		...(username ? { username } : {}),
+		...(user.id ? { id: user.id } : {}),
+	};
+}
+
+/** Discord's 2,000-character message limit, with room for the ellipsis. */
+function truncate(text: string): string {
+	return text.length > 2_000 ? `${text.slice(0, 1_990)}…` : text;
+}
+
+function commandListText(commands: readonly { name: string; description?: string }[]): string {
+	if (commands.length === 0) return "This conversation has no OpenCode commands yet.";
+	const names = commands
+		.map((command) => `\`${command.name}\`${command.description ? ` — ${command.description}` : ""}`)
+		.join("\n• ");
+	return truncate(
+		[
+			"**OpenCode commands**",
+			`• ${names}`,
+			"Run one with `/eryn command <name> [arguments]`.",
+		].join("\n"),
+	);
+}
+
 async function handleCommand(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
 	const data = interaction.data;
 	if (data?.name !== "eryn") return;
@@ -152,9 +216,16 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		await rejectInteraction(ctx, interaction, "Run `/eryn` inside a server, so I know which setup to change.");
 		return;
 	}
-	// Stopping a run, compacting a conversation, and reading help are not
-	// configuration; everything else is.
-	if (path !== "stop" && path !== "compact" && path !== "help" && !canManage(interaction)) {
+	// Stopping a run, compacting a conversation, running a command, and reading
+	// help are conversation actions, not configuration; everything else is.
+	if (
+		path !== "stop" &&
+		path !== "compact" &&
+		path !== "command" &&
+		path !== "commands" &&
+		path !== "help" &&
+		!canManage(interaction)
+	) {
 		return await denyConfiguration(ctx, interaction);
 	}
 	const request = requestFor(ctx, interaction, guildId);
@@ -197,6 +268,60 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 						? "Compacted this conversation's history."
 						: (result.message ?? "I could not compact this conversation."),
 				);
+			});
+		case "command":
+			return await guarded(request, "reply", async () => {
+				const channelId = interaction.channel_id;
+				const answer = responder(request);
+				if (!channelId || !(await ctx.ownsConversation(channelId))) {
+					await answer.reply("There is no Eryn conversation here yet.");
+					return;
+				}
+				const name = optionValue(sub, "name");
+				if (!name) {
+					await answer.reply("Name the command to run, for example `/eryn command review`.");
+					return;
+				}
+				const argumentsText = optionValue(sub, "arguments") ?? "";
+				// Acknowledge before the Discord lookup and the turn, both of which
+				// can take longer than the interaction window.
+				await answer.defer();
+				const discord = await ctx.context(guildId, channelId);
+				if (!discord) {
+					await answer.reply("I could not read this conversation from Discord. Try again in a moment.");
+					return;
+				}
+				// Do not gate on a list read: a cold Location has not activated
+				// its config plugins yet, while `session.command` waits for them.
+				const author = authorOf(interaction);
+				const result = await request.session.command({
+					threadId: channelId,
+					title: name,
+					command: name,
+					text: argumentsText,
+					...(author ? { author } : {}),
+					discord,
+				});
+				await answer.reply(
+					result.ok ? `Ran \`/${name}\`.` : truncate(result.message ?? "That command failed."),
+				);
+			});
+		case "commands":
+			return await guarded(request, "reply", async () => {
+				const channelId = interaction.channel_id;
+				const answer = responder(request);
+				if (!channelId || !(await ctx.ownsConversation(channelId))) {
+					await answer.reply("There is no Eryn conversation here yet.");
+					return;
+				}
+				await answer.defer();
+				const discord = await ctx.context(guildId, channelId);
+				if (!discord) {
+					await answer.reply("I could not read this conversation from Discord. Try again in a moment.");
+					return;
+				}
+				const commands = await request.session.commands(discord.channel.id);
+				await answer.reply(commandListText(commands));
 			});
 		case "help":
 			return await responder(request).reply(helpText());

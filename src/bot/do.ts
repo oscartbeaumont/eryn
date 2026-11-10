@@ -574,10 +574,25 @@ export class BotGateway extends DurableObject<Env> {
 			session: (guildId) => this.session(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),
+			context: (guildId, channelId) => this.conversationContext(guildId, channelId),
 			dismissGreeting: (guildId) => dismissInstallGreeting(this.rest, this.ctx.storage, guildId),
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);
+	}
+
+	/** Build the same context a message in this conversation would carry. */
+	private async conversationContext(
+		guildId: string,
+		channelId: string,
+	): Promise<DiscordContext | undefined> {
+		const ref = await this.lookups.channel(channelId);
+		if (!ref) return undefined;
+		if (THREAD_TYPES.has(ref.type)) {
+			const parent = ref.parent_id ? await this.lookups.channel(ref.parent_id) : undefined;
+			return await this.lookups.context(guildId, parent, { id: ref.id, name: ref.name });
+		}
+		return await this.lookups.context(guildId, ref, { id: ref.id, name: ref.name }, "channel");
 	}
 
 	/**

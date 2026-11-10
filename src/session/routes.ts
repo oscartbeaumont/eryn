@@ -19,8 +19,11 @@ import { AUTH_TTL_MS } from "../mcp/paths";
 import { probeServer } from "../mcp/probe";
 import type { GuildAgentShape } from "./agent";
 import type { HostConfig } from "./host-config";
+import { channelProjectDirectory } from "./locations";
 import {
 	ApprovalReplyRequestSchema,
+	CommandListRequestSchema,
+	CommandRequestSchema,
 	CompactRequestSchema,
 	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
@@ -392,6 +395,23 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			// schedule the turn created still fires on time.
 			return json({ ok: true });
 		}),
+
+		[ROUTES.command]: route(CommandRequestSchema, async (body) => {
+			const config = await loadConfig(true);
+			if (config.connections.length === 0) {
+				return json({ ok: false, error: "no provider is connected" }, 400);
+			}
+			return json(await agent.command(body, await reconcileModel(config)));
+		}),
+
+		[ROUTES.commands]: route(CommandListRequestSchema, async (body) =>
+			json({
+				commands: await agent.commands(
+					await loadConfig(),
+					channelProjectDirectory(body.channelId),
+				),
+			}),
+		),
 
 		/**
 		 * Keep a conversation's stored description current after a rename.

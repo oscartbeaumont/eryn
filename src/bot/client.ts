@@ -12,6 +12,7 @@ import { ROUTES } from "../session/paths";
 import { botError } from "../errors";
 import {
 	ApprovalReplyResponseSchema,
+	CommandListResponseSchema,
 	CompactResponseSchema,
 	GuildStatusSchema,
 	IntegrationOptionSchema,
@@ -25,7 +26,11 @@ import {
 	PublicLinkSchema,
 	FormViewSchema,
 	InteractResponseSchema,
+	CommandResponseSchema,
 	PolicyStateSchema,
+	type CommandInfo,
+	type CommandRequest,
+	type CommandResponse,
 	type CompactResponse,
 	type DiscordContext,
 	type ElicitationMode,
@@ -180,6 +185,19 @@ export class SessionClient {
 
 	async prompt(body: Omit<PromptRequest, "guildId">): Promise<void> {
 		await this.call(ROUTES.prompt, Schema.Unknown, body);
+	}
+
+	command(body: Omit<CommandRequest, "guildId">): Promise<CommandResponse> {
+		return this.call(ROUTES.command, CommandResponseSchema, body);
+	}
+
+	async commands(channelId?: string): Promise<CommandInfo[]> {
+		const response = await this.call(
+			ROUTES.commands,
+			CommandListResponseSchema,
+			channelId ? { channelId } : {},
+		);
+		return [...response.commands];
 	}
 
 	/**
