@@ -7,9 +7,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { KEYS } from "../config.ts";
+import { expandShellBlocks } from "../plugins/commands/index.ts";
 import { workspaceSkillsPlugin } from "../plugins/skills/index.ts";
 import { bytesToBase64, textToBytes } from "../plugins/workspace/bytes.ts";
+import { resolveToolPath } from "../plugins/workspace/paths.ts";
 import { fileStore } from "../plugins/workspace/store.ts";
+import { protectShellBlocks } from "./command-template.ts";
 import {
 	DEFAULT_AGENTS_PATH,
 	DEFAULT_CONFIG_PATH,
@@ -66,6 +70,37 @@ test("a fresh guild reads the seeded config, command, skills, and instructions",
 		["config", "discord"],
 	);
 	assert.match(workspace.instructions ?? "", /You are Eryn/);
+	assert.match(workspace.instructions ?? "", /## Progress updates/);
+	assert.match(workspace.instructions ?? "", /short tasks get no progress messages/);
+});
+
+test("an existing guild gets the progress rules without losing its edits", async () => {
+	const storage = new MemoryStorage();
+	await write(
+		storage,
+		DEFAULT_AGENTS_PATH,
+		"# Eryn\n\nKeep replies focused. Use tools when they help, and do not narrate every tool\ncall.\n\nCustom note.\n",
+	);
+	await storage.put(KEYS.workspaceSeed, 1);
+
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+
+	assert.match(workspace.instructions ?? "", /## Progress updates/);
+	assert.match(workspace.instructions ?? "", /short tasks get no progress messages/);
+	assert.match(workspace.instructions ?? "", /Custom note/);
+});
+
+test("the progress upgrade leaves a custom voice alone", async () => {
+	const storage = new MemoryStorage();
+	await write(storage, DEFAULT_AGENTS_PATH, "# Eryn\n\nBe verbose and use emoji.\n");
+	await storage.put(KEYS.workspaceSeed, 1);
+
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+
+	assert.doesNotMatch(workspace.instructions ?? "", /## Progress updates/);
+	assert.match(workspace.instructions ?? "", /Be verbose/);
 });
 
 test("Markdown commands and skills become config entries", async () => {
@@ -117,6 +152,98 @@ Prepare the release.
 	]);
 });
 
+test("Markdown agents under .opencode/agents become config agents", async () => {
+	const storage = new MemoryStorage();
+	await write(
+		storage,
+		"/eryn/.opencode/agents/reviewer.md",
+		`---
+description: Review a change
+mode: subagent
+model: anthropic/claude-sonnet-5-5
+variant: high
+name: Reviewer
+---
+
+Review carefully.
+`,
+	);
+	await write(
+		storage,
+		"/eryn/.opencode/agent/planner.md",
+		`---
+description: Plan a change
+---
+
+Plan carefully.
+`,
+	);
+
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	const agents = workspace.config.agents as Record<string, Record<string, unknown>>;
+	assert.equal(agents.reviewer.description, "Review a change");
+	assert.equal(agents.reviewer.mode, "subagent");
+	assert.equal(agents.reviewer.model, "anthropic/claude-sonnet-5-5#high");
+	assert.equal(agents.reviewer.system, "Review carefully.");
+	assert.equal(agents.reviewer.name, undefined);
+	assert.equal(agents.planner.description, "Plan a change");
+	assert.equal(agents.planner.mode, undefined);
+	assert.equal(agents.planner.system, "Plan carefully.");
+});
+
+test("command shell blocks are protected from OpenCode's process evaluator", async () => {
+	const storage = new MemoryStorage();
+	await write(
+		storage,
+		"/eryn/.opencode/commands/status.md",
+		"---\ndescription: Show status\n---\n\nStatus: !`cat notes.txt`\n",
+	);
+	await write(
+		storage,
+		CONFIG_PATH,
+		JSON.stringify({ commands: { inline: { template: "Inline: !`echo hi`" } } }),
+	);
+
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	const commands = workspace.config.commands as Record<string, { template: string }>;
+	assert.match(commands.status.template, /!\u200b`cat notes\.txt`/);
+	assert.doesNotMatch(commands.status.template, /!`cat notes\.txt`/);
+	assert.match(commands.inline.template, /!\u200b`echo hi`/);
+});
+
+test("command shell blocks run in just-bash with arguments", async () => {
+	const storage = new MemoryStorage();
+	await write(storage, "/workspace/notes.txt", "hello from the workspace");
+	const store = fileStore(storage as unknown as DurableObjectStorage);
+
+	const protectedBlock = protectShellBlocks("Notes: !`cat notes.txt`");
+	assert.match(protectedBlock, /!\u200b`cat notes\.txt`/);
+	assert.equal(await expandShellBlocks(store, protectedBlock), "Notes: hello from the workspace");
+
+	const withArguments = protectShellBlocks("Echo: !`echo $ARGUMENTS`").replaceAll("$ARGUMENTS", "hello");
+	assert.equal(await expandShellBlocks(store, withArguments), "Echo: hello");
+});
+
+test("a skill's relative paths resolve before the workspace", async () => {
+	const storage = new MemoryStorage();
+	await write(storage, "/eryn/.opencode/skills/release/references/policy.md", "skill policy");
+	await write(storage, "/workspace/references/policy.md", "workspace policy");
+	const store = fileStore(storage as unknown as DurableObjectStorage);
+
+	assert.equal(
+		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "references/policy.md", "file"),
+		"/eryn/.opencode/skills/release/references/policy.md",
+	);
+	assert.equal(
+		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "missing.md", "file"),
+		"/workspace/missing.md",
+	);
+	assert.equal(
+		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "references/policy.md", "dir"),
+		"/workspace/references/policy.md",
+	);
+});
+
 test("workspace skills register with their real guild paths", async () => {
 	const plugin = workspaceSkillsPlugin([
 		{
@@ -145,8 +272,40 @@ test("workspace skills register with their real guild paths", async () => {
 	assert.equal(added[0]?.path, "/eryn/.opencode/skills/release/SKILL.md");
 	assert.equal(
 		added[0]?.content,
-		"Prepare the release.\n\nSupporting files, if any, live under `/eryn/.opencode/skills/release`. Read them by absolute path.",
+		"Prepare the release.\n\nSupporting files, if any, live under `/eryn/.opencode/skills/release`. The `read` tool resolves relative paths in this skill against that directory.",
 	);
+});
+
+test("an activated skill records its directory for relative reads", async () => {
+	const active = new Map<string, string>();
+	const plugin = workspaceSkillsPlugin(
+		[
+			{
+				id: "release",
+				name: "Release",
+				path: "/eryn/.opencode/skills/release/SKILL.md",
+				content: "Prepare the release.",
+			},
+		],
+		active,
+	);
+	assert.ok(plugin);
+
+	const context = {
+		skill: {
+			transform: async (callback: (editor: { add: (skill: never) => void }) => void) => {
+				callback({ add: () => undefined });
+			},
+		},
+		event: {
+			subscribe: async function* () {
+				yield { data: { sessionID: "ses_1", id: "release" } };
+			},
+		},
+	};
+	await plugin!.setup(context as never);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(active.get("ses_1"), "/eryn/.opencode/skills/release");
 });
 
 test("files OpenCode would resolve through node:fs are filtered out", async () => {
@@ -232,4 +391,9 @@ test("the workspace signature changes when a config file changes", async () => {
 	assert.equal(await workspaceSignature(storage as unknown as DurableObjectStorage), after);
 	await write(storage, "/eryn/.opencode/skills/release/SKILL.md", "Release");
 	assert.notEqual(await workspaceSignature(storage as unknown as DurableObjectStorage), after);
+
+	// A Markdown agent changes the host too.
+	const withAgent = await workspaceSignature(storage as unknown as DurableObjectStorage);
+	await write(storage, "/eryn/.opencode/agents/reviewer.md", "---\ndescription: Review\n---\nReview.");
+	assert.notEqual(await workspaceSignature(storage as unknown as DurableObjectStorage), withAgent);
 });

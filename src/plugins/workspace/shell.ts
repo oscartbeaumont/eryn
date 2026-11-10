@@ -11,8 +11,8 @@
  */
 
 import { Bash, InMemoryFs } from "just-bash/browser";
-import { base64ToBytes, bytesToBase64 } from "./bytes";
-import type { FileStore, StoredFile } from "./store";
+import { base64ToBytes, bytesToBase64 } from "./bytes.ts";
+import type { FileStore, StoredFile } from "./store.ts";
 
 export interface ShellResult {
 	readonly stdout: string;

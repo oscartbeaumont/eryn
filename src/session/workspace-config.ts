@@ -17,19 +17,24 @@ import { base64ToBytes, bytesToText } from "../plugins/workspace/bytes.ts";
 import { fileStore, type FileStore } from "../plugins/workspace/store.ts";
 
 import {
+	AGENTS_ROOT,
 	COMMANDS_ROOT,
 	CONFIG_PATH,
 	CONFIG_ROOT,
 	INSTRUCTIONS_PATH,
+	LEGACY_AGENTS_ROOT,
 	LEGACY_CONFIG_PATH,
 	SKILLS_ROOT,
 } from "./locations.ts";
+import { protectShellBlocks } from "./command-template.ts";
 
 export {
+	AGENTS_ROOT,
 	COMMANDS_ROOT,
 	CONFIG_PATH,
 	CONFIG_ROOT,
 	INSTRUCTIONS_PATH,
+	LEGACY_AGENTS_ROOT,
 	LEGACY_CONFIG_PATH,
 	SKILLS_ROOT,
 };
@@ -127,7 +132,7 @@ async function commands(store: FileStore): Promise<Record<string, Record<string,
 			continue;
 		}
 		const data = record(markdown.data) ?? {};
-		const template = markdown.content.trim();
+		const template = protectShellBlocks(markdown.content.trim());
 		if (!template) {
 			log("session", `ignored command ${name}: empty template`);
 			continue;
@@ -189,6 +194,80 @@ async function skills(store: FileStore): Promise<WorkspaceSkill[]> {
 	return found;
 }
 
+/** The fields a Markdown agent may set; matches OpenCode's agent frontmatter. */
+const AGENT_FIELDS = new Set([
+	"model",
+	"variant",
+	"request",
+	"system",
+	"description",
+	"mode",
+	"hidden",
+	"color",
+	"steps",
+	"disabled",
+	"permissions",
+]);
+
+/**
+ * Markdown agents under `.opencode/agents`.
+ *
+ * The relative filename is the agent id, the frontmatter is the agent config,
+ * and the body is its system prompt. `.opencode/agent` is accepted as an older
+ * alias. Unsupported frontmatter is ignored so one bad key cannot fail the
+ * whole host config.
+ */
+async function markdownAgents(store: FileStore): Promise<Record<string, Record<string, unknown>>> {
+	const found: Record<string, Record<string, unknown>> = {};
+	for (const root of [AGENTS_ROOT, LEGACY_AGENTS_ROOT]) {
+		for (const entry of await store.list(root)) {
+			if (!entry.path.endsWith(".md")) continue;
+			const relative = entry.path.slice(root.length + 1).replace(/\.md$/, "");
+			if (!relative || relative.split("/").some((part) => part.startsWith("."))) continue;
+			const source = await text(store, entry.path);
+			if (!source) continue;
+			const markdown = ConfigMarkdown.parseOption(source);
+			if (!markdown) {
+				log("session", `ignored agent ${relative}: invalid Markdown`);
+				continue;
+			}
+			const data = Object.fromEntries(
+				Object.entries(record(markdown.data) ?? {}).filter(([key]) => AGENT_FIELDS.has(key)),
+			);
+			if (
+				typeof data.model === "string" &&
+				!data.model.includes("#") &&
+				typeof data.variant === "string" &&
+				/^[^#]+$/.test(data.variant)
+			) {
+				data.model = `${data.model}#${data.variant}`;
+			}
+			delete data.variant;
+			const system = markdown.content.trim();
+			found[relative] = {
+				...data,
+				...(system ? { system } : {}),
+			};
+		}
+	}
+	return found;
+}
+
+/** Protect command shell blocks in inline config before OpenCode sees them. */
+function protectInlineCommands(value: unknown): Record<string, unknown> | undefined {
+	const entries = record(value);
+	if (!entries) return undefined;
+	const result: Record<string, unknown> = {};
+	for (const [name, item] of Object.entries(entries)) {
+		const command = record(item);
+		result[name] =
+			command && typeof command.template === "string"
+				? { ...command, template: protectShellBlocks(command.template) }
+				: item;
+	}
+	return result;
+}
+
 /** Read every file that shapes a guild's host. */
 export async function readWorkspaceConfig(storage: DurableObjectStorage): Promise<WorkspaceConfig> {
 	const store = fileStore(storage);
@@ -221,6 +300,8 @@ export async function readWorkspaceConfig(storage: DurableObjectStorage): Promis
 	} = user;
 
 	const localCommands = await commands(store);
+	const localAgents = await markdownAgents(store);
+	const inlineCommands = protectInlineCommands(userCommands);
 	const skillUrls = urls(userSkills);
 	const instructionUrls = urls(userInstructions);
 	const userAgentConfig = record(userAgents);
@@ -236,6 +317,7 @@ export async function readWorkspaceConfig(storage: DurableObjectStorage): Promis
 		agents: {
 			...BASE_CONFIG.agents,
 			...userAgentConfig,
+			...localAgents,
 			title: {
 				...BASE_CONFIG.agents.title,
 				...record(userAgentConfig?.title),
@@ -249,10 +331,10 @@ export async function readWorkspaceConfig(storage: DurableObjectStorage): Promis
 		} as never,
 		...(skillUrls ? { skills: skillUrls } : {}),
 		...(instructionUrls ? { instructions: instructionUrls } : {}),
-		...((userCommands as Record<string, unknown> | undefined) || Object.keys(localCommands).length
+		...(Object.keys(inlineCommands ?? {}).length || Object.keys(localCommands).length
 			? {
 					commands: {
-						...(record(userCommands) ?? {}),
+						...(inlineCommands ?? {}),
 						...localCommands,
 					} as never,
 				}
@@ -286,6 +368,8 @@ export async function workspaceSignature(storage: DurableObjectStorage): Promise
 function shapesHost(path: string): boolean {
 	if (path === CONFIG_PATH || path === LEGACY_CONFIG_PATH || path === INSTRUCTIONS_PATH) return true;
 	if (path.startsWith(`${COMMANDS_ROOT}/`) && path.endsWith(".md")) return true;
+	if (path.startsWith(`${AGENTS_ROOT}/`) && path.endsWith(".md")) return true;
+	if (path.startsWith(`${LEGACY_AGENTS_ROOT}/`) && path.endsWith(".md")) return true;
 	if (!path.startsWith(`${SKILLS_ROOT}/`) || !path.endsWith(".md")) return false;
 	const relative = path.slice(SKILLS_ROOT.length + 1);
 	return relative.endsWith("/SKILL.md") || !relative.includes("/");

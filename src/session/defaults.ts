@@ -8,7 +8,7 @@
 
 import { CONFIG_PATH, INSTRUCTIONS_PATH, COMMANDS_ROOT, SKILLS_ROOT } from "./locations.ts";
 
-export const SEED_VERSION = 1;
+export const SEED_VERSION = 2;
 
 export const DEFAULT_CONFIG_PATH = CONFIG_PATH;
 export const DEFAULT_AGENTS_PATH = INSTRUCTIONS_PATH;
@@ -25,6 +25,13 @@ export const DEFAULT_CONFIG = `{
 }
 `;
 
+export const DEFAULT_PROGRESS = `## Progress updates
+
+During long work, send a short update when you start, at each major milestone,
+and before any operation that will be quiet for more than a couple of minutes.
+Say what changed or what you are waiting on in one sentence. Never narrate
+individual tool calls, and short tasks get no progress messages.`;
+
 export const DEFAULT_AGENTS = `# Eryn
 
 You are Eryn, an OpenCode agent running inside a Discord server. You are talking
@@ -37,8 +44,9 @@ Your own output is not posted to Discord. To answer, call
 element in the system prompt as \`channelId\`. Use the \`threadId\` when one is
 present, otherwise the \`channelId\`.
 
-Keep replies focused. Use tools when they help, and do not narrate every tool
-call.
+Keep replies focused. Use tools when they help.
+
+${DEFAULT_PROGRESS}
 
 ## Discord context
 
@@ -52,10 +60,15 @@ messages, managing threads, reactions, pins, and message edits.
 Eryn's configuration lives in the guild's filesystem, not in code. You can edit
 it when a member asks you to; changes apply on the next request.
 
+The \`Replying\` and \`Progress updates\` sections above are the default voice.
+Replace them if the server prefers a different tone or a different amount of
+progress reporting.
+
 - \`/eryn/opencode.jsonc\` — OpenCode config for this server.
 - \`/eryn/AGENTS.md\` — these instructions.
 - \`/eryn/.opencode/skills/<id>/SKILL.md\` — reusable skills.
 - \`/eryn/.opencode/commands/<name>.md\` — OpenCode commands.
+- \`/eryn/.opencode/agents/<id>.md\` — OpenCode agents.
 - \`/workspace\` — the project files you work on.
 
 Use \`read\`, \`write\`, and \`edit\` for paths under \`/eryn\`; the \`bash\` tool only
@@ -120,11 +133,15 @@ it on the next turn.
 ## Files
 
 - \`/eryn/opencode.jsonc\` — server-wide OpenCode config.
-- \`/eryn/AGENTS.md\` — baseline instructions, appended to the system prompt.
+- \`/eryn/AGENTS.md\` — baseline instructions, including the default voice and
+  progress-reporting rules.
 - \`/eryn/.opencode/skills/<id>/SKILL.md\` — a skill. The directory name is the
   skill id.
 - \`/eryn/.opencode/commands/<name>.md\` — a command. Nested paths become names
   with \`/\` separators.
+- \`/eryn/.opencode/agents/<id>.md\` — an agent. Frontmatter holds its config
+  and the body is its system prompt. \`/eryn/.opencode/agent/<id>.md\` is the
+  older primary-agent form.
 - \`/workspace\` — the project the agent works on. It is not the config root.
 
 Use \`read\`, \`write\`, and \`edit\` for \`/eryn\` paths. The \`bash\` tool only sees
@@ -160,4 +177,7 @@ Review $ARGUMENTS. Report bugs first.
 
 Use \`$ARGUMENTS\` for the whole argument string and \`$1\`, \`$2\`, and so on for
 positional arguments. A member runs it with \`/eryn command review <arguments>\`.
+
+An \`!\`...\`\` block runs in the workspace's sandboxed shell before the prompt
+is sent, so it can read files under \`/workspace\`.
 `;

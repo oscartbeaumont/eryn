@@ -10,6 +10,7 @@
  * evaluate plugin code at runtime.
  */
 
+export { commandShellPlugin } from "./commands";
 export { discordPlugin } from "./discord";
 export { DISCORD_METADATA_KEY, readDiscordContext } from "./discord/context";
 export { mcpGuidancePlugin } from "./guidance";

@@ -801,29 +801,23 @@ class GuildAgentImpl implements GuildAgentShape {
 		const workspace = await readWorkspaceConfig(this.storage);
 		const merged = new Map<string, CommandInfo>();
 
-		// A cold Location activates config plugins asynchronously, so the host
-		// list may not have them yet. It still supplies built-ins. Skip it when
-		// the live host is for older files (another turn is still busy).
-		const warm = this.host !== undefined && this.host.workspace === config.workspace;
-		if (!this.host || warm) {
-			try {
-				const host = await this.hostFor(config);
-				let listed = await host.command.list({ location: { directory } });
-				if (!warm) {
-					// A just-built Location activates its post plugins a moment
-					// after the first read. One short retry fills in built-ins.
-					await new Promise((resolve) => setTimeout(resolve, 100));
-					listed = await host.command.list({ location: { directory } });
-				}
-				for (const command of listed.data) {
-					merged.set(command.name, {
-						name: command.name,
-						...(command.description ? { description: command.description } : {}),
-					});
-				}
-			} catch (error) {
-				log("session", `could not list the host's commands: ${describeError(error)}`);
+		try {
+			const host = await this.hostFor(config);
+			// `command.list` does not wait for a cold Location's plugins, but
+			// `agent.list` does. Using it as the activation barrier makes the
+			// built-in commands present on the first call, with no sleep or retry.
+			await host.agent.list({ location: { directory } }).catch((error) => {
+				log("session", `could not warm the command list: ${describeError(error)}`);
+			});
+			const listed = await host.command.list({ location: { directory } });
+			for (const command of listed.data) {
+				merged.set(command.name, {
+					name: command.name,
+					...(command.description ? { description: command.description } : {}),
+				});
 			}
+		} catch (error) {
+			log("session", `could not list the host's commands: ${describeError(error)}`);
 		}
 
 		// File-backed commands win by name and are always current.

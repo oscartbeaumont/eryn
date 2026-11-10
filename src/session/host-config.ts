@@ -16,6 +16,7 @@ import { resolveOrigin } from "../discord/application";
 import { describeError } from "../errors";
 import {
 	agentInstructionsPlugin,
+	commandShellPlugin,
 	discordPlugin,
 	guildMcpPlugin,
 	mcpGuidancePlugin,
@@ -123,8 +124,10 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	const workspace = await readWorkspaceConfig(storage);
 
 	// Every plugin is the promise API, which is what this host accepts.
+	const activeSkills = new Map<string, string>();
 	const plugins = [
-		workspacePlugin(storage),
+		workspacePlugin(storage, activeSkills),
+		commandShellPlugin(storage),
 		agentInstructionsPlugin(() => workspace.instructions),
 		discordPlugin(
 			rest,
@@ -133,7 +136,7 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
 		),
 	];
-	const skills = workspaceSkillsPlugin(workspace.skills);
+	const skills = workspaceSkillsPlugin(workspace.skills, activeSkills);
 	if (skills) plugins.push(skills);
 	const mcp = guildMcpPlugin(config.links);
 	if (mcp) plugins.push(mcp);

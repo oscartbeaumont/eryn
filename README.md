@@ -48,6 +48,28 @@ conversations. The agent's files live in a separate shared virtual workspace,
 not inside that project directory, so the grouping does not stop it reading or
 writing elsewhere.
 
+### Customising Eryn
+
+A guild's OpenCode files live in its virtual filesystem, so a member can ask
+Eryn to change them and the host rebuilds on the next turn.
+
+- `/eryn/AGENTS.md` — baseline instructions, including the default voice and
+  the progress-reporting rules. Replace the `Replying` and `Progress updates`
+  sections to change how Eryn talks.
+- `/eryn/opencode.jsonc` — OpenCode config for the server.
+- `/eryn/.opencode/skills/<id>/SKILL.md` — reusable skills.
+- `/eryn/.opencode/commands/<name>.md` — OpenCode commands.
+- `/eryn/.opencode/agents/<id>.md` — OpenCode agents.
+
+Command `!` shell blocks run in the workspace's sandboxed shell. Markdown agents
+under `.opencode/agents` are loaded like inline `agents` config, and a skill's
+relative supporting-file paths resolve against that skill's directory.
+
+The seeded `AGENTS.md` asks Eryn to give short progress updates at the start of
+long work, at major milestones, and before a long quiet operation, while
+staying silent for short tasks. Editing that section is the intended way to
+change the cadence.
+
 ### Commands
 
 - `/eryn setup` — providers, models, MCP servers, and status (needs Manage Server)

@@ -13,9 +13,9 @@
 import { Plugin } from "@opencode/plugin";
 
 import { WORKSPACE_ROOT } from "../../session/locations";
-import { objectSchema, toolRun, type ToolSpec } from "../tool";
+import { objectSchema, toolRun, type ToolCall, type ToolSpec } from "../tool";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes";
-import { resolvePath } from "./paths";
+import { resolvePath, resolveToolPath } from "./paths.ts";
 import { runShell } from "./shell";
 import { fileStore, type FileStore, type StoredFile } from "./store";
 
@@ -39,12 +39,29 @@ type FileInput = { filePath: string };
 type ReadInput = FileInput & { offset?: number; limit?: number };
 type EditInput = FileInput & { oldString: string; newString: string; replaceAll?: boolean };
 
-export function workspacePlugin(storage: DurableObjectStorage) {
+export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: ReadonlyMap<string, string>) {
 	const store = fileStore(storage);
 
-	/** Resolve a tool's path argument (`filePath` for files, `path` for a listing). */
-	const resolve = (input: { filePath?: string; path?: string }): string =>
-		resolvePath(WORKSPACE_ROOT, input.filePath ?? input.path ?? ".");
+	/**
+	 * Resolve a tool's path argument (`filePath` for files, `path` for a listing).
+	 *
+	 * A relative path is first tried against the skill the session is currently
+	 * using, then against the workspace root. That makes a skill's own
+	 * `references/foo.md` work without the model having to know the absolute
+	 * `/eryn/...` path.
+	 */
+	const resolve = (
+		input: { filePath?: string; path?: string },
+		call: ToolCall | undefined,
+		kind: "file" | "dir" = "file",
+	): Promise<string> =>
+		resolveToolPath(
+			store,
+			WORKSPACE_ROOT,
+			call && activeSkills ? activeSkills.get(call.sessionID) : undefined,
+			input.filePath ?? input.path ?? ".",
+			kind,
+		);
 
 	const tools: ToolSpec[] = [
 		{
@@ -58,9 +75,9 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 				},
 				["filePath"],
 			),
-			async run(rawInput) {
+			async run(rawInput, call) {
 				const { filePath, offset, limit } = rawInput as ReadInput;
-				const path = resolve({ filePath });
+				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
 				if (text === undefined) return `Error: ${path} does not exist`;
 				const lines = text.split("\n");
@@ -83,9 +100,9 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 				},
 				["filePath", "content"],
 			),
-			async run(rawInput) {
+			async run(rawInput, call) {
 				const { filePath, content } = rawInput as FileInput & { content: string };
-				const path = resolve({ filePath });
+				const path = await resolve({ filePath }, call, "file");
 				await writeText(store, path, content);
 				return `Wrote ${path} (${content.length} bytes)`;
 			},
@@ -103,9 +120,9 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 				},
 				["filePath", "oldString", "newString"],
 			),
-			async run(rawInput) {
+			async run(rawInput, call) {
 				const { filePath, oldString, newString, replaceAll } = rawInput as EditInput;
-				const path = resolve({ filePath });
+				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
 				if (text === undefined) return `Error: ${path} does not exist`;
 				const count = text.split(oldString).length - 1;
@@ -125,9 +142,9 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 			input: objectSchema({
 				path: { type: "string", description: "Directory to list (defaults to the workspace root)" },
 			}),
-			async run(rawInput) {
+			async run(rawInput, call) {
 				const { path: directory } = rawInput as { path?: string };
-				const prefix = resolve({ path: directory });
+				const prefix = await resolve({ path: directory }, call, "dir");
 				const files = (await store.list(prefix)).map((entry) => entry.path);
 				return files.length ? files.sort().join("\n") : `(empty: ${prefix})`;
 			},
@@ -146,7 +163,7 @@ export function workspacePlugin(storage: DurableObjectStorage) {
 			),
 			async run(rawInput) {
 				const { command, cwd } = rawInput as { command: string; cwd?: string };
-				const workingDirectory = resolve({ path: cwd });
+				const workingDirectory = resolvePath(WORKSPACE_ROOT, cwd ?? ".");
 				const result = await runShell(store, command, workingDirectory, WORKSPACE_ROOT);
 				const body = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
 				const suffix = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
