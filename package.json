@@ -15,13 +15,13 @@
     "test": "node --experimental-strip-types --test src/discord/*.test.ts src/session/*.test.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.3.1",
-    "@opencode/client": "2.2.5",
-    "@opencode/core": "2.2.5",
-    "@opencode/plugin": "2.2.5",
-    "@opencode/sdk": "2.2.5",
-    "@opencode/server": "2.2.5",
-    "effect": "4.0.6",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@opencode/client": "2.2.7",
+    "@opencode/core": "2.2.7",
+    "@opencode/plugin": "2.2.7",
+    "@opencode/sdk": "2.2.7",
+    "@opencode/server": "2.2.7",
+    "effect": "4.1.0",
     "jsonc-parser": "3.3.1",
     "just-bash": "3.6.0"
   },
