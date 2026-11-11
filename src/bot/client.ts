@@ -28,6 +28,7 @@ import {
 	InteractResponseSchema,
 	CommandResponseSchema,
 	PolicyStateSchema,
+	ResetResponseSchema,
 	type CommandInfo,
 	type CommandRequest,
 	type CommandResponse,
@@ -50,6 +51,7 @@ import {
 	type ProviderConnectRequest,
 	type ProviderConnectResponse,
 	type PublicLink,
+	type ResetResponse,
 } from "../session/models";
 
 const LinkListSchema = Schema.Struct({ links: Schema.Array(PublicLinkSchema) });
@@ -282,6 +284,11 @@ export class SessionClient {
 	/** Compact this conversation's history at a member's request. */
 	compact(threadId: string): Promise<CompactResponse> {
 		return this.call(ROUTES.compact, CompactResponseSchema, { threadId });
+	}
+
+	/** Wipe this guild's files and restore the seeded defaults. */
+	reset(): Promise<ResetResponse> {
+		return this.call(ROUTES.reset, ResetResponseSchema);
 	}
 
 	/** Whether this Discord user covers the conversation's schedule scope. */

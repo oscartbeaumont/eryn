@@ -16,5 +16,6 @@ export { DISCORD_METADATA_KEY, readDiscordContext } from "./discord/context";
 export { mcpGuidancePlugin } from "./guidance";
 export { agentInstructionsPlugin } from "./instructions";
 export { guildMcpPlugin } from "./mcp";
+export { sessionPlugin } from "./session";
 export { workspaceSkillsPlugin } from "./skills";
 export { workspacePlugin } from "./workspace";

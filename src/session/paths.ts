@@ -30,6 +30,8 @@ export const ROUTES = {
 	context: "/context",
 	interrupt: "/interrupt",
 	compact: "/compact",
+	/** Wipe the guild's files and restore the seeded defaults. */
+	reset: "/reset",
 	interact: "/interact",
 	policy: "/policy",
 	policySet: "/policy/set",

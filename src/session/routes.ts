@@ -480,6 +480,9 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			return json(await agent.compact(body.threadId, config));
 		}),
 
+		/** Wipe the guild's files and restore the seeded defaults. */
+		[ROUTES.reset]: route(GuildRefSchema, async () => json(await agent.reset())),
+
 		/** Whether a speaker covers the capability scope of this conversation. */
 		[ROUTES.interact]: route(InteractRequestSchema, async (body) =>
 			json(await agent.canInteract(body.threadId, body.userId)),

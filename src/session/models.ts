@@ -617,6 +617,12 @@ export const CompactResponseSchema = Schema.Struct({
 });
 export type CompactResponse = typeof CompactResponseSchema.Type;
 
+/** The number of files removed before the defaults were restored. */
+export const ResetResponseSchema = Schema.Struct({
+	files: Schema.Number,
+});
+export type ResetResponse = typeof ResetResponseSchema.Type;
+
 export const PolicyGetRequestSchema = guildScoped({
 	channelId: Schema.String,
 	threadId: Schema.optional(Schema.String),

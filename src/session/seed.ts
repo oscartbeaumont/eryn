@@ -3,9 +3,10 @@
  *
  * Seeding is versioned and additive: an existing file is never replaced, so a
  * member's edit survives a deploy. A new seed version only writes files that
- * are still absent. The one exception is the original default voice paragraph:
- * it is upgraded in place to include progress reporting, and only when it is
- * still exactly the old default. A customised voice is left alone.
+ * are still absent. Two upgrades edit a file in place, each only once: the
+ * original default voice gains progress reporting, and an `AGENTS.md` seeded
+ * before attribution existed gains the footer section. A customised file is
+ * otherwise left alone.
  */
 
 import { KEYS, log } from "../config.ts";
@@ -14,6 +15,7 @@ import { fileStore, type FileStore } from "../plugins/workspace/store.ts";
 import {
 	DEFAULT_AGENTS,
 	DEFAULT_AGENTS_PATH,
+	DEFAULT_ATTRIBUTION,
 	DEFAULT_CONFIG,
 	DEFAULT_CONFIG_PATH,
 	DEFAULT_CONFIG_SKILL,
@@ -56,7 +58,26 @@ async function upgradeDefaultVoice(store: FileStore): Promise<boolean> {
 	return true;
 }
 
-/** Write any missing defaults, and upgrade the default voice once. */
+/**
+ * Add the attribution footer to a guild seeded before it existed.
+ *
+ * The section is appended only when it is absent, so a member who removed it
+ * keeps it removed once the seed version advances past this upgrade.
+ */
+async function upgradeAttribution(store: FileStore): Promise<boolean> {
+	const file = await store.get(DEFAULT_AGENTS_PATH);
+	if (!file) return false;
+	const current = bytesToText(base64ToBytes(file.b));
+	if (current.includes("## Attribution")) return false;
+	const next = `${current.trimEnd()}\n\n${DEFAULT_ATTRIBUTION}\n`;
+	await store.put(DEFAULT_AGENTS_PATH, {
+		b: bytesToBase64(textToBytes(next)),
+		m: Date.now(),
+	});
+	return true;
+}
+
+/** Write any missing defaults, and apply the one-time seed upgrades. */
 export async function seedWorkspace(storage: DurableObjectStorage): Promise<void> {
 	const seeded = await storage.get<unknown>(KEYS.workspaceSeed);
 	if (typeof seeded === "number" && seeded >= SEED_VERSION) return;
@@ -71,7 +92,48 @@ export async function seedWorkspace(storage: DurableObjectStorage): Promise<void
 		});
 		written += 1;
 	}
-	const upgraded = typeof seeded === "number" && seeded < 2 ? await upgradeDefaultVoice(store) : false;
+	const upgradedVoice = typeof seeded === "number" && seeded < 2 ? await upgradeDefaultVoice(store) : false;
+	const upgradedAttribution = typeof seeded === "number" && seeded < 3 ? await upgradeAttribution(store) : false;
 	await storage.put(KEYS.workspaceSeed, SEED_VERSION);
-	if (written > 0 || upgraded) log("session", `seeded ${written} default files${upgraded ? " and upgraded the default voice" : ""}`);
+	const upgrades = [
+		...(upgradedVoice ? ["the default voice"] : []),
+		...(upgradedAttribution ? ["the attribution footer"] : []),
+	];
+	if (written > 0 || upgrades.length > 0) {
+		log(
+			"session",
+			`seeded ${written} default files${upgrades.length ? ` and upgraded ${upgrades.join(" and ")}` : ""}`,
+		);
+	}
+}
+
+/**
+ * Delete every file in the guild's virtual filesystem and restore the defaults.
+ *
+ * Providers, the chosen model, MCP links, and OpenCode session history are not
+ * files, so they survive. The seed marker is removed too, which makes the
+ * following seed behave exactly like a fresh guild's first one.
+ */
+export async function resetWorkspace(storage: DurableObjectStorage): Promise<number> {
+	let removed = 0;
+	let startAfter: string | undefined;
+	for (;;) {
+		const entries = await storage.list<unknown>({
+			prefix: KEYS.fs,
+			limit: 1_000,
+			...(startAfter ? { startAfter } : {}),
+		});
+		const keys = [...entries.keys()];
+		if (keys.length === 0) break;
+		for (let index = 0; index < keys.length; index += 128) {
+			await storage.delete(keys.slice(index, index + 128));
+		}
+		removed += keys.length;
+		if (keys.length < 1_000) break;
+		startAfter = keys[keys.length - 1];
+	}
+	await storage.delete(KEYS.workspaceSeed);
+	await seedWorkspace(storage);
+	log("session", `reset the workspace and removed ${removed} files`);
+	return removed;
 }

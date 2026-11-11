@@ -20,6 +20,7 @@ import {
 	discordPlugin,
 	guildMcpPlugin,
 	mcpGuidancePlugin,
+	sessionPlugin,
 	workspacePlugin,
 	workspaceSkillsPlugin,
 } from "../plugins";
@@ -123,12 +124,24 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	await seedWorkspace(storage);
 	const workspace = await readWorkspaceConfig(storage);
 
+	// The host asks this deployment for the catalogue over HTTP, so it needs the
+	// origin the Worker is served from. The same origin is the "hostname" the
+	// agent puts in its attribution footer.
+	const origin = await resolveOrigin(options.env);
+	if (!origin) {
+		throw new Error(
+			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
+		);
+	}
+	const hostname = new URL(origin).hostname;
+
 	// Every plugin is the promise API, which is what this host accepts.
 	const activeSkills = new Map<string, string>();
 	const plugins = [
 		workspacePlugin(storage, activeSkills),
 		commandShellPlugin(storage),
 		agentInstructionsPlugin(() => workspace.instructions),
+		sessionPlugin(hostname),
 		discordPlugin(
 			rest,
 			guildId,
@@ -147,15 +160,6 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
 		if (!catalogueProviders.has(integrationID)) continue;
 		for (const providerID of providerIDs) catalogueProviders.add(providerID);
-	}
-
-	// The host asks this deployment for the catalogue over HTTP, so it needs the
-	// origin the Worker is served from.
-	const origin = await resolveOrigin(options.env);
-	if (!origin) {
-		throw new Error(
-			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
-		);
 	}
 
 	const host = await createHost({

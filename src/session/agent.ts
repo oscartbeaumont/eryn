@@ -53,7 +53,7 @@ import {
 	withOverride,
 } from "./policy";
 import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
-import { seedWorkspace } from "./seed";
+import { resetWorkspace, seedWorkspace } from "./seed";
 import type { GuildStoreShape } from "./store";
 import { applyTurnEvent, createTurn, type Turn } from "./turn";
 import { readWorkspaceConfig, workspaceSignature } from "./workspace-config";
@@ -134,6 +134,8 @@ export interface GuildAgentShape {
 	commands(config: HostConfig, directory: string): Promise<CommandInfo[]>;
 	/** Compact one conversation's history, at a member's request. */
 	compact(threadId: string, config: HostConfig): Promise<CompactResponse>;
+	/** Wipe the guild's files and restore the seeded defaults. */
+	reset(): Promise<{ files: number }>;
 	/** The policy in effect in one channel or thread, before the menu renders it. */
 	policyState(input: { channelId: string; threadId?: string }): Promise<PolicyState>;
 	setPolicy(input: {
@@ -883,6 +885,22 @@ class GuildAgentImpl implements GuildAgentShape {
 			log("session", `could not compact ${threadId}: ${describeError(error)}`);
 			return { ok: false, message: "Eryn could not compact this conversation." };
 		}
+	}
+
+	/**
+	 * Wipe the guild's files and restore the seeded defaults.
+	 *
+	 * A reset is guild-wide and replaces the instructions a running turn may be
+	 * following, so it refuses while anything is still running. Closing the
+	 * host afterwards makes the next turn rebuild it from the fresh files.
+	 */
+	async reset(): Promise<{ files: number }> {
+		if (this.busy()) {
+			throw new Error("Eryn is still working in this server. Stop it and try again.");
+		}
+		const files = await resetWorkspace(this.storage);
+		await this.close();
+		return { files };
 	}
 
 	/** Resolve the command waiting on a manual compaction, if there is one. */

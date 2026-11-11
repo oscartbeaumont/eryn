@@ -53,9 +53,9 @@ writing elsewhere.
 A guild's OpenCode files live in its virtual filesystem, so a member can ask
 Eryn to change them and the host rebuilds on the next turn.
 
-- `/eryn/AGENTS.md` — baseline instructions, including the default voice and
-  the progress-reporting rules. Replace the `Replying` and `Progress updates`
-  sections to change how Eryn talks.
+- `/eryn/AGENTS.md` — baseline instructions, including the default voice, the
+  progress-reporting rules, and the attribution footer. Replace the `Replying`
+  and `Progress updates` sections to change how Eryn talks.
 - `/eryn/opencode.jsonc` — OpenCode config for the server.
 - `/eryn/.opencode/skills/<id>/SKILL.md` — reusable skills.
 - `/eryn/.opencode/commands/<name>.md` — OpenCode commands.
@@ -70,10 +70,21 @@ long work, at major milestones, and before a long quiet operation, while
 staying silent for short tasks. Editing that section is the intended way to
 change the cadence.
 
+Its `Attribution` section asks Eryn to end GitHub issues, pull requests, and
+comments with a footer naming the deployment, the model, and the session. Those
+values come from the `<session ... />` element Eryn adds to the system prompt,
+so they are never guessed. Remove that section if the server does not want the
+attribution.
+
+`/eryn reset` wipes every file, including `/workspace`, and restores the seeded
+defaults. Provider credentials, the chosen model, MCP links, conversation
+history, and policies are stored separately and are kept.
+
 ### Commands
 
 - `/eryn setup` — providers, models, MCP servers, and status (needs Manage Server)
 - `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)
+- `/eryn reset` — wipe the server's files and restore the seeded defaults (needs Manage Server)
 - `/eryn stop` — stop the run in this conversation
 - `/eryn compact` — compact this conversation's history
 - `/eryn command <name> [arguments]` — run an OpenCode command

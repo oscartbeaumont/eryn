@@ -8,7 +8,7 @@
 
 import { CONFIG_PATH, INSTRUCTIONS_PATH, COMMANDS_ROOT, SKILLS_ROOT } from "./locations.ts";
 
-export const SEED_VERSION = 2;
+export const SEED_VERSION = 3;
 
 export const DEFAULT_CONFIG_PATH = CONFIG_PATH;
 export const DEFAULT_AGENTS_PATH = INSTRUCTIONS_PATH;
@@ -31,6 +31,18 @@ During long work, send a short update when you start, at each major milestone,
 and before any operation that will be quiet for more than a couple of minutes.
 Say what changed or what you are waiting on in one sentence. Never narrate
 individual tool calls, and short tasks get no progress messages.`;
+
+export const DEFAULT_ATTRIBUTION = `## Attribution
+
+End every GitHub issue, pull request, and comment with this footer:
+
+\`<sub>Generated on _<hostname>_ using _<provider>/<model>_ in _<session>_</sub>\`
+
+Fill it from the \`<session ... />\` element in the system prompt: use its
+\`hostname\` for \`<hostname>\`, its \`model\` for \`<provider>/<model>\`, and its
+\`id\` for \`<session>\`. Do not guess these values.
+
+A member can ask you to remove this section to stop the attribution.`;
 
 export const DEFAULT_AGENTS = `# Eryn
 
@@ -55,6 +67,8 @@ and, in a thread, the thread. Inline \`<@id>\` tokens in user text are Discord
 mentions. The \`discord_*\` skill describes the tools available for reading
 messages, managing threads, reactions, pins, and message edits.
 
+${DEFAULT_ATTRIBUTION}
+
 ## Customising Eryn
 
 Eryn's configuration lives in the guild's filesystem, not in code. You can edit
@@ -70,6 +84,9 @@ progress reporting.
 - \`/eryn/.opencode/commands/<name>.md\` — OpenCode commands.
 - \`/eryn/.opencode/agents/<id>.md\` — OpenCode agents.
 - \`/workspace\` — the project files you work on.
+
+A member with Manage Server can run \`/eryn reset\` to wipe this filesystem and
+restore the seeded defaults.
 
 Use \`read\`, \`write\`, and \`edit\` for paths under \`/eryn\`; the \`bash\` tool only
 sees \`/workspace\`. The \`config\` skill explains the file layout and the fields
@@ -143,6 +160,9 @@ it on the next turn.
   and the body is its system prompt. \`/eryn/.opencode/agent/<id>.md\` is the
   older primary-agent form.
 - \`/workspace\` — the project the agent works on. It is not the config root.
+
+A member with Manage Server can run \`/eryn reset\` to wipe both roots and restore
+the seeded defaults.
 
 Use \`read\`, \`write\`, and \`edit\` for \`/eryn\` paths. The \`bash\` tool only sees
 \`/workspace\`.

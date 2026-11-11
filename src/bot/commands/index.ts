@@ -30,6 +30,7 @@ import { mcpComponent, mcpModal } from "./mcp";
 import { modelComponent, modelModalSubmit, modelScreen } from "./models";
 import { policyComponent, policyMenu } from "./policy";
 import { providerComponent, providerModal, providerScreen } from "./providers";
+import { resetComponent, resetScreen } from "./reset";
 import { helpText, setupComponent, setupMenu } from "./setup";
 
 /** The single command group Eryn registers. */
@@ -67,6 +68,7 @@ export function erynCommand(): DiscordCommand {
 			},
 			{ name: "commands", description: "List this conversation's OpenCode commands", type: 1 },
 			{ name: "policy", description: "Restrict what Eryn may do in this channel or thread", type: 1 },
+			{ name: "reset", description: "Reset Eryn's files to the defaults", type: 1 },
 			{ name: "help", description: "How Eryn is set up", type: 1 },
 		],
 	};
@@ -116,6 +118,7 @@ const COMPONENT_HANDLERS: readonly Handler<readonly string[]>[] = [
 	modelComponent,
 	mcpComponent,
 	policyComponent,
+	resetComponent,
 ];
 
 const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [providerModal, modelModalSubmit, mcpModal];
@@ -241,6 +244,8 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(request, "reply", () => modelScreen(request));
 		case "policy":
 			return await guarded(request, "reply", () => policyMenu(request));
+		case "reset":
+			return await guarded(request, "reply", () => resetScreen(request));
 		case "stop":
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;

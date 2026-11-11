@@ -19,7 +19,7 @@ import {
 	DEFAULT_CONFIG_PATH,
 	DEFAULT_EXPLAIN_COMMAND_PATH,
 } from "./defaults.ts";
-import { seedWorkspace } from "./seed.ts";
+import { resetWorkspace, seedWorkspace } from "./seed.ts";
 import {
 	CONFIG_PATH,
 	readWorkspaceConfig,
@@ -37,7 +37,12 @@ class MemoryStorage {
 		this.values.set(key, value);
 	}
 
-	async delete(key: string): Promise<boolean> {
+	async delete(key: string | string[]): Promise<boolean> {
+		if (Array.isArray(key)) {
+			let deleted = false;
+			for (const entry of key) deleted = this.values.delete(entry) || deleted;
+			return deleted;
+		}
 		return this.values.delete(key);
 	}
 
@@ -72,6 +77,43 @@ test("a fresh guild reads the seeded config, command, skills, and instructions",
 	assert.match(workspace.instructions ?? "", /You are Eryn/);
 	assert.match(workspace.instructions ?? "", /## Progress updates/);
 	assert.match(workspace.instructions ?? "", /short tasks get no progress messages/);
+	assert.match(workspace.instructions ?? "", /## Attribution/);
+	assert.match(workspace.instructions ?? "", /Generated on/);
+});
+
+test("an existing guild gains the attribution footer once", async () => {
+	const storage = new MemoryStorage();
+	await write(storage, DEFAULT_AGENTS_PATH, "# Eryn\n\nCustom note.\n");
+	await storage.put(KEYS.workspaceSeed, 2);
+
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	assert.match(workspace.instructions ?? "", /## Attribution/);
+	assert.match(workspace.instructions ?? "", /Custom note/);
+
+	// A member who removes the section keeps it removed on later deploys.
+	await write(storage, DEFAULT_AGENTS_PATH, "# Eryn\n\nCustom note.\n");
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const later = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	assert.doesNotMatch(later.instructions ?? "", /## Attribution/);
+});
+
+test("resetting removes every file and restores the seeded defaults", async () => {
+	const storage = new MemoryStorage();
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	await write(storage, "/workspace/project.md", "my work");
+	await write(storage, DEFAULT_AGENTS_PATH, "# Custom instructions\n");
+
+	const files = await resetWorkspace(storage as unknown as DurableObjectStorage);
+	assert.ok(files >= 6);
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	assert.match(workspace.instructions ?? "", /You are Eryn/);
+	assert.match(workspace.instructions ?? "", /## Attribution/);
+	assert.doesNotMatch(workspace.instructions ?? "", /Custom instructions/);
+	assert.equal(
+		await fileStore(storage as unknown as DurableObjectStorage).get("/workspace/project.md"),
+		undefined,
+	);
 });
 
 test("an existing guild gets the progress rules without losing its edits", async () => {
