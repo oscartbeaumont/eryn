@@ -314,6 +314,14 @@ export const PolicyChangeResponseSchema = Schema.Struct({
 });
 export type PolicyChangeResponse = typeof PolicyChangeResponseSchema.Type;
 
+/** One choice an MCP form offers, with the value the server expects back. */
+export const FormFieldOptionSchema = Schema.Struct({
+	value: Schema.String,
+	label: Schema.String,
+	description: Schema.optional(Schema.String),
+});
+export type FormFieldOption = typeof FormFieldOptionSchema.Type;
+
 /** One field an MCP form asks for, as Discord can render it. */
 export const FormFieldSchema = Schema.Struct({
 	key: Schema.String,
@@ -323,15 +331,21 @@ export const FormFieldSchema = Schema.Struct({
 	description: Schema.optional(Schema.String),
 	placeholder: Schema.optional(Schema.String),
 	url: Schema.optional(Schema.String),
-	options: Schema.optional(Schema.Array(Schema.String)),
+	options: Schema.optional(Schema.Array(FormFieldOptionSchema)),
+	/** Whether the server accepts a value outside `options`. */
+	custom: Schema.optional(Schema.Boolean),
+	minItems: Schema.optional(Schema.Number),
+	maxItems: Schema.optional(Schema.Number),
 });
 export type FormField = typeof FormFieldSchema.Type;
 
-/** The button a Discord interaction raises to open an MCP form. */
+/** A form as the Discord side sees it: the questions, not the UI controls. */
 export const FormViewSchema = Schema.Struct({
 	id: Schema.String,
 	title: Schema.String,
 	fields: Schema.Array(FormFieldSchema),
+	/** Indices of the fields already answered in the conversation. */
+	answered: Schema.Array(Schema.Number),
 });
 export type FormView = typeof FormViewSchema.Type;
 
@@ -665,6 +679,8 @@ export const FormReplyRequestSchema = guildScoped({
 	formId: Schema.String,
 	/** Keyed `f0`, `f1`, … in field order; the agent maps them back. */
 	values: Schema.Record(Schema.String, Schema.String),
+	/** Submit even when optional fields are still unanswered. */
+	submit: Schema.optional(Schema.Boolean),
 	userId: Schema.optional(Schema.String),
 	manager: Schema.optional(Schema.Boolean),
 });
@@ -674,6 +690,37 @@ export const FormCancelRequestSchema = guildScoped({
 	userId: Schema.optional(Schema.String),
 	manager: Schema.optional(Schema.Boolean),
 });
+
+/**
+ * Answer one field of a form from a button or select.
+ *
+ * `option` is the index into the field's own options, never a client-supplied
+ * value: the session maps it back, so a crafted id cannot submit an option the
+ * server did not offer. `values` is the select-menu form, which Discord sends
+ * as values rather than indices.
+ */
+export const FormFieldRequestSchema = guildScoped({
+	formId: Schema.String,
+	field: Schema.Number,
+	option: Schema.optional(Schema.Number),
+	values: Schema.optional(Schema.Array(Schema.String)),
+	userId: Schema.optional(Schema.String),
+	manager: Schema.optional(Schema.Boolean),
+});
+
+/** A message answering the next free-text field of a form. */
+export const FormTextRequestSchema = guildScoped({
+	threadId: Schema.String,
+	userId: Schema.String,
+	text: Schema.String,
+});
+
+export const FormTextResponseSchema = Schema.Struct({
+	/** Whether the message was a form answer, rather than a new request. */
+	consumed: Schema.Boolean,
+	message: Schema.optional(Schema.String),
+});
+export type FormTextResponse = typeof FormTextResponseSchema.Type;
 
 export const FormReplyResponseSchema = Schema.Struct({
 	ok: Schema.Boolean,

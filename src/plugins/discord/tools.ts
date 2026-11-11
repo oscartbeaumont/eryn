@@ -30,6 +30,7 @@ import {
 } from "../../discord/api";
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
+import { actionButton, buttonRow, selectRow } from "../../discord/components";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
@@ -463,6 +464,87 @@ export function discordTools(
 				if (!content.trim()) throw new Error("Message content is required.");
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
 				return await rest.sendMessage(channelId, content, replyTo ? { replyTo } : {});
+			},
+		},
+
+		{
+			name: "discord_ask",
+			description:
+				"Ask the person in this conversation a question. Pass options to show them as buttons (up to five) or, for longer lists, a select menu. The question is posted in the conversation and this tool returns immediately: end your turn after calling it. The answer arrives as a new message and starts the next turn.",
+			input: objectSchema(
+				{
+					question: { type: "string", description: "The question to ask" },
+					options: {
+						type: "array",
+						items: { type: "string" },
+						description: "Optional choices, up to 25",
+					},
+					multiple: {
+						type: "boolean",
+						description: "Allow more than one choice (default false)",
+					},
+				},
+				["question"],
+			),
+			async run(rawInput, call) {
+				const { question, options: rawOptions, multiple } = rawInput as {
+					question: string;
+					options?: string[];
+					multiple?: boolean;
+				};
+				const context = await sessionContext(call.sessionID);
+				if (context.scheduleTurn) {
+					throw new Error("A scheduled turn has no one to answer a question.");
+				}
+				const authorId = context.authorId;
+				if (!authorId) throw new Error("This turn has no Discord user to answer.");
+				const asked = question.trim().slice(0, 2_000);
+				if (!asked) throw new Error("A question is required.");
+
+				const options = [
+					...new Set((rawOptions ?? []).map((option) => option.trim()).filter(Boolean)),
+				].slice(0, 25);
+				const components = options.length
+					? [
+							options.length <= 5 && multiple !== true
+								? buttonRow(
+										options.map((option, index) =>
+											actionButton(option, `ask:b:${authorId}:${index}`, 2),
+										),
+									)
+								: selectRow({
+										type: 3,
+										custom_id: `ask:s:${authorId}`,
+										placeholder: "Choose an answer",
+										options: options.map((option, index) => ({
+											label: option.slice(0, 100),
+											value: String(index),
+										})),
+										min_values: 1,
+										max_values: multiple === true ? options.length : 1,
+									}),
+						]
+					: undefined;
+
+				const content = [
+					"❓ **Eryn has a question**",
+					asked,
+					options.length
+						? "_Choose an answer below._"
+						: "_Reply in this conversation with your answer._",
+				].join("\n");
+				await rest.sendMessage(
+					context.thread.id,
+					content.length > MAX_CONTENT ? `${content.slice(0, MAX_CONTENT - 10)}…` : content,
+					components ? { components } : {},
+				);
+
+				return {
+					posted: true,
+					question: asked,
+					...(options.length ? { options } : {}),
+					note: "The question is now in the conversation. End your turn; the answer will arrive as a new message.",
+				};
 			},
 		},
 

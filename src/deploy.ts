@@ -64,3 +64,19 @@ export function withDeploy(env: Versioned, init: RequestInit = {}): RequestInit 
 	headers.set(DEPLOY_HEADER, deploy);
 	return { ...init, headers };
 }
+
+/** Header naming the public origin the Worker is serving a request from. */
+export const ORIGIN_HEADER = "x-eryn-origin";
+
+/**
+ * Name the origin a call into an object is served from.
+ *
+ * An object only ever sees the Worker's internal URL, so it cannot tell a real
+ * deployment from `cf dev` on its own. The Worker knows, and says so here.
+ */
+export function withOrigin(init: RequestInit, origin: string | undefined): RequestInit {
+	if (!origin) return init;
+	const headers = new Headers(init.headers);
+	headers.set(ORIGIN_HEADER, origin);
+	return { ...init, headers };
+}

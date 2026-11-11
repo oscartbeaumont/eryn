@@ -28,8 +28,10 @@ import {
 	ContextUpdateRequestSchema,
 	DisconnectRequestSchema,
 	FormCancelRequestSchema,
+	FormFieldRequestSchema,
 	FormGetRequestSchema,
 	FormReplyRequestSchema,
+	FormTextRequestSchema,
 	GuildRefSchema,
 	InterruptRequestSchema,
 	InteractRequestSchema,
@@ -459,6 +461,10 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		}),
 
 		[ROUTES.formReply]: route(FormReplyRequestSchema, async (body) => json(await agent.replyForm(body))),
+
+		[ROUTES.formField]: route(FormFieldRequestSchema, async (body) => json(await agent.answerFormField(body))),
+
+		[ROUTES.formText]: route(FormTextRequestSchema, async (body) => json(await agent.answerFormText(body))),
 
 		[ROUTES.formCancel]: route(FormCancelRequestSchema, async (body) => json(await agent.cancelForm(body))),
 

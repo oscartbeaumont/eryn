@@ -25,6 +25,7 @@ import {
 	ProviderConnectResponseSchema,
 	PublicLinkSchema,
 	FormViewSchema,
+	FormTextResponseSchema,
 	InteractResponseSchema,
 	CommandResponseSchema,
 	PolicyStateSchema,
@@ -36,6 +37,7 @@ import {
 	type DiscordContext,
 	type ElicitationMode,
 	type FormView,
+	type FormTextResponse,
 	type GuildStatus,
 	type IntegrationOption,
 	type InteractResponse,
@@ -261,8 +263,14 @@ export class SessionClient {
 		formId: string,
 		values: Record<string, string>,
 		auth: { userId?: string; manager?: boolean } = {},
+		submit = false,
 	): Promise<{ ok: boolean; message?: string }> {
-		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, { formId, values, ...auth });
+		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, {
+			formId,
+			values,
+			...(submit ? { submit } : {}),
+			...auth,
+		});
 	}
 
 	cancelForm(
@@ -270,6 +278,29 @@ export class SessionClient {
 		auth: { userId?: string; manager?: boolean } = {},
 	): Promise<{ ok: boolean; message?: string }> {
 		return this.call(ROUTES.formCancel, ApprovalReplyResponseSchema, { formId, ...auth });
+	}
+
+	answerFormField(
+		formId: string,
+		field: number,
+		answer: { option?: number; values?: readonly string[] },
+		auth: { userId?: string; manager?: boolean } = {},
+	): Promise<{ ok: boolean; message?: string }> {
+		return this.call(ROUTES.formField, ApprovalReplyResponseSchema, {
+			formId,
+			field,
+			...(answer.option !== undefined ? { option: answer.option } : {}),
+			...(answer.values !== undefined ? { values: answer.values } : {}),
+			...auth,
+		});
+	}
+
+	answerFormText(input: {
+		threadId: string;
+		userId: string;
+		text: string;
+	}): Promise<FormTextResponse> {
+		return this.call(ROUTES.formText, FormTextResponseSchema, input);
 	}
 
 	async interrupt(threadId: string, gone: boolean): Promise<boolean> {

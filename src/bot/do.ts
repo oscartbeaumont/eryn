@@ -23,9 +23,9 @@ import { DurableObject } from "cloudflare:workers";
 import { Option, Schema } from "effect";
 
 import { INTERACTIONS_PATH, log as botLog } from "../config";
-import { deployRestart } from "../deploy";
+import { ORIGIN_HEADER, deployRestart } from "../deploy";
 import { describeError } from "../errors";
-import { json } from "../http";
+import { isLoopback, json } from "../http";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
 import { applicationId, resolveOrigin } from "../discord/application";
 import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
@@ -39,6 +39,7 @@ import {
 } from "../discord/socket";
 import { DiscordContextSchema, type DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
+import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
@@ -52,6 +53,12 @@ const THREAD_PREFIX = "thread:";
 const CHANNEL_PREFIX = "channel:";
 const WATCH_PREFIX = "watch:";
 const RENAME_PREFIX = "rename:";
+/** One guild the bot is in, so a restart knows where to refresh its commands. */
+const GUILD_PREFIX = "guild:";
+/** The origin this deployment serves on, which is what proves it is not `cf dev`. */
+const COMMAND_ORIGIN_KEY = "commands:origin";
+/** How many guilds one command sync writes to at a time. */
+const COMMAND_SYNC_CONCURRENCY = 5;
 /**
  * How often the keepalive alarm runs.
  *
@@ -67,6 +74,20 @@ const KEEPALIVE_MS = 120_000;
 
 function log(message: string): void {
 	botLog("gateway", message);
+}
+
+/** Whether an origin is a development server on this machine. */
+function isLocalOrigin(origin: string): boolean {
+	try {
+		return isLoopback(new URL(origin).hostname);
+	} catch {
+		return false;
+	}
+}
+
+/** Discord's message limit, with room for the ellipsis. */
+function truncate(text: string): string {
+	return text.length > 2_000 ? `${text.slice(0, 1_990)}…` : text;
 }
 
 /** A message whose threads the agent asked to be told about. */
@@ -144,6 +165,12 @@ export class BotGateway extends DurableObject<Env> {
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
+	/** The origin requests are served from, once one has said so. */
+	private servedOrigin: string | undefined;
+	/** The command registration this instance is running, so it happens once. */
+	private commands: Promise<void> | undefined;
+	/** Whether this instance has registered its commands. */
+	private commandsSynced = false;
 	/**
 	 * Whether this instance has seen a newer deploy. Deliberately not persisted:
 	 * an abort discards storage writes, so a marker would outlive the restart and
@@ -215,6 +242,7 @@ export class BotGateway extends DurableObject<Env> {
 			return;
 		}
 		await this.keepAlive();
+		await this.ensureCommands();
 	}
 
 	/**
@@ -232,6 +260,10 @@ export class BotGateway extends DurableObject<Env> {
 
 	async fetch(request: Request): Promise<Response> {
 		const { pathname } = new URL(request.url);
+		// The Worker says which origin it is serving. It is how this object tells
+		// a deployment from `cf dev`, which runs the same application and token.
+		const served = request.headers.get(ORIGIN_HEADER);
+		if (served && served !== this.servedOrigin) await this.rememberOrigin(served);
 		if (pathname === INTERACTION_PATH) {
 			await this.ensureCurrentVersion(request);
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
@@ -241,6 +273,7 @@ export class BotGateway extends DurableObject<Env> {
 			// acknowledges through the interaction callback endpoint. The payload is
 			// passed on untouched; only the ids the bot needs are checked here.
 			await this.onInteraction(body as DiscordInteraction);
+			await this.ensureCommands();
 			return json({ ok: true });
 		}
 		if (pathname === SUBSCRIPTION_PATH) {
@@ -281,6 +314,9 @@ export class BotGateway extends DurableObject<Env> {
 			// Arm the restart *after* keepAlive: the keepalive alarm is the long
 			// one, and setting it last would replace the one-second restart alarm.
 			await this.ensureCurrentVersion(request);
+			// A cold start has not registered the commands yet; a wake is the place
+			// to do it, because no interaction is waiting on the result.
+			await this.ensureCommands();
 			const deploy = await this.ctx.storage.get<string>("deploy:version");
 			return json({
 				ok: true,
@@ -294,7 +330,7 @@ export class BotGateway extends DurableObject<Env> {
 		return json({ error: "not found" }, 404);
 	}
 
-	/** Resolve the bot identity, register commands, and connect. Idempotent. */
+	/** Resolve the bot identity and connect. Idempotent. */
 	private ensure(): Promise<void> {
 		if (!this.token) return Promise.resolve();
 		this.initialization ??= this.initialize().catch((error) => {
@@ -308,7 +344,6 @@ export class BotGateway extends DurableObject<Env> {
 		const me = await this.rest.me();
 		this.botUserId = me.id;
 		log(`signed in as ${me.username ?? me.id}`);
-		await this.syncCommands(me.id);
 		await this.syncInteractionsEndpoint();
 		await this.connectGateway();
 	}
@@ -378,19 +413,132 @@ export class BotGateway extends DurableObject<Env> {
 	}
 
 	/**
-	 * Make Discord's copy of the commands match this build.
+	 * Register the commands, once per instance, and only from a deployment.
+	 *
+	 * A write bumps the command's version, and Discord answers an interaction
+	 * from a client still holding the previous copy with "This command is
+	 * outdated, please try again in a few minutes". So registration waits until
+	 * this object has been told where it is served: `cf dev` runs the same
+	 * application (and token) as production, and a local run must never rewrite
+	 * the real commands.
+	 */
+	private ensureCommands(): Promise<void> {
+		if (this.commandsSynced || !this.token) return Promise.resolve();
+		this.commands ??= this.registerCommands()
+			.catch((error) => log(`could not register the commands, will retry: ${describeError(error)}`))
+			.finally(() => {
+				this.commands = undefined;
+			});
+		return this.commands;
+	}
+
+	private async registerCommands(): Promise<void> {
+		const applicationId = this.botUserId;
+		if (!applicationId) return;
+		const origin = this.servedOrigin ?? (await this.ctx.storage.get<string>(COMMAND_ORIGIN_KEY));
+		// Nothing has said where this object is served, so it cannot tell a
+		// deployment from a development server. Waiting costs nothing; guessing
+		// costs every client a stale copy of the command.
+		if (!origin) return;
+		if (isLocalOrigin(origin)) {
+			// A development server may still register commands for an application
+			// nothing else serves: a separate dev app has no interactions endpoint
+			// of its own yet, while the one production runs always has.
+			try {
+				if (await this.rest.interactionsEndpoint()) return;
+			} catch (error) {
+				// Unsure whether this is the shared application: leave it alone.
+				log(`could not tell whether this is the shared application: ${describeError(error)}`);
+				return;
+			}
+		}
+		// A pass that could not reach Discord is retried on the next wake; only a
+		// complete one counts as done. A failed read never turns into a write.
+		this.commandsSynced =
+			(await this.syncCommands(applicationId)) && (await this.syncGuildCommands(applicationId));
+	}
+
+	/**
+	 * Remember where requests are served from, so a restart knows too.
+	 *
+	 * A development origin is kept in memory only: production's origin is the
+	 * one that has to survive an eviction.
+	 */
+	private async rememberOrigin(origin: string): Promise<void> {
+		this.servedOrigin = origin;
+		if (isLocalOrigin(origin)) return;
+		await this.ctx.storage.put(COMMAND_ORIGIN_KEY, origin).catch(() => undefined);
+	}
+
+	/**
+	 * Make Discord's global copy of the commands match this build.
 	 *
 	 * Compared against what Discord actually holds rather than a version marker,
 	 * so a restart with unchanged commands writes nothing: every write bumps the
 	 * command version, and a client holding the previous copy then refuses the
-	 * command with "This command is outdated".
+	 * command with "This command is outdated". A failed read is not an empty
+	 * list either, and answering one with a write would bump the version for no
+	 * reason at all.
 	 */
-	private async syncCommands(applicationId: string): Promise<void> {
+	private async syncCommands(applicationId: string): Promise<boolean> {
 		const desired = [erynCommand()];
-		const registered = await this.rest.listCommands(applicationId).catch(() => undefined);
-		if (registered && sameCommands(registered, desired)) return;
+		const registered = await this.rest.listCommands(applicationId).catch((error) => {
+			log(`could not read the global commands, leaving them alone: ${describeError(error)}`);
+			return undefined;
+		});
+		if (!registered) return false;
+		if (sameCommands(registered, desired)) return true;
 		await this.rest.overwriteCommands(applicationId, desired);
-		log(registered ? "updated the global commands" : "registered the global commands");
+		log("updated the global commands");
+		return true;
+	}
+
+	/**
+	 * Mirror the commands into every guild the bot is in.
+	 *
+	 * Discord refreshes a guild's commands immediately, while a global command
+	 * can stay stale in a client for up to an hour. The guild copy is what keeps
+	 * `/eryn` usable straight after a deploy; the global copy stays for DMs and
+	 * for a guild whose own copy has not been written yet.
+	 */
+	private async syncGuildCommands(applicationId: string): Promise<boolean> {
+		const guilds = await this.ctx.storage.list<boolean>({ prefix: GUILD_PREFIX });
+		const ids = [...guilds.keys()].map((key) => key.slice(GUILD_PREFIX.length));
+		// A large bot is in too many guilds to ask about them one at a time within
+		// a single request. The client retries a rate-limited call itself, so a
+		// small window is enough to keep the pass quick without tripping 429s.
+		let complete = true;
+		for (let index = 0; index < ids.length; index += COMMAND_SYNC_CONCURRENCY) {
+			const results = await Promise.all(
+				ids
+					.slice(index, index + COMMAND_SYNC_CONCURRENCY)
+					.map((id) => this.syncGuild(id, applicationId)),
+			);
+			if (results.includes(false)) complete = false;
+		}
+		return complete;
+	}
+
+	/** Make one guild's copy of the commands match this build. False means retry later. */
+	private async syncGuild(guildId: string, applicationId: string): Promise<boolean> {
+		const desired = [erynCommand()];
+		try {
+			const registered = await this.rest.listGuildCommands(applicationId, guildId);
+			if (!registered || sameCommands(registered, desired)) return true;
+			await this.rest.overwriteGuildCommands(applicationId, guildId, desired);
+			log(`registered the commands in guild ${guildId}`);
+			return true;
+		} catch (error) {
+			// Gone from the guild, or its install is: forget it rather than asking
+			// Discord again on every restart.
+			if (error instanceof DiscordError && (error.status === 403 || error.status === 404)) {
+				log(`forgetting guild ${guildId}: Discord answered ${error.status}`);
+				await this.ctx.storage.delete(GUILD_PREFIX + guildId).catch(() => undefined);
+				return true;
+			}
+			log(`could not sync the commands in guild ${guildId}: ${describeError(error)}`);
+			return false;
+		}
 	}
 
 	private async keepAlive(): Promise<void> {
@@ -425,6 +573,15 @@ export class BotGateway extends DurableObject<Env> {
 
 	private async onGuild(guild: DiscordGuildCreate): Promise<void> {
 		await maybeAnnounceInstall(this.rest, this.ctx.storage, guild, this.botUserId);
+		// Remember every guild, so a restart can refresh the guild-scoped copy of
+		// the commands there. A guild this instance has not seen before also needs
+		// its copy now, because the registration pass has already run.
+		const key = GUILD_PREFIX + guild.id;
+		if ((await this.ctx.storage.get<boolean>(key)) === true) return;
+		await this.ctx.storage.put(key, true);
+		const applicationId = this.botUserId;
+		if (!applicationId || !this.commandsSynced) return;
+		await this.syncGuild(guild.id, applicationId);
 	}
 
 	/** A guild rename only has to reach the next context build. */
@@ -567,6 +724,13 @@ export class BotGateway extends DurableObject<Env> {
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
+		// An answer button starts the next turn; it is not part of the setup
+		// flows, so it is handled here where the gateway can start a prompt.
+		const customId = interaction.data?.custom_id;
+		if (interaction.type === 3 && customId?.startsWith("ask:")) {
+			await this.answerAsk(interaction, customId);
+			return;
+		}
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
@@ -579,6 +743,122 @@ export class BotGateway extends DurableObject<Env> {
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);
+	}
+
+	/**
+	 * A click on one of the agent's question buttons.
+	 *
+	 * The question is not a tool call waiting for an answer: the agent's turn
+	 * ended when it posted the message. The click is therefore a new user turn,
+	 * exactly as if the person had typed the answer.
+	 */
+	private async answerAsk(interaction: DiscordInteraction, customId: string): Promise<void> {
+		const guildId = interaction.guild_id;
+		const channelId = interaction.channel_id;
+		if (!guildId || !channelId) return;
+		const [prefix, kind, askedId] = customId.split(":");
+		if (prefix !== "ask" || (kind !== "b" && kind !== "s") || !askedId) return;
+
+		const user = interaction.member?.user ?? interaction.user;
+		const userId = user?.id;
+		if (!userId) return;
+		if (userId !== askedId && !canManage(interaction)) {
+			await this.rest
+				.interactionReply(interaction.id, interaction.token, "Only the person who was asked can answer this.")
+				.catch(() => undefined);
+			return;
+		}
+
+		const answer = await this.askAnswer(interaction, customId, kind === "s");
+		if (!answer) {
+			await this.rest
+				.interactionReply(
+					interaction.id,
+					interaction.token,
+					"That answer could not be read. Reply in the conversation instead.",
+				)
+				.catch(() => undefined);
+			return;
+		}
+		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return;
+
+		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
+			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		});
+		if (!allowed.ok) {
+			await this.rest
+				.interactionReply(
+					interaction.id,
+					interaction.token,
+					allowed.message ?? "Only people who can access this conversation can answer here.",
+				)
+				.catch(() => undefined);
+			return;
+		}
+
+		const context = await this.conversationContext(guildId, channelId);
+		if (!context) {
+			await this.rest
+				.interactionReply(interaction.id, interaction.token, "I could not read this conversation. Try again.")
+				.catch(() => undefined);
+			return;
+		}
+
+		const question = (interaction.message?.content ?? "")
+			.replace(
+				/\n_(?:Choose an answer below\.|Reply in this conversation with your answer\.)_\s*$/,
+				"",
+			)
+			.trim();
+		const content = question ? `${question}\n\n**Answer:** ${answer}` : `**Answer:** ${answer}`;
+		await this.rest
+			.interactionUpdate(interaction.id, interaction.token, truncate(content), { components: [] })
+			.catch(() => undefined);
+
+		const message: DiscordMessage = {
+			id: interaction.message?.id ?? interaction.id,
+			channel_id: channelId,
+			guild_id: guildId,
+			content: answer,
+			...(user ? { author: user } : {}),
+			...(interaction.member?.nick ? { member: { nick: interaction.member.nick } } : {}),
+		};
+		this.track(
+			() => this.forward(guildId, channelId, threadName(answer), answer, message, context),
+			"could not start a turn from a question answer",
+		);
+	}
+
+	/** The label behind the component that was clicked, or undefined. */
+	private async askAnswer(
+		interaction: DiscordInteraction,
+		customId: string,
+		select: boolean,
+	): Promise<string | undefined> {
+		const rows =
+			interaction.message?.components ??
+			(interaction.message?.id && interaction.channel_id
+				? (await this.rest.message(interaction.channel_id, interaction.message.id).catch(() => undefined))
+						?.components
+				: undefined) ??
+			[];
+		const components = rows.flatMap((row) => row.components ?? []);
+		if (select) {
+			const component = components.find(
+				(candidate) => candidate.type === 3 && candidate.custom_id === customId,
+			);
+			if (!component || component.type !== 3) return undefined;
+			const values = interaction.data?.values ?? [];
+			const labels = values.map(
+				(value) => component.options[Number(value)]?.label ?? value,
+			);
+			return labels.filter(Boolean).join(", ") || undefined;
+		}
+		const component = components.find(
+			(candidate) => candidate.type === 2 && candidate.custom_id === customId,
+		);
+		return component && component.type === 2 ? component.label : undefined;
 	}
 
 	/** Build the same context a message in this conversation would carry. */
@@ -699,14 +979,32 @@ export class BotGateway extends DurableObject<Env> {
 			await this.stopThread(guildId, channel.id);
 			return;
 		}
+		const authorId = message.author?.id;
+		if (!authorId) return;
+
+		// A running turn blocked on a question cannot take a new prompt. While a
+		// form waits for free text, a message from the requester is the answer.
+		if (text) {
+			const answered: { consumed: boolean; message?: string } = await this.session(guildId)
+				.answerFormText({ threadId: channel.id, userId: authorId, text })
+				.catch((error) => {
+					log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
+					return { consumed: false };
+				});
+			if (answered.consumed) {
+				if (answered.message) {
+					await this.rest.sendMessage(channel.id, answered.message).catch(() => undefined);
+				}
+				return;
+			}
+		}
+
 		if ((await this.guildReady(guildId)) === false) {
 			await this.requireSetup(channel.id);
 			return;
 		}
 		// A scheduled conversation has a capability scope. A member below that
 		// scope may still read a public thread, but must not steer the session.
-		const authorId = message.author?.id;
-		if (!authorId) return;
 		const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
 			log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };

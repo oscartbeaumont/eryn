@@ -33,11 +33,11 @@ serves the landing page, the install redirect, the MCP sign-in callback, the
 models.dev catalogue, and the health check.
 
 `BotGateway` is the single bot: it holds the Discord gateway socket (one
-connection per shard), registers the global commands, and dispatches
-interactions. It forwards each guild's work to that guild's `BotSession`,
-which owns the OpenCode host, the provider credentials, the MCP links, and a
-virtual filesystem kept in SQLite-backed Durable Object storage. Credentials
-and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
+connection per shard), registers the commands globally and in each guild, and
+dispatches interactions. It forwards each guild's work to that guild's
+`BotSession`, which owns the OpenCode host, the provider credentials, the MCP
+links, and a virtual filesystem kept in SQLite-backed Durable Object storage.
+Credentials and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
 
 ### Projects and workspace
 
@@ -47,6 +47,15 @@ the project list is grouped by channel instead of being one flat list of
 conversations. The agent's files live in a separate shared virtual workspace,
 not inside that project directory, so the grouping does not stop it reading or
 writing elsewhere.
+
+### Questions and approvals
+
+When an MCP server needs information, Eryn posts the question in the
+conversation instead of opening a separate form. Choice fields become buttons or
+a select menu, free text is answered by replying in the thread, and the answer
+is submitted once every required field is in. The agent can ask the same kind of
+question itself with the `discord_ask` tool; that posts the question and ends the
+turn, and the answer arrives as the next message.
 
 ### Customising Eryn
 

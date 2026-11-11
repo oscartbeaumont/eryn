@@ -40,4 +40,6 @@ export const ROUTES = {
 	form: "/form",
 	formReply: "/form/reply",
 	formCancel: "/form/cancel",
+	formField: "/form/field",
+	formText: "/form/text",
 } as const;

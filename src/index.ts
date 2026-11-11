@@ -21,7 +21,7 @@ import { catalogueResponse, isCatalogueRequest } from "./catalogue";
 import { APPLICATION_PUBLIC_KEY, configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
-import { withDeploy } from "./deploy";
+import { withDeploy, withOrigin } from "./deploy";
 import { application, applicationId, ensureEndpoint } from "./discord/application";
 import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
@@ -49,10 +49,10 @@ const isRead = (request: Request): boolean => request.method === "GET" || reques
  * restart has had a moment: that brings the socket back immediately instead of
  * leaving the bot offline until the next cron tick.
  */
-export async function wake(env: Env): Promise<WakeState | undefined> {
+export async function wake(env: Env, origin?: string): Promise<WakeState | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
 	const call = async (): Promise<WakeState | undefined> => {
-		const response = await stub.fetch("https://bot.internal/wake", withDeploy(env));
+		const response = await stub.fetch("https://bot.internal/wake", withOrigin(withDeploy(env), origin));
 		if (!response.ok) return undefined;
 		return (await response.json().catch(() => undefined)) as WakeState | undefined;
 	};
@@ -150,11 +150,14 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 		env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"))
 			.fetch(
 				"https://bot.internal/interaction",
-				withDeploy(env, {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body,
-				}),
+				withOrigin(
+					withDeploy(env, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body,
+					}),
+					new URL(request.url).origin,
+				),
 			)
 			.then((response) => {
 				if (!response.ok) log("interactions", `the bot object returned HTTP ${response.status}`);
@@ -340,7 +343,7 @@ export default {
 			// that leaves it offline is visible from one request. The deploy id says
 			// which code is actually serving: a Durable Object keeps the code it
 			// started with until it restarts.
-			const botState = await wake(env).catch(() => undefined);
+			const botState = await wake(env, new URL(request.url).origin).catch(() => undefined);
 			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
 		}
 
@@ -348,6 +351,6 @@ export default {
 	},
 
 	scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-		ctx.waitUntil(wake(env).catch(() => undefined));
+		ctx.waitUntil(wake(env, configuredOrigin(env)).catch(() => undefined));
 	},
 } satisfies ExportedHandler<Env>;

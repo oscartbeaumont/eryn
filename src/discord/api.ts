@@ -84,6 +84,8 @@ export interface DiscordMessageView {
 	mentions?: DiscordUser[];
 	attachments?: DiscordAttachment[];
 	referenced_message?: { id?: string } | null;
+	/** The action rows still attached to the message, when it has any. */
+	components?: readonly DiscordComponent[];
 }
 
 /** The subset of a role this bot reads. Managed bot roles carry `tags.bot_id`. */
@@ -568,6 +570,17 @@ export function discordRest(token: string) {
 			return await request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
 		},
 
+		/** The application's commands in one guild. */
+		async listGuildCommands(
+			applicationId: string,
+			guildId: string,
+		): Promise<readonly DiscordRegisteredCommand[] | undefined> {
+			return await request<DiscordRegisteredCommand[]>(
+				"GET",
+				`/applications/${applicationId}/guilds/${guildId}/commands`,
+			);
+		},
+
 		/** Discord's recommended gateway shard count for this bot. */
 		async gatewayShards(): Promise<number> {
 			const result = await request<{ shards?: unknown }>("GET", "/gateway/bot");
@@ -598,6 +611,15 @@ export function discordRest(token: string) {
 		/** Replace the application's global commands. */
 		async overwriteCommands(applicationId: string, commands: readonly DiscordCommand[]): Promise<void> {
 			await request<unknown>("PUT", `/applications/${applicationId}/commands`, commands);
+		},
+
+		/** Replace the application's commands in one guild. */
+		async overwriteGuildCommands(
+			applicationId: string,
+			guildId: string,
+			commands: readonly DiscordCommand[],
+		): Promise<void> {
+			await request<unknown>("PUT", `/applications/${applicationId}/guilds/${guildId}/commands`, commands);
 		},
 	};
 }
