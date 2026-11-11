@@ -134,7 +134,9 @@ export async function handleInteraction(ctx: CommandContext, interaction: Discor
 			// Approvals and form cards belong to the conversation, not to the
 			// setup flow: a requester without Manage Server can still answer one.
 			if (customId?.startsWith("approval:")) return await handleApproval(ctx, interaction, customId);
-			if (customId?.startsWith("form:")) return await handleFormComponent(ctx, interaction, customId);
+			if (customId?.startsWith("form:")) {
+				return await handleFormComponent(ctx, interaction, customId, interaction.data?.values ?? []);
+			}
 			return await dispatch(ctx, interaction, COMPONENT_HANDLERS, interaction.data?.values ?? []);
 		case 5:
 			if (customId?.startsWith("form:modal:")) {
@@ -418,74 +420,129 @@ async function handleApproval(
 		.catch(() => undefined);
 }
 
-/** Open, or acknowledge, an MCP form card. `form:<open|done>:<formId>`. */
+/**
+ * Answer an MCP form from the conversation it was posted in.
+ *
+ * Ids are `form:<action>:[field]:[option]:<formId>` for a button, and
+ * `form:select:<field>:<formId>` for a select. The form id comes last so a
+ * server-assigned id containing a colon survives the split.
+ */
 async function handleFormComponent(
 	ctx: CommandContext,
 	interaction: DiscordInteraction,
 	customId: string,
+	values: readonly string[],
 ): Promise<void> {
 	const guildId = interaction.guild_id;
 	if (!guildId) return;
-	const [, action, ...rest] = customId.split(":");
-	const formId = rest.join(":");
-	if (!formId) return;
+	const parts = customId.split(":");
+	const action = parts[1];
+	if (!action) return;
 	const session = ctx.session(guildId);
 	const userId = interaction.member?.user?.id ?? interaction.user?.id;
 	const manager = canManage(interaction);
+	const auth = { ...(userId ? { userId } : {}), manager };
 
-	if (action === "done" || action === "cancel") {
-		await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
-		const result =
-			action === "done"
-				? await session
-						.replyForm(formId, {}, { ...(userId ? { userId } : {}), manager })
-						.catch((error) => ({ ok: false, message: describeError(error) }))
-				: await session
-						.cancelForm(formId, { ...(userId ? { userId } : {}), manager })
-						.catch((error) => ({ ok: false, message: describeError(error) }));
+	if (action === "open") {
+		const formId = parts.slice(2).join(":");
+		if (!formId) return;
+		const view = await session.form(formId, auth).catch(() => undefined);
+		if (!view) {
+			await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
+			return;
+		}
+		const fields = view.fields
+			.map((field, index) => ({ field, index }))
+			.filter(({ index }) => !view.answered.includes(index))
+			.slice(0, 5);
+		if (fields.length === 0) {
+			await rejectInteraction(ctx, interaction, "That form is already answered.");
+			return;
+		}
+		const hint = (field: (typeof fields)[number]["field"]) =>
+			field.type === "boolean"
+				? " (yes/no)"
+				: field.type === "number" || field.type === "integer"
+					? " (number)"
+					: "";
 		await ctx.rest
-			.interactionEditOriginal(
-				ctx.applicationId,
+			.interactionModal(
+				interaction.id,
 				interaction.token,
-				result.ok
-					? action === "done"
-						? "Answered."
-						: "Cancelled."
-					: result.message ?? "That form is no longer waiting.",
-				{ components: [] },
+				textModal(
+					`form:modal:${formId}`,
+					view.title.slice(0, 45),
+					fields.map(({ field, index }) =>
+						textInput({
+							custom_id: `f${index}`,
+							label: `${field.title}${hint(field)}`.slice(0, 45),
+							// A field with options is answered by its buttons; forcing
+							// text entry for it would make the modal block a user who
+							// only wanted to type the free-text question.
+							required: field.required && (field.options?.length ?? 0) === 0,
+							max_length: 1_000,
+							...(field.description || field.placeholder
+								? { placeholder: (field.description ?? field.placeholder ?? "").slice(0, 100) }
+								: {}),
+						}),
+					),
+				),
 			)
 			.catch(() => undefined);
 		return;
 	}
 
-	if (action !== "open") return;
-	const view = await session.form(formId, { ...(userId ? { userId } : {}), manager }).catch(() => undefined);
-	if (!view) {
-		await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
+	if (action === "pick" || action === "select") {
+		const field = Number(parts[2]);
+		if (!Number.isInteger(field)) return;
+		const formId =
+			action === "pick" ? parts.slice(4).join(":") : parts.slice(3).join(":");
+		if (!formId) return;
+		const option = action === "pick" && parts[3] !== "" ? Number(parts[3]) : undefined;
+		if (action === "pick" && option !== undefined && !Number.isInteger(option)) return;
+
+		const answer =
+			action === "pick"
+				? { ...(option !== undefined ? { option } : {}) }
+				: { values: [...values] };
+		await answerForm(ctx, interaction, () => session.answerFormField(formId, field, answer, auth));
 		return;
 	}
-	const fields = view.fields.slice(0, 5);
-	const hint = (field: (typeof fields)[number]) =>
-		field.type === "boolean" ? " (yes/no)" : field.type === "number" || field.type === "integer" ? " (number)" : "";
+
+	// Every remaining action belongs to the whole form.
+	const formId = parts.slice(2).join(":");
+	if (!formId) return;
+	if (action === "done" || action === "submit") {
+		await answerForm(ctx, interaction, () => session.replyForm(formId, {}, auth, true));
+		return;
+	}
+	if (action === "cancel") {
+		await answerForm(ctx, interaction, () => session.cancelForm(formId, auth));
+	}
+}
+
+/** Run a form action and acknowledge the click without touching its message. */
+async function answerForm(
+	ctx: CommandContext,
+	interaction: DiscordInteraction,
+	run: () => Promise<{ ok: boolean; message?: string }>,
+): Promise<void> {
+	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
+	const result = await run().catch((error) => ({ ok: false, message: describeError(error) }));
+	if (result.ok) {
+		// The session edits the form message itself; remove the ephemeral
+		// "thinking" reply so the channel does not keep a second copy.
+		await ctx.rest
+			.interactionDeleteOriginal(ctx.applicationId, interaction.token)
+			.catch(() => undefined);
+		return;
+	}
 	await ctx.rest
-		.interactionModal(
-			interaction.id,
+		.interactionEditOriginal(
+			ctx.applicationId,
 			interaction.token,
-			textModal(
-				`form:modal:${formId}`,
-				view.title.slice(0, 45),
-				fields.map((field, index) =>
-					textInput({
-						custom_id: `f${index}`,
-						label: `${field.title}${hint(field)}`.slice(0, 45),
-						required: field.required,
-						max_length: 1_000,
-						...(field.description || field.placeholder
-							? { placeholder: (field.description ?? field.placeholder ?? "").slice(0, 100) }
-							: {}),
-					}),
-				),
-			),
+			result.message ?? "That form is no longer waiting.",
+			{ components: [] },
 		)
 		.catch(() => undefined);
 }

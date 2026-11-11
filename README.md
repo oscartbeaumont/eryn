@@ -48,6 +48,15 @@ conversations. The agent's files live in a separate shared virtual workspace,
 not inside that project directory, so the grouping does not stop it reading or
 writing elsewhere.
 
+### Questions and approvals
+
+When an MCP server needs information, Eryn posts the question in the
+conversation instead of opening a separate form. Choice fields become buttons or
+a select menu, free text is answered by replying in the thread, and the answer
+is submitted once every required field is in. The agent can ask the same kind of
+question itself with the `discord_ask` tool; that posts the question and ends the
+turn, and the answer arrives as the next message.
+
 ### Customising Eryn
 
 A guild's OpenCode files live in its virtual filesystem, so a member can ask

@@ -32,6 +32,7 @@ export const GROUP_TOOLS: Record<PolicyGroup, readonly string[]> = {
 	shell: ["bash", "shell"],
 	"discord-reply": [
 		"discord_send_message",
+		"discord_ask",
 		"discord_read_messages",
 		"discord_react",
 		"discord_list_channels",

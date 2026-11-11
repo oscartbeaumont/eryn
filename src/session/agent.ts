@@ -9,7 +9,7 @@
  */
 
 import { KEYS, log } from "../config";
-import { actionButton, buttonRow, linkButton } from "../discord/components";
+import { actionButton, buttonRow, linkButton, selectRow, type DiscordActionRow, type DiscordButton } from "../discord/components";
 import { describeError } from "../errors";
 import {
 	DEFAULT_THREAD_NAME,
@@ -65,6 +65,8 @@ type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"
 const TURN_TIMEOUT_MS = 900_000;
 /** How long a manual compaction may take before the command answers anyway. */
 const COMPACTION_TIMEOUT_MS = 120_000;
+/** How long a question waits for an answer before it is cancelled. */
+const FORM_TIMEOUT_MS = 300_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -97,19 +99,28 @@ interface PendingApproval {
 	readonly timer: ReturnType<typeof setTimeout>;
 }
 
-/** An MCP form waiting for a modal reply. */
+/** An MCP form waiting for answers in its conversation. */
 interface PendingForm {
 	readonly formId: string;
 	readonly sessionID: string;
 	readonly threadId: string;
 	readonly channelId: string;
 	readonly kind: "thread" | "channel";
+	readonly title: string;
+	readonly server: string;
+	readonly message?: string;
 	readonly fields: readonly FormField[];
-	readonly content: string;
+	/** The message's current text, including the fields answered so far. */
+	content: string;
+	/** Answers keyed by field index, in the shape Discord sent them. */
+	readonly answers: Record<number, FormAnswer>;
 	readonly requesterId?: string;
-	readonly messageId?: string;
-	readonly timer: ReturnType<typeof setTimeout>;
+	messageId?: string;
+	timer: ReturnType<typeof setTimeout>;
 }
+
+/** A form answer before it is converted to the server's expected type. */
+type FormAnswer = string | string[] | boolean;
 
 /** The service surface the session object drives. */
 export interface GuildAgentShape {
@@ -166,6 +177,7 @@ export interface GuildAgentShape {
 	replyForm(input: {
 		formId: string;
 		values: Record<string, string>;
+		submit?: boolean;
 		userId?: string;
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }>;
@@ -175,6 +187,26 @@ export interface GuildAgentShape {
 		userId?: string;
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }>;
+	/** Answer one field from a button or select in the conversation. */
+	answerFormField(input: {
+		formId: string;
+		field: number;
+		option?: number;
+		values?: readonly string[];
+		userId?: string;
+		manager?: boolean;
+	}): Promise<{ ok: boolean; message?: string }>;
+	/**
+	 * Treat a message in the conversation as the next free-text answer.
+	 *
+	 * `consumed` is false when no form is waiting, so the gateway can forward
+	 * the message as an ordinary request instead.
+	 */
+	answerFormText(input: {
+		threadId: string;
+		userId: string;
+		text: string;
+	}): Promise<{ consumed: boolean; message?: string }>;
 	/** Correct a conversation's stored context after Discord renames it. */
 	updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void>;
 	/** Whether one user covers every capability a scheduled conversation uses. */
@@ -381,7 +413,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.requesterByThread.clear();
 		for (const pending of this.pendingApprovals.values()) clearTimeout(pending.timer);
 		this.pendingApprovals.clear();
-		for (const pending of this.pendingForms.values()) clearTimeout(pending.timer);
+		for (const pending of this.pendingForms.values()) {
+			clearTimeout(pending.timer);
+			this.settleForm(pending, "Cancelled because Eryn went idle.");
+		}
 		this.pendingForms.clear();
 		this.discarded.clear();
 
@@ -1012,7 +1047,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			log("session", `${label} failed: ${failure}`);
 		} finally {
 			stopTyping();
-			this.cancelPendingForThread(threadId);
+			await this.cancelPendingForThread(threadId);
 			this.endTurn(threadId, turn);
 			if (turn.gone) await this.discardThread(threadId);
 		}
@@ -1391,13 +1426,19 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.settleForm(pending, status === "replied" ? "✅ Answered." : "Cancelled.");
 	}
 
-	private cancelPendingForThread(threadId: string): void {
+	private async cancelPendingForThread(threadId: string): Promise<void> {
 		for (const [requestId, pending] of this.pendingApprovals) {
 			if (pending.threadId !== threadId) continue;
 			clearTimeout(pending.timer);
 			this.pendingApprovals.delete(requestId);
 			void this.replyPermission(pending, "reject", "The turn ended before anyone answered.");
 			this.settleApproval(pending, "Cancelled because the turn ended.");
+		}
+		// A question whose turn has ended can never receive its answer, and a
+		// blocked tool must not wait out the full timeout.
+		for (const pending of [...this.pendingForms.values()]) {
+			if (pending.threadId !== threadId) continue;
+			await this.cancelPendingForm(pending, "the turn ended before anyone answered.");
 		}
 	}
 
@@ -1815,7 +1856,12 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<FormView | undefined> {
 		const pending = this.pendingForms.get(formId);
 		if (!pending || !this.mayAnswer(pending, auth.userId, auth.manager)) return undefined;
-		return { id: pending.formId, title: "Eryn needs some information", fields: [...pending.fields] };
+		return {
+			id: pending.formId,
+			title: pending.title,
+			fields: [...pending.fields],
+			answered: Object.keys(pending.answers).map(Number),
+		};
 	}
 
 	/** The requester or a manager may answer a form, the same rule as an approval. */
@@ -1842,9 +1888,17 @@ class GuildAgentImpl implements GuildAgentShape {
 		return { ok: true };
 	}
 
-	async replyForm(input: {
+	/**
+	 * Answer one field from a button or select in the conversation.
+	 *
+	 * Options are addressed by index, not by value, so a crafted custom id
+	 * cannot submit an option the server never offered.
+	 */
+	async answerFormField(input: {
 		formId: string;
-		values: Record<string, string>;
+		field: number;
+		option?: number;
+		values?: readonly string[];
 		userId?: string;
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
@@ -1853,33 +1907,149 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (!this.mayAnswer(pending, input.userId, input.manager)) {
 			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can answer this." };
 		}
-		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
-		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
+		const field = pending.fields[input.field];
+		if (!field) return { ok: false, message: "That question is not part of this form." };
+		if (field.type === "external") {
+			return { ok: false, message: "That question is answered outside Discord." };
+		}
+		if (formExpectsText(field)) {
+			return { ok: false, message: "Reply in the conversation with your answer." };
+		}
 
-		const answer: Record<string, string | number | boolean | readonly string[]> = {};
+		if (field.type === "boolean") {
+			if (input.option !== 0 && input.option !== 1) {
+				return { ok: false, message: "That answer is not part of this question." };
+			}
+			pending.answers[input.field] = input.option === 0;
+		} else if (field.type === "multiselect" || field.options?.length) {
+			const options = field.options ?? [];
+			const indices = input.values?.map(Number) ?? (input.option !== undefined ? [input.option] : []);
+			if (
+				indices.length === 0 ||
+				indices.some((index) => !Number.isInteger(index) || options[index] === undefined)
+			) {
+				return { ok: false, message: "That option is not part of this question." };
+			}
+			const values = [...new Set(indices.map((index) => options[index]!.value))];
+			pending.answers[input.field] =
+				field.type === "multiselect" ? values : values[0]!;
+		} else {
+			return { ok: false, message: "That question needs a typed answer." };
+		}
+
+		return await this.advanceForm(pending);
+	}
+
+	/**
+	 * Treat a message in the conversation as the next free-text answer.
+	 *
+	 * A form blocks its turn, so an ordinary message would otherwise queue
+	 * behind a question nobody can answer. Only the requester's text is taken;
+	 * anyone else's message is left for the gateway to forward normally.
+	 */
+	async answerFormText(input: {
+		threadId: string;
+		userId: string;
+		text: string;
+	}): Promise<{ consumed: boolean; message?: string }> {
+		const pending = [...this.pendingForms.values()].find((form) => form.threadId === input.threadId);
+		if (!pending || !this.mayAnswer(pending, input.userId, false)) return { consumed: false };
+		const index = pending.fields.findIndex(
+			(field, fieldIndex) => formExpectsText(field) && pending.answers[fieldIndex] === undefined,
+		);
+		if (index < 0) return { consumed: false };
+		const text = input.text.trim();
+		if (!text) return { consumed: false };
+
+		const field = pending.fields[index]!;
+		if (
+			(field.type === "number" || field.type === "integer") &&
+			!Number.isFinite(Number(text))
+		) {
+			return { consumed: true, message: `**${field.title}** must be a number.` };
+		}
+		pending.answers[index] = text;
+		const result = await this.advanceForm(pending);
+		return { consumed: true, ...(result.message ? { message: result.message } : {}) };
+	}
+
+	/** Submit a modal that carried every field, keyed `f0`, `f1`, … */
+	async replyForm(input: {
+		formId: string;
+		values: Record<string, string>;
+		submit?: boolean;
+		userId?: string;
+		manager?: boolean;
+	}): Promise<{ ok: boolean; message?: string }> {
+		const pending = this.pendingForms.get(input.formId);
+		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+		if (!this.mayAnswer(pending, input.userId, input.manager)) {
+			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can answer this." };
+		}
+
 		for (const [index, field] of pending.fields.entries()) {
 			const raw = input.values[`f${index}`]?.trim() ?? "";
+			if (!raw || field.type === "external") continue;
+			if (field.type === "boolean") {
+				if (/^(yes|true|1|y)$/i.test(raw)) pending.answers[index] = true;
+				else if (/^(no|false|0|n)$/i.test(raw)) pending.answers[index] = false;
+				else return { ok: false, message: `**${field.title}** must be yes or no.` };
+			} else if (field.type === "number" || field.type === "integer") {
+				const value = Number(raw);
+				if (!Number.isFinite(value)) return { ok: false, message: `**${field.title}** must be a number.` };
+				pending.answers[index] = raw;
+			} else if (field.type === "multiselect") {
+				pending.answers[index] = raw.split(",").map((part) => part.trim()).filter(Boolean);
+			} else if (field.options?.length && field.custom !== true) {
+				const option = field.options.find(
+					(candidate) =>
+						candidate.value === raw || candidate.label.toLowerCase() === raw.toLowerCase(),
+				);
+				if (!option) {
+					return {
+						ok: false,
+						message: `**${field.title}** must be one of: ${field.options.map((candidate) => candidate.label).join(", ")}.`,
+					};
+				}
+				pending.answers[index] = option.value;
+			} else {
+				pending.answers[index] = raw;
+			}
+		}
+
+		return input.submit === true ? await this.submitForm(pending) : await this.advanceForm(pending);
+	}
+
+	/** The answers are complete: send them and settle the message. */
+	private async submitForm(pending: PendingForm): Promise<{ ok: boolean; message?: string }> {
+		const answer: Record<string, string | number | boolean | readonly string[]> = {};
+		for (const [index, field] of pending.fields.entries()) {
+			const value = pending.answers[index];
 			if (field.type === "external") {
 				answer[field.key] = true;
 				continue;
 			}
-			if (!raw) {
+			if (value === undefined) {
 				if (field.required) return { ok: false, message: `**${field.title}** is required.` };
 				continue;
 			}
 			if (field.type === "boolean") {
-				answer[field.key] = /^(yes|true|1|y)$/i.test(raw);
+				answer[field.key] = value === true;
 			} else if (field.type === "number" || field.type === "integer") {
-				const value = Number(raw);
-				if (!Number.isFinite(value)) return { ok: false, message: `**${field.title}** must be a number.` };
-				answer[field.key] = field.type === "integer" ? Math.trunc(value) : value;
+				const number = typeof value === "string" ? Number(value) : Number.NaN;
+				if (!Number.isFinite(number)) return { ok: false, message: `**${field.title}** must be a number.` };
+				answer[field.key] = field.type === "integer" ? Math.trunc(number) : number;
 			} else if (field.type === "multiselect") {
-				answer[field.key] = raw.split(",").map((part) => part.trim()).filter(Boolean);
+				answer[field.key] = Array.isArray(value) ? value : [String(value)];
 			} else {
-				answer[field.key] = raw;
+				answer[field.key] = Array.isArray(value) ? value.join(", ") : String(value);
 			}
 		}
 
+		// An MCP form is the only kind of pending answer; the agent's own
+		// questions are plain messages answered in a later turn.
+		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
 		try {
 			await host.sessions.form.reply({ sessionID: pending.sessionID, formID: pending.formId, answer });
 		} catch (error) {
@@ -1891,10 +2061,129 @@ class GuildAgentImpl implements GuildAgentShape {
 		return { ok: true };
 	}
 
+	/** Re-render the question message while some answers are still missing. */
+	private async refreshForm(pending: PendingForm): Promise<void> {
+		const content = this.formContent(pending, false);
+		pending.content = content;
+		if (!pending.messageId) return;
+		await this.rest
+			.editMessage(pending.threadId, pending.messageId, content, { components: this.formComponents(pending) })
+			.catch((error) => log("session", `could not update an MCP form: ${describeError(error)}`));
+	}
+
+	/** Auto-submit only when nothing is left, otherwise let the user click Send. */
+	private async advanceForm(pending: PendingForm): Promise<{ ok: boolean; message?: string }> {
+		this.armFormTimer(pending);
+		if (this.formReady(pending) && !this.formOptionalLeft(pending)) {
+			return await this.submitForm(pending);
+		}
+		await this.refreshForm(pending);
+		return { ok: true };
+	}
+
+	private armFormTimer(pending: PendingForm): void {
+		clearTimeout(pending.timer);
+		pending.timer = setTimeout(() => void this.expireForm(pending.formId), FORM_TIMEOUT_MS);
+	}
+
+	private formReady(pending: PendingForm): boolean {
+		return pending.fields.every(
+			(field, index) => !field.required || pending.answers[index] !== undefined,
+		);
+	}
+
+	private formOptionalLeft(pending: PendingForm): boolean {
+		return pending.fields.some(
+			(field, index) => !field.required && pending.answers[index] === undefined,
+		);
+	}
+
+	private formContent(pending: PendingForm, final: boolean): string {
+		const external = pending.fields.some((field) => field.type === "external");
+		const heading = pending.fields.length === 0 ? "✅" : external ? "🔗" : "📝";
+		const lines = [`${heading} **${pending.title}**`];
+		if (pending.message) lines.push(pending.message);
+
+		for (const [index, field] of pending.fields.entries()) {
+			const answer = pending.answers[index];
+			const optional = field.required ? "" : " _(optional)_";
+			const prefix = pending.fields.length === 1 ? "" : `${index + 1}. `;
+			const heading = `**${prefix}${field.title}**${optional}`;
+			if (answer !== undefined) {
+				const label = formAnswerLabel(field, answer);
+				lines.push(`${heading} — **${label.length > 300 ? `${label.slice(0, 299)}…` : label}**`);
+				continue;
+			}
+			if (final) {
+				lines.push(`${heading} — _not answered_`);
+				continue;
+			}
+			lines.push(heading);
+			if (field.description) lines.push(field.description);
+			if (field.type === "external" && field.url) {
+				lines.push(field.url);
+			} else if (formExpectsText(field)) {
+				if (this.nextTextField(pending) === index) {
+					lines.push("_Reply in this conversation with your answer._");
+				}
+			} else {
+				lines.push("_Choose an option below._");
+			}
+		}
+		if (!final && pending.fields.length > 1) {
+			lines.push("_Answer each question here; it is sent when every required answer is in._");
+		}
+
+		const content = lines.join("\n");
+		return content.length > 2_000 ? `${content.slice(0, 1_990)}…` : content;
+	}
+
+	private nextTextField(pending: PendingForm): number {
+		return pending.fields.findIndex(
+			(field, index) => formExpectsText(field) && pending.answers[index] === undefined,
+		);
+	}
+
+	private formComponents(pending: PendingForm): DiscordActionRow[] {
+		const rows: DiscordActionRow[] = [];
+		let overflow = false;
+		for (const [index, field] of pending.fields.entries()) {
+			if (pending.answers[index] !== undefined || formExpectsText(field)) continue;
+			if ((field.options?.length ?? 0) > 25) overflow = true;
+			if (rows.length >= 4) {
+				overflow = true;
+				continue;
+			}
+			const row = formFieldRow(pending, index, field);
+			if (row) rows.push(row);
+			else overflow = true;
+		}
+
+		const controls: DiscordButton[] = [
+			actionButton("Cancel", `form:cancel:${pending.formId}`, 2),
+		];
+		if (pending.fields.some((field, index) => pending.answers[index] === undefined && formNeedsTextEntry(field))) {
+			controls.push(actionButton("Type answer", `form:open:${pending.formId}`, 1));
+		} else if (overflow) {
+			controls.push(actionButton("Open form", `form:open:${pending.formId}`, 1));
+		}
+		if (this.formReady(pending) && this.formOptionalLeft(pending)) {
+			controls.push(actionButton("Send", `form:submit:${pending.formId}`, 3));
+		}
+		rows.push(buttonRow(controls));
+		return rows;
+	}
+
 	private settleForm(pending: PendingForm, result: string): void {
 		if (!pending.messageId) return;
+		const content = `${this.formContent(pending, true)}\n\n${result}`;
 		void this.rest
-			.editMessage(pending.threadId, pending.messageId, `${pending.content}\n\n${result}`, { components: [] })
+			.editMessage(
+				pending.threadId,
+				pending.messageId,
+				content.length > 2_000 ? `${content.slice(0, 1_990)}…` : content,
+				{ components: [] },
+			)
 			.catch(() => undefined);
 	}
 
@@ -1951,15 +2240,22 @@ class GuildAgentImpl implements GuildAgentShape {
 		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
 		const fields = Array.isArray(form.fields) ? form.fields.map(formField).filter(Boolean) as FormField[] : [];
 		const message = typeof metadata?.message === "string" ? metadata.message : undefined;
+		const title = typeof form.title === "string" && form.title.trim()
+			? form.title.trim()
+			: `${server} needs some information`;
 
 		const requester = this.requesterByThread.get(found.threadId);
-		const base: Omit<PendingForm, "content" | "timer" | "messageId"> = {
+		const base = {
 			formId: formId,
 			sessionID: formSessionID,
 			threadId: found.threadId,
 			channelId: found.context.channel.id,
-			kind: found.context.kind === "channel" ? "channel" : "thread",
+			kind: found.context.kind === "channel" ? ("channel" as const) : ("thread" as const),
+			title,
+			server,
+			...(message ? { message } : {}),
 			fields,
+			answers: {},
 			...(requester ? { requesterId: requester } : {}),
 		};
 
@@ -1983,50 +2279,64 @@ class GuildAgentImpl implements GuildAgentShape {
 		}
 
 		const external = fields.find((field) => field.type === "external");
-		const content =
-			fields.length === 0
-				? [`✅ **${server} is ready to continue**`, message].filter(Boolean).join("\n")
-				: external
-					? [`🔗 **${server} needs you to open a link**`, message, external.url ?? ""].filter(Boolean).join("\n")
-					: [
-							`📝 **${server} needs some information**`,
-							message,
-							"_Open the form and answer it to continue._",
-						]
-							.filter(Boolean)
-							.join("\n");
-		const components = [
-			buttonRow(
+		if (fields.length === 0 || external) {
+			const content =
 				fields.length === 0
-					? [actionButton("Continue", `form:done:${formId}`, 3)]
-					: external
-						? [
-								...(external.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
+					? [`✅ **${server} is ready to continue**`, message].filter(Boolean).join("\n")
+					: [`🔗 **${server} needs you to open a link**`, message, external?.url ?? ""].filter(Boolean).join("\n");
+			const components = [
+				buttonRow(
+					fields.length === 0
+						? [actionButton("Continue", `form:done:${formId}`, 3)]
+						: [
+								...(external?.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
 								// A URL-mode elicitation is confirmed by the server out of
 								// band. Never turn a Discord click into an `accept`.
 								actionButton("Cancel", `form:cancel:${formId}`, 2),
-							]
-						: [actionButton("Open form", `form:open:${formId}`, 1)],
-			),
-		];
-		const sent = await this.rest
-			.sendMessage(found.threadId, content, { components })
-			.catch((error) => {
-				log("session", `could not post an MCP form card: ${describeError(error)}`);
-				return undefined;
+							],
+				),
+			];
+			const sent = await this.rest
+				.sendMessage(found.threadId, content, { components })
+				.catch((error) => {
+					log("session", `could not post an MCP form card: ${describeError(error)}`);
+					return undefined;
+				});
+			if (!sent) {
+				const pending: PendingForm = { ...base, content, timer: setTimeout(() => undefined, 0) };
+				await this.cancelPendingForm(pending, "Eryn could not ask here.");
+				return;
+			}
+			this.pendingForms.set(formId, {
+				...base,
+				content,
+				messageId: sent.id,
+				timer: setTimeout(() => void this.expireForm(formId), FORM_TIMEOUT_MS),
 			});
-		if (!sent) {
-			const pending: PendingForm = { ...base, content, timer: setTimeout(() => undefined, 0) };
-			await this.cancelPendingForm(pending, "Eryn could not ask here.");
 			return;
 		}
 
-		this.pendingForms.set(formId, {
+		// Ask in the conversation itself. Buttons and selects carry the
+		// choices; free text is answered by replying to this message.
+		const pending: PendingForm = {
 			...base,
-			content,
-			messageId: sent.id,
-			timer: setTimeout(() => void this.expireForm(formId), 300_000),
-		});
+			content: "",
+			timer: setTimeout(() => undefined, 0),
+		};
+		pending.content = this.formContent(pending, false);
+		const sent = await this.rest
+			.sendMessage(found.threadId, pending.content, { components: this.formComponents(pending) })
+			.catch((error) => {
+				log("session", `could not post an MCP form: ${describeError(error)}`);
+				return undefined;
+			});
+		if (!sent) {
+			await this.cancelPendingForm(pending, "Eryn could not ask here.");
+			return;
+		}
+		pending.messageId = sent.id;
+		this.pendingForms.set(formId, pending);
+		this.armFormTimer(pending);
 	}
 
 	private async expireForm(formId: string): Promise<void> {
@@ -2121,7 +2431,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async interrupt(threadId: string | undefined, gone: boolean, config?: HostConfig): Promise<boolean> {
 		if (!threadId) return false;
-		this.cancelPendingForThread(threadId);
+		await this.cancelPendingForThread(threadId);
 		const run = this.runs.get(threadId);
 		const sessionID = await this.sessionFor(threadId);
 
@@ -2522,21 +2832,95 @@ function describeApproval(
 	return detail.length > 400 ? `${detail.slice(0, 399)}…` : detail;
 }
 
+/** Whether a field is answered by typing in the conversation. */
+function formExpectsText(field: FormField): boolean {
+	return (
+		(field.type === "string" || field.type === "number" || field.type === "integer") &&
+		!(field.options && field.options.length > 0)
+	);
+}
+
+/** Whether the modal fallback needs an input for this field. */
+function formNeedsTextEntry(field: FormField): boolean {
+	return formExpectsText(field) || (field.type === "string" && field.custom === true);
+}
+
+/** The options a field offers, as Discord controls. */
+function formFieldRow(
+	pending: PendingForm,
+	index: number,
+	field: FormField,
+): DiscordActionRow | undefined {
+	if (field.type === "boolean") {
+		return buttonRow([
+			actionButton("Yes", `form:pick:${index}:0:${pending.formId}`, 3),
+			actionButton("No", `form:pick:${index}:1:${pending.formId}`, 2),
+		]);
+	}
+	const options = field.options ?? [];
+	if (options.length === 0) return undefined;
+	// A handful of options is easier as buttons; a longer list needs a select.
+	if (field.type !== "multiselect" && options.length <= 5) {
+		return buttonRow(
+			options.map((option, optionIndex) =>
+				actionButton(option.label || option.value, `form:pick:${index}:${optionIndex}:${pending.formId}`, 2),
+			),
+		);
+	}
+	const shown = options.slice(0, 25);
+	return selectRow({
+		type: 3,
+		custom_id: `form:select:${index}:${pending.formId}`,
+		placeholder: (field.placeholder ?? `Choose ${field.title}`).slice(0, 150),
+		// Send the index, not the label or value: the session maps it back to
+		// the option it offered, and Discord's 100-character value limit cannot
+		// truncate a real value.
+		options: shown.map((option, optionIndex) => ({
+			label: (option.label || option.value).slice(0, 100),
+			value: String(optionIndex),
+			...(option.description ? { description: option.description.slice(0, 100) } : {}),
+		})),
+		min_values: 1,
+		max_values:
+			field.type === "multiselect"
+				? Math.max(1, Math.min(field.maxItems ?? shown.length, shown.length))
+				: 1,
+	});
+}
+
+/** How an answer reads back in the question message. */
+function formAnswerLabel(field: FormField, answer: FormAnswer): string {
+	if (field.type === "boolean") return answer === true ? "Yes" : "No";
+	const values = Array.isArray(answer) ? answer : [String(answer)];
+	const labels = values.map((value) => {
+		const option = field.options?.find((candidate) => candidate.value === value);
+		return option?.label ?? value;
+	});
+	return labels.join(", ");
+}
+
 /** Normalise one OpenCode form field for Discord. */
 function formField(raw: unknown): FormField | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const field = raw as Record<string, unknown>;
 	if (typeof field.key !== "string") return undefined;
+	// A hidden field is not a question; the server supplies its answer or its
+	// `when` condition excludes it, so showing it would be a lie.
+	if (field.hidden === true) return undefined;
 	const options = Array.isArray(field.options)
-		? field.options
-				.map((option) =>
-					option && typeof option === "object" && typeof (option as { value?: unknown }).value === "string"
-						? (option as { value: string }).value
-						: typeof option === "string"
-							? option
-							: undefined,
-				)
-				.filter((option): option is string => option !== undefined)
+		? field.options.flatMap((option) => {
+				if (typeof option === "string") return [{ value: option, label: option }];
+				if (!option || typeof option !== "object") return [];
+				const candidate = option as { value?: unknown; label?: unknown; description?: unknown };
+				if (typeof candidate.value !== "string") return [];
+				return [
+					{
+						value: candidate.value,
+						label: typeof candidate.label === "string" ? candidate.label : candidate.value,
+						...(typeof candidate.description === "string" ? { description: candidate.description } : {}),
+					},
+				];
+			})
 		: undefined;
 	return {
 		key: field.key,
@@ -2547,6 +2931,9 @@ function formField(raw: unknown): FormField | undefined {
 		...(typeof field.placeholder === "string" ? { placeholder: field.placeholder } : {}),
 		...(typeof field.url === "string" ? { url: field.url } : {}),
 		...(options?.length ? { options } : {}),
+		...(field.custom === true ? { custom: true } : {}),
+		...(typeof field.minItems === "number" ? { minItems: field.minItems } : {}),
+		...(typeof field.maxItems === "number" ? { maxItems: field.maxItems } : {}),
 	};
 }
 

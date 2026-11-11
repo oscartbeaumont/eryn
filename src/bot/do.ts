@@ -39,6 +39,7 @@ import {
 } from "../discord/socket";
 import { DiscordContextSchema, type DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
+import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
@@ -67,6 +68,11 @@ const KEEPALIVE_MS = 120_000;
 
 function log(message: string): void {
 	botLog("gateway", message);
+}
+
+/** Discord's message limit, with room for the ellipsis. */
+function truncate(text: string): string {
+	return text.length > 2_000 ? `${text.slice(0, 1_990)}…` : text;
 }
 
 /** A message whose threads the agent asked to be told about. */
@@ -567,6 +573,13 @@ export class BotGateway extends DurableObject<Env> {
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
+		// An answer button starts the next turn; it is not part of the setup
+		// flows, so it is handled here where the gateway can start a prompt.
+		const customId = interaction.data?.custom_id;
+		if (interaction.type === 3 && customId?.startsWith("ask:")) {
+			await this.answerAsk(interaction, customId);
+			return;
+		}
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
@@ -579,6 +592,122 @@ export class BotGateway extends DurableObject<Env> {
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);
+	}
+
+	/**
+	 * A click on one of the agent's question buttons.
+	 *
+	 * The question is not a tool call waiting for an answer: the agent's turn
+	 * ended when it posted the message. The click is therefore a new user turn,
+	 * exactly as if the person had typed the answer.
+	 */
+	private async answerAsk(interaction: DiscordInteraction, customId: string): Promise<void> {
+		const guildId = interaction.guild_id;
+		const channelId = interaction.channel_id;
+		if (!guildId || !channelId) return;
+		const [prefix, kind, askedId] = customId.split(":");
+		if (prefix !== "ask" || (kind !== "b" && kind !== "s") || !askedId) return;
+
+		const user = interaction.member?.user ?? interaction.user;
+		const userId = user?.id;
+		if (!userId) return;
+		if (userId !== askedId && !canManage(interaction)) {
+			await this.rest
+				.interactionReply(interaction.id, interaction.token, "Only the person who was asked can answer this.")
+				.catch(() => undefined);
+			return;
+		}
+
+		const answer = await this.askAnswer(interaction, customId, kind === "s");
+		if (!answer) {
+			await this.rest
+				.interactionReply(
+					interaction.id,
+					interaction.token,
+					"That answer could not be read. Reply in the conversation instead.",
+				)
+				.catch(() => undefined);
+			return;
+		}
+		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return;
+
+		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
+			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		});
+		if (!allowed.ok) {
+			await this.rest
+				.interactionReply(
+					interaction.id,
+					interaction.token,
+					allowed.message ?? "Only people who can access this conversation can answer here.",
+				)
+				.catch(() => undefined);
+			return;
+		}
+
+		const context = await this.conversationContext(guildId, channelId);
+		if (!context) {
+			await this.rest
+				.interactionReply(interaction.id, interaction.token, "I could not read this conversation. Try again.")
+				.catch(() => undefined);
+			return;
+		}
+
+		const question = (interaction.message?.content ?? "")
+			.replace(
+				/\n_(?:Choose an answer below\.|Reply in this conversation with your answer\.)_\s*$/,
+				"",
+			)
+			.trim();
+		const content = question ? `${question}\n\n**Answer:** ${answer}` : `**Answer:** ${answer}`;
+		await this.rest
+			.interactionUpdate(interaction.id, interaction.token, truncate(content), { components: [] })
+			.catch(() => undefined);
+
+		const message: DiscordMessage = {
+			id: interaction.message?.id ?? interaction.id,
+			channel_id: channelId,
+			guild_id: guildId,
+			content: answer,
+			...(user ? { author: user } : {}),
+			...(interaction.member?.nick ? { member: { nick: interaction.member.nick } } : {}),
+		};
+		this.track(
+			() => this.forward(guildId, channelId, threadName(answer), answer, message, context),
+			"could not start a turn from a question answer",
+		);
+	}
+
+	/** The label behind the component that was clicked, or undefined. */
+	private async askAnswer(
+		interaction: DiscordInteraction,
+		customId: string,
+		select: boolean,
+	): Promise<string | undefined> {
+		const rows =
+			interaction.message?.components ??
+			(interaction.message?.id && interaction.channel_id
+				? (await this.rest.message(interaction.channel_id, interaction.message.id).catch(() => undefined))
+						?.components
+				: undefined) ??
+			[];
+		const components = rows.flatMap((row) => row.components ?? []);
+		if (select) {
+			const component = components.find(
+				(candidate) => candidate.type === 3 && candidate.custom_id === customId,
+			);
+			if (!component || component.type !== 3) return undefined;
+			const values = interaction.data?.values ?? [];
+			const labels = values.map(
+				(value) => component.options[Number(value)]?.label ?? value,
+			);
+			return labels.filter(Boolean).join(", ") || undefined;
+		}
+		const component = components.find(
+			(candidate) => candidate.type === 2 && candidate.custom_id === customId,
+		);
+		return component && component.type === 2 ? component.label : undefined;
 	}
 
 	/** Build the same context a message in this conversation would carry. */
@@ -699,14 +828,32 @@ export class BotGateway extends DurableObject<Env> {
 			await this.stopThread(guildId, channel.id);
 			return;
 		}
+		const authorId = message.author?.id;
+		if (!authorId) return;
+
+		// A running turn blocked on a question cannot take a new prompt. While a
+		// form waits for free text, a message from the requester is the answer.
+		if (text) {
+			const answered: { consumed: boolean; message?: string } = await this.session(guildId)
+				.answerFormText({ threadId: channel.id, userId: authorId, text })
+				.catch((error) => {
+					log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
+					return { consumed: false };
+				});
+			if (answered.consumed) {
+				if (answered.message) {
+					await this.rest.sendMessage(channel.id, answered.message).catch(() => undefined);
+				}
+				return;
+			}
+		}
+
 		if ((await this.guildReady(guildId)) === false) {
 			await this.requireSetup(channel.id);
 			return;
 		}
 		// A scheduled conversation has a capability scope. A member below that
 		// scope may still read a public thread, but must not steer the session.
-		const authorId = message.author?.id;
-		if (!authorId) return;
 		const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
 			log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };

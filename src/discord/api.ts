@@ -84,6 +84,8 @@ export interface DiscordMessageView {
 	mentions?: DiscordUser[];
 	attachments?: DiscordAttachment[];
 	referenced_message?: { id?: string } | null;
+	/** The action rows still attached to the message, when it has any. */
+	components?: readonly DiscordComponent[];
 }
 
 /** The subset of a role this bot reads. Managed bot roles carry `tags.bot_id`. */

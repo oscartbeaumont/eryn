@@ -18,6 +18,7 @@
 
 import { describeError } from "../errors";
 import type { DiscordAttachment, DiscordUser } from "./api";
+import type { DiscordComponent } from "./components";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/";
 /**
@@ -130,7 +131,12 @@ export interface DiscordInteraction {
 	member?: { user?: DiscordUser; nick?: string; permissions?: string };
 	user?: DiscordUser;
 	/** The message a component interaction came from. */
-	message?: { id: string; flags?: number };
+	message?: {
+		id: string;
+		flags?: number;
+		content?: string;
+		components?: readonly DiscordComponent[];
+	};
 }
 
 export interface DiscordSocketHandlers {
