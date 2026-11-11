@@ -6,6 +6,7 @@
  * handler takes one argument instead of the same four everywhere.
  */
 
+import type { Analytics } from "../../analytics";
 import { describeError } from "../../errors";
 import { actionButton, buttonRow } from "../../discord/components";
 import type { DiscordRest } from "../../discord/api";
@@ -31,6 +32,8 @@ export interface CommandContext {
 	readonly log: (message: string) => void;
 	readonly applicationId: string;
 	readonly session: (guildId: string) => SessionClient;
+	/** Product analytics for a guild; disabled unless the deployment opts in. */
+	readonly analytics: (guildId: string) => Analytics;
 	readonly ownsConversation: (channelId: string) => Promise<boolean>;
 	/** Describe a channel or thread as the session's Discord context. */
 	readonly context: (guildId: string, channelId: string) => Promise<DiscordContext | undefined>;

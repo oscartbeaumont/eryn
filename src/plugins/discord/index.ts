@@ -32,18 +32,27 @@ export function discordPlugin(
 	guildId: string,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
+	onMessageSent?: (threadId: string) => void,
+	onScheduleCreated?: (threadId: string) => void,
 ) {
 	// One per host/guild. A cache shared across guilds would let a role id from
 	// one server be read as a role in another.
 	const authority = new DiscordAuthority(rest, guildId);
-	const tools = discordTools(rest, guildId, setSubscription, setMessageSubscription, authority);
+	const tools = discordTools(
+		rest,
+		guildId,
+		setSubscription,
+		setMessageSubscription,
+		authority,
+		onMessageSent,
+	);
 
 	return Plugin.define({
 		id: "eryn.discord",
 		async setup(ctx) {
 			await Promise.all([
 				tools.setup(ctx),
-				registerScheduleScope(ctx, rest, guildId, authority),
+				registerScheduleScope(ctx, rest, guildId, authority, onScheduleCreated),
 				// The hook carries no session metadata, so it is read from the session
 				// itself. A failure to read it must not fail the request: a missing
 				// context only costs the agent some awareness, while a thrown error

@@ -46,6 +46,10 @@ export interface HostBuildOptions {
 	readonly guildId: string;
 	/** The directory every session in this deployment lives in. */
 	readonly directory: string;
+	/** Called after the agent posts a message, with the conversation's id. */
+	readonly onMessageSent?: (threadId: string) => void;
+	/** Called after the agent creates a schedule in a conversation. */
+	readonly onScheduleCreated?: (threadId: string) => void;
 }
 
 /**
@@ -115,7 +119,7 @@ export function linkSignature(links: readonly McpLink[]): string {
 
 /** Build a host for this config; the returned promise rejects if it cannot start. */
 export async function buildHost(config: HostConfig, options: HostBuildOptions): Promise<HostInterface> {
-	const { env, storage, rest, guildId, directory } = options;
+	const { env, storage, rest, guildId, directory, onMessageSent, onScheduleCreated } = options;
 	const location = { directory };
 
 	// The guild filesystem is the source of truth for config, skills, commands,
@@ -147,6 +151,8 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			guildId,
 			(kind, id, subscribed) => setSubscription(env, guildId, kind, id, subscribed),
 			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
+			onMessageSent,
+			onScheduleCreated,
 		),
 	];
 	const skills = workspaceSkillsPlugin(workspace.skills, activeSkills);

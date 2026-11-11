@@ -8,9 +8,10 @@
  * Discord conversation: a thread, or a subscribed channel.
  */
 
+import { analytics as productAnalytics, type Analytics } from "../analytics";
 import { KEYS, log } from "../config";
 import { actionButton, buttonRow, linkButton, selectRow, type DiscordActionRow, type DiscordButton } from "../discord/components";
-import { describeError } from "../errors";
+import { classifyError, describeError } from "../errors";
 import {
 	DEFAULT_THREAD_NAME,
 	DiscordError,
@@ -276,6 +277,8 @@ class GuildAgentImpl implements GuildAgentShape {
 	private currentConfig: HostConfig | undefined;
 	/** Per-guild Discord permission lookups, shared by tool checks and gating. */
 	private readonly authority: DiscordAuthority;
+	/** Product analytics for this guild; disabled unless the deployment opts in. */
+	private readonly analytics: Analytics;
 
 	constructor(
 		private readonly env: Env,
@@ -284,8 +287,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		private readonly store: GuildStoreShape,
 		private readonly turnTimeoutMs: number,
 		private readonly guildId: string,
+		waitUntil?: (promise: Promise<unknown>) => void,
 	) {
 		this.authority = new DiscordAuthority(rest, guildId);
+		this.analytics = productAnalytics(env, guildId, waitUntil);
 	}
 
 	// --- Host -----------------------------------------------------------------
@@ -323,6 +328,16 @@ class GuildAgentImpl implements GuildAgentShape {
 				rest: this.rest,
 				guildId: this.guildId,
 				directory: LOCATION,
+				// The plugin reports successful sends, so the turn can tell a
+				// real reply from a turn that ended without saying anything.
+				onMessageSent: (threadId) => {
+					const turn = this.runs.get(threadId)?.turn;
+					if (turn) turn.spoke += 1;
+				},
+				onScheduleCreated: (threadId) => {
+					const turn = this.runs.get(threadId)?.turn;
+					if (turn) turn.schedules += 1;
+				},
 			});
 			// A rejected build must not stay cached until the idle close: the next
 			// request should retry (a missing origin or a transient storage error
@@ -681,6 +696,12 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
+		// A prompt is a person talking to Eryn, including an answer to its own
+		// question. A schedule wake does not come through here.
+		await this.analytics.capture("message_received", {
+			surface: request.discord?.kind === "channel" ? "channel" : "thread",
+			attachments: (request.attachments?.length ?? 0) > 0,
+		});
 		const host = await this.hostFor(config, request.threadId);
 		// The completion signal arrives as an event, so a subscription that
 		// died since the last turn has to be replaced before this one starts.
@@ -1028,7 +1049,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		onTimeout: () => Promise<unknown>,
 	): Promise<{ ok: boolean; message?: string }> {
 		const turn = this.beginTurn(threadId);
+		const startedAt = Date.now();
 		let failure: string | undefined;
+		let timedOut = false;
 
 		let stopTyping: () => void = () => undefined;
 		try {
@@ -1036,6 +1059,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			await start();
 			if (!(await this.wait(turn))) {
 				await onTimeout();
+				timedOut = true;
 				failure = "The turn timed out before it finished.";
 			}
 			if (turn.error) {
@@ -1055,7 +1079,55 @@ class GuildAgentImpl implements GuildAgentShape {
 		// Report the failure where the turn was triggered, once the run itself
 		// has been released.
 		if (failure && !turn.gone) await this.postFailure(threadId, failure);
+		await this.recordTurn(turn, failure ? (timedOut ? "timeout" : "failed") : "ok", startedAt, failure);
 		return failure ? { ok: false, message: failure } : { ok: true };
+	}
+
+	/**
+	 * Record one finished turn, as usage rather than content.
+	 *
+	 * The model and provider say what was being run; the duration says whether
+	 * it was slow; `spoke` says whether the agent actually replied. Failures
+	 * carry only a coarse class, never the provider's message.
+	 */
+	private async recordTurn(
+		turn: Turn,
+		outcome: "ok" | "failed" | "timeout",
+		startedAt: number,
+		failure: string | undefined,
+	): Promise<void> {
+		const model = this.currentConfig?.model;
+		const provider = model?.split("/")[0];
+		const duration = Date.now() - startedAt;
+		const base = {
+			outcome,
+			duration_ms: duration,
+			...(provider ? { provider } : {}),
+			...(model ? { model } : {}),
+		};
+		const events: Promise<void>[] = [this.analytics.capture("turn_finished", base)];
+		if (outcome !== "ok") {
+			events.push(
+				this.analytics.capture("turn_failed", {
+					...base,
+					error_class: classifyError(failure ?? "unknown"),
+				}),
+			);
+		}
+		if (outcome === "ok" && turn.spoke > 0) {
+			events.push(
+				this.analytics.capture("reply_sent", {
+					messages: turn.spoke,
+					duration_ms: duration,
+					...(provider ? { provider } : {}),
+					...(model ? { model } : {}),
+				}),
+			);
+		}
+		if (turn.schedules > 0) {
+			events.push(this.analytics.capture("schedule_created", { count: turn.schedules }));
+		}
+		await Promise.all(events);
 	}
 
 	/** Send a turn failure to the conversation that triggered it. */
@@ -2944,6 +3016,7 @@ export function createGuildAgent(
 	rest: DiscordRest,
 	store: GuildStoreShape,
 	guildId: string,
+	waitUntil?: (promise: Promise<unknown>) => void,
 ): GuildAgentShape {
-	return new GuildAgentImpl(env, storage, rest, store, TURN_TIMEOUT_MS, guildId);
+	return new GuildAgentImpl(env, storage, rest, store, TURN_TIMEOUT_MS, guildId, waitUntil);
 }

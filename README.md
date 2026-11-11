@@ -222,4 +222,11 @@ Two secrets are required. Everything else has a sensible default.
 | `ENCRYPTION_KEY`     | secret | Required. Base64url 32-byte key for sealing stored credentials           |
 | `PUBLIC_ORIGIN`      | var    | Origin for links and OAuth callbacks; learned from the first request     |
 | `SESSION_SECRET`     | secret | Signs MCP sign-in state; derived from `ENCRYPTION_KEY` when unset        |
+| `POSTHOG_KEY`        | secret | Optional. PostHog project token for product analytics; unset is silent    |
 | `ERYN_DOMAIN`        | build  | Custom domain attached by `cf deploy`; unset on Workers Builds            |
+
+The hosted site records page views and install clicks in PostHog, and the bot
+sends coarse, content-free product events when `POSTHOG_KEY` is set. A fork
+that leaves it unset reports nothing; the landing page also only initialises
+its analytics on `eryn.otbeaumont.me`. Worker logs and Cloudflare error
+aggregation (`observability.issues`) are always on and need no key.

@@ -17,6 +17,10 @@ export interface Turn {
 	/** Set when the conversation was deleted, so there is nowhere to reply. */
 	gone: boolean;
 	error?: string;
+	/** How many messages the agent posted here, for the reply usage signal. */
+	spoke: number;
+	/** How many schedules the agent created during this turn. */
+	schedules: number;
 	readonly resolve: () => void;
 	readonly completed: Promise<void>;
 }
@@ -32,6 +36,8 @@ export function createTurn(threadId: string): Turn {
 		started: false,
 		done: false,
 		gone: false,
+		spoke: 0,
+		schedules: 0,
 		resolve,
 		completed,
 	};

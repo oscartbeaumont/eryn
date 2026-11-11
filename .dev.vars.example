@@ -16,3 +16,5 @@ ENCRYPTION_KEY=
 #   PUBLIC_ORIGIN    the origin used in links and OAuth callbacks
 #   SESSION_SECRET   the key for MCP sign-in state; derived from ENCRYPTION_KEY
 #                    when this is unset
+#   POSTHOG_KEY      the PostHog project token for product analytics; unset
+#                    keeps the bot silent, which is the right default for a fork

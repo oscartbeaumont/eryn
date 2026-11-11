@@ -14,6 +14,7 @@
  * and the greeting is deleted once a provider is connected.
  */
 
+import type { Analytics } from "../analytics";
 import { actionButton, buttonRow } from "../discord/components";
 import { DiscordError, type DiscordAuditEntry, type DiscordRest } from "../discord/api";
 import { log } from "../config";
@@ -83,6 +84,7 @@ export async function maybeAnnounceInstall(
 	storage: DurableObjectStorage,
 	guild: InstallAnnouncement,
 	botUserId: string | undefined,
+	analytics: Analytics,
 ): Promise<void> {
 	if (guild.unavailable) return;
 	if (await storage.get(marker(guild.id))) return;
@@ -108,6 +110,10 @@ export async function maybeAnnounceInstall(
 
 	const installer = entry.user_id ?? guild.owner_id;
 	if (!installer) return;
+
+	// A confirmed fresh install is the top of the funnel. Whether the greeting
+	// finds a writable channel does not change that the bot was added.
+	await analytics.capture("install_started");
 
 	const name = guild.name ?? "this server";
 	const body = [

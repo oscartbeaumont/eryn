@@ -18,6 +18,7 @@ import { SessionClient } from "./bot/client";
 import { BotGateway } from "./bot/do";
 import { brandAsset, BRAND, isBrandAsset } from "./brand";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue";
+import { isPostHogRequest, posthogProxy } from "./landing/analytics";
 import { APPLICATION_PUBLIC_KEY, configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config";
 import { privacyPage, termsPage } from "./legal";
 import { verify } from "./crypto";
@@ -94,6 +95,8 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	if (isRead(request) && url.pathname === "/install") {
 		return Response.redirect(installUrl(await applicationId(env)), 302);
 	}
+	// The landing page's PostHog traffic, proxied so a blocker does not drop it.
+	if (isPostHogRequest(url.pathname)) return await posthogProxy(request, url);
 	if (url.pathname === "/" && isRead(request)) {
 		const response = await solidHandler.fetch(request);
 		response.headers.set("cache-control", "public, max-age=300");

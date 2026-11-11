@@ -27,7 +27,13 @@
 			"new_sqlite_classes": ["BotGateway", "BotSession"]
 		}
 	],
+	// Workers Logs plus Cloudflare's error aggregation. `cloudflare.config.ts`
+	// is what `cf deploy` reads and already enables both; this copy exists for
+	// the deploy button and Workers Builds.
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"issues": {
+			"enabled": true
+		}
 	}
 }

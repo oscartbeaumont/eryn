@@ -27,7 +27,7 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
  * The hosted deployment declares only what it always sets; everything else is
  * read without a declared binding so a fork can supply it, or omit it, freely.
  */
-function optional(env: Env, name: string): string | undefined {
+export function optional(env: Env, name: string): string | undefined {
 	const value = (env as unknown as Record<string, unknown>)[name];
 	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }

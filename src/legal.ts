@@ -124,8 +124,9 @@ export function privacyPage(): Response {
 <li><strong>Conversation data.</strong> Messages that mention Eryn, messages in threads Eryn owns, attachments you send to it, and the agent's replies and tool activity. This is stored in the server's own Durable Object so a thread can continue.</li>
 <li><strong>Server configuration.</strong> The inference provider and model a server chooses, provider API keys or OAuth credentials, and linked MCP server URLs, names, tokens, and OAuth refresh data.</li>
 <li><strong>Operational data.</strong> Errors, deploy ids, health information, and request metadata used to run and debug the service. We do not intentionally log message content, but an error report can contain technical details about a failed request.</li>
+<li><strong>Usage analytics.</strong> Page views, install-button clicks, and coarse product events such as a turn finishing, its duration, the provider and model involved, and whether setup completed. Server events use a pseudonymous server identifier derived from the Discord server id. They do not include message text, prompts, replies, attachments, usernames, channel names, tool arguments, or the Discord identifiers themselves.</li>
 </ul>
-<p>Eryn does not use advertising cookies or third-party analytics on this site.</p>
+<p>The website uses <a href="https://posthog.com" rel="noreferrer">PostHog</a> for page views and install clicks. PostHog is configured without advertising cookies, session recording, autocapture, or IP geolocation; browser storage is used only to keep an anonymous visitor id. Server-side product events are sent to the same project and contain only the coarse values described above.</p>
 
 <h2>How we use it</h2>
 <p>We use this data to run Eryn: to answer requests, continue threads, use the provider and MCP servers a server configured, keep credentials working, diagnose failures, prevent abuse, and comply with legal obligations. We do not sell personal data.</p>
@@ -136,7 +137,8 @@ export function privacyPage(): Response {
 <h2>What we share</h2>
 <ul>
 <li><strong>Discord</strong> receives the messages and interactions needed to operate the bot.</li>
-<li><strong>Cloudflare</strong> hosts the Worker, Durable Objects, and logs.</li>
+<li><strong>Cloudflare</strong> hosts the Worker, Durable Objects, logs, and error aggregation.</li>
+<li><strong>PostHog</strong> receives the website and product analytics described under <em>What we collect</em>.</li>
 <li><strong>Inference providers</strong> chosen by each server receive the prompts and context needed to answer a request.</li>
 <li><strong>MCP servers</strong> linked by a server receive the requests and arguments Eryn sends to their tools.</li>
 <li><strong>Model catalogue sources</strong> such as models.dev/opencode.ai are read for model metadata.</li>

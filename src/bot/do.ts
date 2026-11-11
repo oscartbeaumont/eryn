@@ -22,6 +22,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Option, Schema } from "effect";
 
+import { analytics as productAnalytics, type Analytics } from "../analytics";
 import { INTERACTIONS_PATH, log as botLog } from "../config";
 import { ORIGIN_HEADER, deployRestart } from "../deploy";
 import { describeError } from "../errors";
@@ -569,10 +570,18 @@ export class BotGateway extends DurableObject<Env> {
 		}
 	}
 
+	/**
+	 * Product analytics for a guild, with sends handed to the runtime so a slash
+	 * command is acknowledged without waiting for PostHog.
+	 */
+	private analytics(guildId: string): Analytics {
+		return productAnalytics(this.env, guildId, (promise) => this.ctx.waitUntil(promise));
+	}
+
 	// --- Inbound Discord events -------------------------------------------------
 
 	private async onGuild(guild: DiscordGuildCreate): Promise<void> {
-		await maybeAnnounceInstall(this.rest, this.ctx.storage, guild, this.botUserId);
+		await maybeAnnounceInstall(this.rest, this.ctx.storage, guild, this.botUserId, this.analytics(guild.id));
 		// Remember every guild, so a restart can refresh the guild-scoped copy of
 		// the commands there. A guild this instance has not seen before also needs
 		// its copy now, because the registration pass has already run.
@@ -736,6 +745,7 @@ export class BotGateway extends DurableObject<Env> {
 			log,
 			applicationId: this.botUserId ?? (await applicationId(this.env)),
 			session: (guildId) => this.session(guildId),
+			analytics: (guildId) => this.analytics(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),
 			context: (guildId, channelId) => this.conversationContext(guildId, channelId),

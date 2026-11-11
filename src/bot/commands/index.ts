@@ -221,6 +221,9 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		await rejectInteraction(ctx, interaction, "Run `/eryn` inside a server, so I know which setup to change.");
 		return;
 	}
+	// Every slash command is a usage signal; the arguments and the conversation
+	// are deliberately not part of it.
+	void ctx.analytics(guildId).capture("command_used", { command: path ?? "unknown" });
 	// Stopping a run, compacting a conversation, running a command, and reading
 	// help are conversation actions, not configuration; everything else is.
 	if (

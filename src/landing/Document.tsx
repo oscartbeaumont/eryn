@@ -2,6 +2,7 @@ import { HydrationScript } from "@solidjs/web";
 import type { JSX } from "@solidjs/web";
 
 import { BRAND, DEFAULT_PUBLIC_ORIGIN } from "../public";
+import { analyticsScript } from "./analytics";
 
 const ORIGIN = DEFAULT_PUBLIC_ORIGIN.replace(/\/$/, "");
 
@@ -40,7 +41,10 @@ export default function Document(props: { children: JSX.Element }) {
 				<meta name="twitter:image" content={`${ORIGIN}${BRAND.banner}`} />
 				<HydrationScript />
 			</head>
-			<body>{props.children}</body>
+			<body>
+				{props.children}
+				<script innerHTML={analyticsScript()} />
+			</body>
 		</html>
 	);
 }

@@ -9,6 +9,7 @@
 
 import { Schema } from "effect";
 
+import { analytics as productAnalytics } from "../analytics";
 import { isValidModel, log } from "../config";
 import type { DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
@@ -71,6 +72,15 @@ function publicLink(link: McpLink): PublicLink {
 	return rest;
 }
 
+/** A link's host, which identifies the service without its path or credentials. */
+function urlHost(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return "unknown";
+	}
+}
+
 /** Parse a request body, or produce the `400` response it should get instead. */
 async function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
@@ -117,12 +127,15 @@ function openRoute<S extends Schema.ConstraintDecoder<unknown>>(
 /** Build the route table and the dispatcher that serves it. */
 export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Response> {
 	const { env, guildId, rest, store, agent, loadConfig, reconcileModel } = ctx;
+	const metrics = productAnalytics(env, guildId);
 
 	/** Record an OAuth connection and move the guild onto a model it can run. */
-	const recordOAuth = async (integrationID: string) => {
+	const recordOAuth = async (integrationID: string, firstProvider: boolean) => {
 		await store.putProvider({ integrationID, method: "oauth", key: "" });
 		await store.clearPendingOAuth();
-		await reconcileModel(await loadConfig());
+		const next = await reconcileModel(await loadConfig());
+		await metrics.capture("provider_connected", { provider: integrationID, first: firstProvider });
+		if (firstProvider) await metrics.capture("setup_completed", { provider: integrationID, model: next.model });
 	};
 
 	const routes: Record<string, Route> = {
@@ -159,12 +172,17 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			ProviderConnectRequestSchema,
 			async (body) => {
 				const config = await loadConfig();
+				const firstProvider = config.connections.length === 0;
 				// A key connection is a single step: replay the key, then record
 				// the connection so the next turn rebuilds the host with it.
 				if (body.key !== undefined && body.action === undefined) {
 					await agent.connectKey(config, body.integrationID, body.key);
 					await store.putProvider({ integrationID: body.integrationID, method: body.methodID ?? "key", key: body.key });
-					await reconcileModel(await loadConfig());
+					const next = await reconcileModel(await loadConfig());
+					await metrics.capture("provider_connected", { provider: body.integrationID, first: firstProvider });
+					if (firstProvider) {
+						await metrics.capture("setup_completed", { provider: body.integrationID, model: next.model });
+					}
 					return json({ ok: true });
 				}
 				const action = body.action ?? "start";
@@ -192,12 +210,12 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 				if (!attemptID) return json({ error: "Start the sign-in again." }, 400);
 				if (action === "status") {
 					const status = await agent.oauthStatus(config, body.integrationID, attemptID);
-					if (status.status === "complete") await recordOAuth(body.integrationID);
+					if (status.status === "complete") await recordOAuth(body.integrationID, firstProvider);
 					return json({ status });
 				}
 				if (action === "complete") {
 					await agent.oauthComplete(config, body.integrationID, attemptID, body.code);
-					await recordOAuth(body.integrationID);
+					await recordOAuth(body.integrationID, firstProvider);
 					return json({ ok: true });
 				}
 				await agent.oauthCancel(config, body.integrationID, attemptID);
@@ -258,6 +276,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 				return json({ error: `A server named "${link.name}" is already linked.` }, 400);
 			}
 			await store.putLink(link);
+			await metrics.capture("mcp_connected", { host: urlHost(link.url) });
 			return json({ ok: true });
 		}),
 
@@ -369,6 +388,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 					...(body.error ? { error: body.error } : {}),
 				});
 				if (firstFinish && result.link) {
+					await metrics.capture("mcp_connected", { host: urlHost(result.link.url) });
 					const message = `**${result.link.name} is connected.** ${describeTools(result.tools ?? [])} Eryn will use it on the next turn.`;
 					if (attempt.applicationId && attempt.interactionToken) {
 						await rest

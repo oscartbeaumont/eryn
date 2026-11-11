@@ -12,6 +12,18 @@ export const CLIENT_ID = "1561290858668494959";
 export const DEFAULT_PUBLIC_ORIGIN = "https://eryn.otbeaumont.me";
 
 /**
+ * The website's PostHog project. A project token is write-only and safe to
+ * ship in a page; the server-side capture key is a secret and is not this.
+ */
+export const POSTHOG_PROJECT_TOKEN = "phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZfjHgt2";
+
+/**
+ * The Worker path that proxies PostHog, so a blocker does not mistake the
+ * ingestion request for analytics. It is deliberately not named `posthog`.
+ */
+export const POSTHOG_PROXY_PATH = "/ph_7Qm2";
+
+/**
  * View Audit Log (so the install message can find who added the bot), View
  * Channels, Send Messages, Read Message History, Create Public Threads, and
  * Send Messages in Threads.

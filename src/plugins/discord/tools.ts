@@ -85,6 +85,7 @@ export function discordTools(
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
 	authority: DiscordAuthority,
+	onMessageSent?: (threadId: string) => void,
 ) {
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
@@ -463,7 +464,11 @@ export function discordTools(
 				);
 				if (!content.trim()) throw new Error("Message content is required.");
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
-				return await rest.sendMessage(channelId, content, replyTo ? { replyTo } : {});
+				const sent = await rest.sendMessage(channelId, content, replyTo ? { replyTo } : {});
+				// A successful send is the usage signal: the turn either replied
+				// in its conversation or it did not. Content is not involved.
+				onMessageSent?.(channelId);
+				return sent;
 			},
 		},
 

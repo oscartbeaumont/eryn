@@ -65,7 +65,15 @@ function Eyebrow(props: { children: JSX.Element }) {
 	);
 }
 
-function Action(props: { href: string; primary?: boolean; children: JSX.Element }) {
+function Action(props: {
+	href: string;
+	primary?: boolean;
+	/** The analytics event this link records when clicked. */
+	analytics?: string;
+	/** Where the link sits on the page, so two install buttons differ. */
+	location?: string;
+	children: JSX.Element;
+}) {
 	return (
 		<a
 			class={
@@ -75,6 +83,8 @@ function Action(props: { href: string; primary?: boolean; children: JSX.Element 
 			}
 			href={props.href}
 			rel={props.href.startsWith("http") ? "noreferrer" : undefined}
+			data-analytics={props.analytics}
+			data-location={props.location}
 		>
 			{props.children}
 		</a>
@@ -112,10 +122,17 @@ export function Landing() {
 							Reply in the thread and it keeps going.
 						</p>
 						<div class="flex flex-wrap items-center gap-3">
-							<Action href="/install" primary>
+							<Action
+								href="/install"
+								primary
+								analytics="install_clicked"
+								location="hero"
+							>
 								Add to Discord
 							</Action>
-							<Action href={REPOSITORY}>GitHub</Action>
+							<Action href={REPOSITORY} analytics="repository_clicked" location="hero">
+								GitHub
+							</Action>
 						</div>
 					</div>
 				</div>
@@ -190,7 +207,12 @@ export function Landing() {
 								connect a provider, and choose a model. Then mention it anywhere.
 							</p>
 							<div class="mt-7 flex justify-center">
-								<Action href="/install" primary>
+								<Action
+									href="/install"
+									primary
+									analytics="install_clicked"
+									location="cta"
+								>
 									Add to Discord
 								</Action>
 							</div>

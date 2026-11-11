@@ -103,6 +103,7 @@ export async function registerScheduleScope(
 	rest: DiscordRest,
 	guildId: string,
 	authority: DiscordAuthority,
+	onCreated?: (threadId: string) => void,
 ): Promise<void> {
 	await ctx.tool.hook("execute.before", async (event) => {
 		if (scheduleTool(event.tool) !== "create") return;
@@ -165,6 +166,7 @@ export async function registerScheduleScope(
 			await writeScope(ctx, event.sessionID, metadata, context, scope).catch((error) =>
 				log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`),
 			);
+			onCreated?.(context.thread.id);
 			return;
 		}
 

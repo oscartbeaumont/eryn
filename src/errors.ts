@@ -27,3 +27,21 @@ export function describeError(error: unknown): string {
 	}
 	return String(error);
 }
+
+/**
+ * A coarse class for a failure, safe to send to analytics.
+ *
+ * The raw message can quote a provider, a URL, or part of a request, so it
+ * never leaves the object. A bucket is enough to tell "the key is wrong" from
+ * "the model ran out of context" in a dashboard.
+ */
+export function classifyError(error: unknown): string {
+	const message = describeError(error).toLowerCase();
+	if (/rate.?limit|too many requests|\b429\b/.test(message)) return "rate_limit";
+	if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|api.?key|credential|sign.?in/.test(message)) return "auth";
+	if (/context|token limit|too long|maximum.{0,20}tokens/.test(message)) return "context_length";
+	if (/timeout|timed out|deadline/.test(message)) return "timeout";
+	if (/network|fetch|connect|dns|socket|econn/.test(message)) return "network";
+	if (/quota|billing|credit|payment/.test(message)) return "quota";
+	return "other";
+}
