@@ -16,10 +16,11 @@ import {
 } from "../../discord/components";
 import {
 	GROUP_LABELS,
+	LISTED_PROFILES,
 	MCP_ALL,
 	POLICY_GROUPS,
-	PRESET_LABELS,
-	matchPreset,
+	PRESET_HINTS,
+	matchProfile,
 	policyTitle,
 	summaryLines,
 	type PolicyGroup,
@@ -38,9 +39,12 @@ const PRESET_ID = "policy:preset:";
 const CUSTOMISE_ID = "policy:customise";
 const RESET_ID = "policy:reset";
 const CLOSE_ID = "policy:close";
+const PROFILE_ID = "policy:profile";
 const GROUP_ID = "policy:group:";
 const EFFECT_ID = "policy:effect:";
 const BACK_ID = "policy:customise";
+/** The select value that means "drop the channel override". */
+const INHERIT = "default";
 
 interface Target {
 	readonly channelId: string;
@@ -96,41 +100,78 @@ export async function policyMenu(request: InteractionRequest): Promise<void> {
 	await answer.reply(renderMenu(state, target), menuRows(request, state));
 }
 
+function customOf(state: PolicyState) {
+	return state.profiles.filter((profile) => !profile.builtin);
+}
+
+function defaultName(state: PolicyState): string {
+	return (
+		state.profiles.find((profile) => profile.id === state.defaultProfile)?.name ??
+		state.defaultProfile
+	);
+}
+
 function renderMenu(state: PolicyState, target: Target): string {
 	const own = state.own !== undefined;
 	const text = [
 		`**Permissions in ${target.label}**`,
-		`${own ? "This scope overrides its parent." : "This scope inherits from its parent."} Currently: **${policyTitle(state.effective)}**.`,
+		`Server default: **${defaultName(state)}**`,
+		`${own ? "This scope overrides its parent." : "This scope inherits from its parent."} Currently: **${policyTitle(state.effective, customOf(state))}**.`,
 		"",
 		...summaryLines(state.effective, state.mcpServers),
 		"",
-		`Presets: ${(Object.keys(PRESET_LABELS) as PolicyPreset[])
-			.map((preset) => `**${PRESET_LABELS[preset]}**`)
-			.join(" · ")}`,
+		`Profiles: ${state.profiles.map((profile) => `**${profile.name}**`).join(" · ")}`,
 	].join("\n");
 	return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 }
 
 function menuRows(request: InteractionRequest, state: PolicyState) {
-	const active = matchPreset(state.effective);
-	const presets = (Object.keys(PRESET_LABELS) as PolicyPreset[]).map((preset) =>
-		actionButton(PRESET_LABELS[preset], `${PRESET_ID}${preset}`, active === preset ? 1 : 2),
-	);
+	const active = matchProfile(state.effective, customOf(state)) ?? state.effective.profile;
+	const inherits =
+		state.own?.profile === undefined && state.own?.preset === undefined;
+	const options = [
+		{
+			label: `Server default (${defaultName(state)})`,
+			value: INHERIT,
+			description: "Clear this channel's override",
+			default: inherits,
+		},
+		...state.profiles.map((profile) => ({
+			label: profile.name,
+			value: profile.id,
+			description: (PRESET_HINTS[profile.id as PolicyPreset] ?? "Custom profile").slice(0, 100),
+			default: !inherits && active === profile.id,
+		})),
+	];
+	const quick = LISTED_PROFILES.map((id) => {
+		const profile = state.profiles.find((candidate) => candidate.id === id);
+		return actionButton(profile?.name ?? id, `${PRESET_ID}${id}`, active === id ? 1 : 2);
+	});
 	const actions = [
 		actionButton("Customise", CUSTOMISE_ID, 2),
-		actionButton("Reset to inherit", RESET_ID, 2, state.own === undefined),
+		actionButton("Reset to default", RESET_ID, 2, state.own === undefined),
 		actionButton("Close", CLOSE_ID, 2),
 	];
-	return [buttonRow(presets), buttonRow(actions)];
+	return [
+		selectRow({
+			type: 3,
+			custom_id: PROFILE_ID,
+			placeholder: "Profile for this channel",
+			options,
+		}),
+		buttonRow(quick),
+		buttonRow(actions),
+	];
 }
 
-async function applyPreset(request: InteractionRequest, preset: PolicyPreset): Promise<void> {
+async function applyProfile(request: InteractionRequest, profile: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
 	if (!target) return;
 	try {
-		await request.session.setPolicy({ ...scopeRequest(target), policy: { preset } });
+		if (profile === INHERIT) await request.session.clearPolicy(scopeRequest(target));
+		else await request.session.setPolicy({ ...scopeRequest(target), policy: { profile } });
 	} catch (error) {
 		await answer.update(`Could not change the policy: ${describeError(error)}`, [closeRow(request)]);
 		return;
@@ -148,7 +189,7 @@ async function customise(request: InteractionRequest): Promise<void> {
 	await answer.update(
 		[
 			`**Customise permissions in ${target.label}**`,
-			"Pick a group, then choose what Eryn may do with it.",
+			"Pick a group to override on top of the selected profile, or follow the profile again.",
 		].join("\n"),
 		[
 			selectRow({
@@ -220,7 +261,7 @@ async function groupScreen(request: InteractionRequest, key: string): Promise<vo
 				actionButton("Block", `${EFFECT_ID}${key}:block`, 4),
 			]),
 			buttonRow([
-				actionButton("Use preset", `${EFFECT_ID}${key}:inherit`, 2),
+				actionButton("Follow profile", `${EFFECT_ID}${key}:inherit`, 2),
 				actionButton("Back", BACK_ID, 2),
 				actionButton("Close", CLOSE_ID, 2),
 			]),
@@ -255,6 +296,7 @@ async function applyEffect(
 
 	const own = state.own
 		? {
+				...(state.own.profile ? { profile: state.own.profile } : {}),
 				...(state.own.preset ? { preset: state.own.preset } : {}),
 				...(state.own.elicitation ? { elicitation: state.own.elicitation } : {}),
 			}
@@ -304,8 +346,14 @@ export async function policyComponent(
 		return true;
 	}
 	if (customId.startsWith(PRESET_ID)) {
-		const value = customId.slice(PRESET_ID.length) as PolicyPreset;
-		if (value in PRESET_LABELS) return await claim(request, "update", () => applyPreset(request, value));
+		const value = customId.slice(PRESET_ID.length);
+		if ((LISTED_PROFILES as readonly string[]).includes(value)) {
+			return await claim(request, "update", () => applyProfile(request, value));
+		}
+	}
+	if (customId === PROFILE_ID) {
+		const value = values[0];
+		if (value) return await claim(request, "update", () => applyProfile(request, value));
 	}
 	if (customId === `${GROUP_ID}pick`) {
 		const key = values[0];

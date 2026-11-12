@@ -29,6 +29,7 @@ import {
 import { mcpComponent, mcpModal } from "./mcp";
 import { modelComponent, modelModalSubmit, modelScreen } from "./models";
 import { policyComponent, policyMenu } from "./policy";
+import { profileComponent, profileModal } from "./profiles";
 import { providerComponent, providerModal, providerScreen } from "./providers";
 import { resetComponent, resetScreen } from "./reset";
 import { helpText, setupComponent, setupMenu } from "./setup";
@@ -117,11 +118,17 @@ const COMPONENT_HANDLERS: readonly Handler<readonly string[]>[] = [
 	providerComponent,
 	modelComponent,
 	mcpComponent,
+	profileComponent,
 	policyComponent,
 	resetComponent,
 ];
 
-const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [providerModal, modelModalSubmit, mcpModal];
+const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [
+	providerModal,
+	modelModalSubmit,
+	mcpModal,
+	profileModal,
+];
 
 /** Dispatch any interaction Eryn receives. */
 export async function handleInteraction(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {

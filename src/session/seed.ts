@@ -9,6 +9,8 @@
  * otherwise left alone.
  */
 
+import { applyEdits, modify, parse } from "jsonc-parser";
+
 import { KEYS, log } from "../config.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "../plugins/workspace/bytes.ts";
 import { fileStore, type FileStore } from "../plugins/workspace/store.ts";
@@ -77,6 +79,32 @@ async function upgradeAttribution(store: FileStore): Promise<boolean> {
 	return true;
 }
 
+/**
+ * Add the default web search provider to a guild seeded before it existed.
+ *
+ * The choice lives per project, and every channel is its own project, so
+ * without this the web search tool stops to ask the same provider question in
+ * every new channel. An explicit `websearch` value is left alone, including
+ * `false`; only an absent field gains the default.
+ */
+async function upgradeWebSearch(store: FileStore): Promise<boolean> {
+	const file = await store.get(DEFAULT_CONFIG_PATH);
+	if (!file) return false;
+	const current = bytesToText(base64ToBytes(file.b));
+	const parsed: unknown = parse(current, [], { allowTrailingComma: true });
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+	if ("websearch" in parsed) return false;
+	const edits = modify(current, ["websearch"], { provider: "random" }, {
+		formattingOptions: { insertSpaces: true, tabSize: 2 },
+	});
+	const next = applyEdits(current, edits);
+	await store.put(DEFAULT_CONFIG_PATH, {
+		b: bytesToBase64(textToBytes(next)),
+		m: Date.now(),
+	});
+	return true;
+}
+
 /** Write any missing defaults, and apply the one-time seed upgrades. */
 export async function seedWorkspace(storage: DurableObjectStorage): Promise<void> {
 	const seeded = await storage.get<unknown>(KEYS.workspaceSeed);
@@ -94,10 +122,12 @@ export async function seedWorkspace(storage: DurableObjectStorage): Promise<void
 	}
 	const upgradedVoice = typeof seeded === "number" && seeded < 2 ? await upgradeDefaultVoice(store) : false;
 	const upgradedAttribution = typeof seeded === "number" && seeded < 3 ? await upgradeAttribution(store) : false;
+	const upgradedWebSearch = typeof seeded === "number" && seeded < 4 ? await upgradeWebSearch(store) : false;
 	await storage.put(KEYS.workspaceSeed, SEED_VERSION);
 	const upgrades = [
 		...(upgradedVoice ? ["the default voice"] : []),
 		...(upgradedAttribution ? ["the attribution footer"] : []),
+		...(upgradedWebSearch ? ["the web search default"] : []),
 	];
 	if (written > 0 || upgrades.length > 0) {
 		log(

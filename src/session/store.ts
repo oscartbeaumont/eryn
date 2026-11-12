@@ -20,6 +20,7 @@ import {
 	PendingMcpAuthSchema,
 	PendingOAuthSchema,
 	PolicyCardSchema,
+	PolicyProfileSchema,
 	PolicySchema,
 	ProviderConnectionSchema,
 	type GuildSettings,
@@ -28,6 +29,7 @@ import {
 	type PendingOAuth,
 	type Policy,
 	type PolicyCard,
+	type PolicyProfile,
 	type ProviderConnection,
 } from "./models";
 
@@ -155,6 +157,31 @@ class GuildStoreImpl {
 
 	async removeAuthAttempt(id: string): Promise<void> {
 		await this.storage.delete(KEYS.mcpAuth + id);
+	}
+
+	async profiles(): Promise<PolicyProfile[]> {
+		const entries = await this.storage.list<unknown>({ prefix: KEYS.policyProfile });
+		const profiles: PolicyProfile[] = [];
+		for (const value of entries.values()) {
+			const profile = Option.getOrUndefined(Schema.decodeUnknownOption(PolicyProfileSchema)(value));
+			if (profile) profiles.push(profile);
+		}
+		return profiles.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name));
+	}
+
+	async getProfile(id: string): Promise<PolicyProfile | undefined> {
+		return await this.plain(KEYS.policyProfile + id, PolicyProfileSchema);
+	}
+
+	async putProfile(profile: PolicyProfile): Promise<void> {
+		await this.storage.put(
+			KEYS.policyProfile + profile.id,
+			Schema.encodeSync(PolicyProfileSchema)(profile),
+		);
+	}
+
+	async removeProfile(id: string): Promise<void> {
+		await this.storage.delete(KEYS.policyProfile + id);
 	}
 
 	async policy(key: string): Promise<Policy | undefined> {

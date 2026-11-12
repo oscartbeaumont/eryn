@@ -47,6 +47,9 @@ import {
 	PolicyClearRequestSchema,
 	PolicyGetRequestSchema,
 	PolicySetRequestSchema,
+	ProfileDefaultRequestSchema,
+	ProfileRemoveRequestSchema,
+	ProfileSetRequestSchema,
 	PromptRequestSchema,
 	ProviderConnectRequestSchema,
 	type McpLink,
@@ -468,6 +471,23 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		[ROUTES.policyClear]: route(PolicyClearRequestSchema, async (body) => {
 			const state = await agent.clearPolicy(body);
 			return json({ ok: true, state });
+		}),
+
+		[ROUTES.profiles]: route(GuildRefSchema, async () => json(await agent.profiles())),
+
+		[ROUTES.profileSet]: route(ProfileSetRequestSchema, async (body) => {
+			const state = await agent.putProfile(body);
+			return json({ ok: true, ...state });
+		}),
+
+		[ROUTES.profileRemove]: route(ProfileRemoveRequestSchema, async (body) => {
+			const state = await agent.removeProfile(body.id);
+			return json({ ok: true, ...state });
+		}),
+
+		[ROUTES.profileDefault]: route(ProfileDefaultRequestSchema, async (body) => {
+			const state = await agent.setDefaultProfile(body.id);
+			return json({ ok: true, ...state });
 		}),
 
 		[ROUTES.approval]: route(ApprovalReplyRequestSchema, async (body) => json(await agent.replyApproval(body))),

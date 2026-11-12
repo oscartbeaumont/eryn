@@ -29,6 +29,7 @@ import {
 	InteractResponseSchema,
 	CommandResponseSchema,
 	PolicyStateSchema,
+	ProfilesStateSchema,
 	ResetResponseSchema,
 	type CommandInfo,
 	type CommandRequest,
@@ -48,7 +49,9 @@ import {
 	type McpProbeResponse,
 	type ModelOption,
 	type Policy,
+	type PolicyEffect,
 	type PolicyState,
+	type ProfilesState,
 	type PromptRequest,
 	type ProviderConnectRequest,
 	type ProviderConnectResponse,
@@ -243,6 +246,39 @@ export class SessionClient {
 			input,
 		);
 		return response.state;
+	}
+
+	profiles(): Promise<ProfilesState> {
+		return this.call(ROUTES.profiles, ProfilesStateSchema, {});
+	}
+
+	async putProfile(input: {
+		id: string;
+		name: string;
+		tools: Record<string, PolicyEffect>;
+		mcp: Record<string, PolicyEffect>;
+	}): Promise<ProfilesState> {
+		return await this.call(
+			ROUTES.profileSet,
+			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
+			input,
+		);
+	}
+
+	async removeProfile(id: string): Promise<ProfilesState> {
+		return await this.call(
+			ROUTES.profileRemove,
+			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
+			{ id },
+		);
+	}
+
+	async setDefaultProfile(id: string): Promise<ProfilesState> {
+		return await this.call(
+			ROUTES.profileDefault,
+			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
+			{ id },
+		);
 	}
 
 	replyApproval(input: {

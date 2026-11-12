@@ -13,6 +13,7 @@ import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
 import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
 import { claim, responder, closeRow, type InteractionRequest } from "./interaction";
 import { MODEL_SCREEN_ID } from "./models";
+import { PROFILES_SCREEN_ID, profileScreen } from "./profiles";
 import { PROVIDER_SCREEN_ID } from "./providers";
 
 export async function setupMenu(request: InteractionRequest): Promise<void> {
@@ -41,6 +42,10 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	// The greeting exists to lead an admin into this menu, so once the server is
 	// configured it has done its job.
 	if (status.ready) await request.ctx.dismissGreeting(request.guildId).catch(() => undefined);
+	const profiles = await request.session.profiles().catch(() => undefined);
+	const defaultProfile = profiles?.profiles.find(
+		(profile) => profile.id === profiles.defaultProfile,
+	);
 	const providers = status.providers.map((provider) => provider.integrationID).join(", ") || "none";
 	const links = status.links.length;
 	const lines = status.ready
@@ -49,11 +54,13 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 				`Provider: **${providers}**`,
 				`Model: \`${status.model}\``,
 				`MCP servers: ${links ? `${links} linked` : "none"}`,
+				`Default profile: **${defaultProfile?.name ?? profiles?.defaultProfile ?? "Standard"}**`,
 			]
 		: [
 				"**Eryn is not set up here yet.**",
 				"Connect an inference provider to get started.",
 				...(links ? [`MCP servers: ${links} linked`] : []),
+				...(profiles ? [`Default profile: **${defaultProfile?.name ?? "Standard"}**`] : []),
 			];
 	const buttons: DiscordButton[] = [
 		actionButton(
@@ -64,6 +71,7 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	];
 	if (status.ready) buttons.push(actionButton("Choose model", request.id(MODEL_SCREEN_ID), 2));
 	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2));
+	if (!request.dmGuildId) buttons.push(actionButton("Permissions", request.id(PROFILES_SCREEN_ID), 2));
 	buttons.push(actionButton("Close", request.id(SETUP_CLOSE_ID), 2));
 	await answer.reply(lines.join("\n"), [buttonRow(buttons)]);
 }
@@ -98,8 +106,8 @@ async function openMcp(request: InteractionRequest): Promise<void> {
 export function helpText(): string {
 	return [
 		"**Eryn commands**",
-		"• `/eryn setup` — providers, models, MCP servers, and current status (needs Manage Server)",
-		"• `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)",
+		"• `/eryn setup` — providers, models, MCP servers, the server's default permission profile, and current status (needs Manage Server)",
+		"• `/eryn policy` — choose a profile or override tools in this channel or thread (needs Manage Server)",
 		"• `/eryn reset` — wipe Eryn's files and restore the defaults (needs Manage Server)",
 		"• `/eryn stop` — stop the run in this thread",
 		"• `/eryn compact` — compact this conversation's history",

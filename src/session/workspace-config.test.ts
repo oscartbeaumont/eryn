@@ -69,6 +69,7 @@ test("a fresh guild reads the seeded config, command, skills, and instructions",
 	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
 
 	assert.equal((workspace.config as Record<string, unknown>).default_agent, "build");
+	assert.deepEqual((workspace.config as Record<string, unknown>).websearch, { provider: "random" });
 	assert.ok(workspace.config.commands?.explain);
 	assert.deepEqual(
 		workspace.skills.map((skill) => skill.id).sort(),
@@ -143,6 +144,27 @@ test("the progress upgrade leaves a custom voice alone", async () => {
 
 	assert.doesNotMatch(workspace.instructions ?? "", /## Progress updates/);
 	assert.match(workspace.instructions ?? "", /Be verbose/);
+});
+
+test("an existing guild gains the default web search provider once", async () => {
+	const storage = new MemoryStorage();
+	await write(
+		storage,
+		DEFAULT_CONFIG_PATH,
+		`{\n  "$schema": "https://opencode.ai/config.json",\n  "default_agent": "build"\n}\n`,
+	);
+	await storage.put(KEYS.workspaceSeed, 3);
+
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const workspace = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	assert.deepEqual((workspace.config as Record<string, unknown>).websearch, { provider: "random" });
+
+	// An explicit choice, including disabling search, is left alone.
+	await write(storage, DEFAULT_CONFIG_PATH, `{"websearch": false}\n`);
+	await storage.put(KEYS.workspaceSeed, 3);
+	await seedWorkspace(storage as unknown as DurableObjectStorage);
+	const later = await readWorkspaceConfig(storage as unknown as DurableObjectStorage);
+	assert.equal((later.config as Record<string, unknown>).websearch, false);
 });
 
 test("Markdown commands and skills become config entries", async () => {

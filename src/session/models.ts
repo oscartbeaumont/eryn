@@ -259,8 +259,22 @@ export type GuildStatus = typeof GuildStatusSchema.Type;
 export const PolicyEffectSchema = Schema.Literals(["allow", "ask", "block"]);
 export type PolicyEffect = typeof PolicyEffectSchema.Type;
 
-/** The four starting points the policy menu offers. */
-export const PolicyPresetSchema = Schema.Literals(["full", "chat", "read-only", "locked"]);
+/**
+ * The built-in starting points.
+ *
+ * `standard` is the server default: web search and the shell are enabled, but
+ * Eryn cannot reach other channels. `full` is every capability, `none` is no
+ * capabilities at all. `chat`, `read-only`, and `locked` are kept so a policy
+ * stored by an older build still resolves to the profile it chose.
+ */
+export const PolicyPresetSchema = Schema.Literals([
+	"standard",
+	"full",
+	"none",
+	"chat",
+	"read-only",
+	"locked",
+]);
 export type PolicyPreset = typeof PolicyPresetSchema.Type;
 
 /** How an approval or MCP input request is delivered. */
@@ -275,6 +289,9 @@ export type ElicitationMode = typeof ElicitationModeSchema.Type;
  * then expanding a preset into the groups it implies.
  */
 export const PolicySchema = Schema.Struct({
+	/** A built-in or custom profile this scope selects. */
+	profile: Schema.optional(Schema.String),
+	/** The older name for the same idea; still read, never written. */
 	preset: Schema.optional(PolicyPresetSchema),
 	/** Group or exact tool name to an effect. */
 	tools: Schema.optional(Schema.Record(Schema.String, PolicyEffectSchema)),
@@ -285,6 +302,25 @@ export const PolicySchema = Schema.Struct({
 });
 export type Policy = typeof PolicySchema.Type;
 
+/**
+ * A named permission profile, owned by the server.
+ *
+ * Built-in profiles are returned by the API but not stored here; a custom
+ * profile is a complete set of group and MCP effects, so it can be selected by
+ * any channel without knowing how it was built.
+ */
+export const PolicyProfileSchema = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	tools: Schema.Record(Schema.String, PolicyEffectSchema),
+	mcp: Schema.Record(Schema.String, PolicyEffectSchema),
+	/** Built-in profiles never appear in storage; this marks the API copy. */
+	builtin: Schema.optional(Schema.Boolean),
+	createdAt: Schema.Number,
+	updatedAt: Schema.Number,
+});
+export type PolicyProfile = typeof PolicyProfileSchema.Type;
+
 /** What the policy menu reads: the scope, its own patch, and the layered result. */
 export const PolicyStateSchema = Schema.Struct({
 	scope: Schema.Literals(["guild", "channel", "thread"]),
@@ -292,12 +328,23 @@ export const PolicyStateSchema = Schema.Struct({
 	threadId: Schema.optional(Schema.String),
 	/** The patch stored at this scope, before inheritance. */
 	own: Schema.optional(PolicySchema),
-	/** The resolved result after inheritance and preset expansion. */
+	/** The resolved result after inheritance and profile expansion. */
 	effective: PolicySchema,
 	/** The MCP servers the policy can name. */
 	mcpServers: Schema.Array(Schema.String),
+	/** Built-in and custom profiles a channel may select. */
+	profiles: Schema.Array(PolicyProfileSchema),
+	/** The profile the server uses when a channel has no override. */
+	defaultProfile: Schema.String,
 });
 export type PolicyState = typeof PolicyStateSchema.Type;
+
+/** The profiles a server owns, and the one it uses by default. */
+export const ProfilesStateSchema = Schema.Struct({
+	profiles: Schema.Array(PolicyProfileSchema),
+	defaultProfile: Schema.String,
+});
+export type ProfilesState = typeof ProfilesStateSchema.Type;
 
 /** Where a policy card lives, so a later edit can replace it. */
 export const PolicyCardSchema = Schema.Struct({
@@ -654,6 +701,19 @@ export const PolicyClearRequestSchema = guildScoped({
 	channelId: Schema.String,
 	threadId: Schema.optional(Schema.String),
 });
+
+/** Create or replace one custom profile. Built-in ids are refused. */
+export const ProfileSetRequestSchema = guildScoped({
+	id: Schema.String,
+	name: Schema.String,
+	tools: Schema.Record(Schema.String, PolicyEffectSchema),
+	mcp: Schema.Record(Schema.String, PolicyEffectSchema),
+});
+
+export const ProfileRemoveRequestSchema = guildScoped({ id: Schema.String });
+
+/** Pick the profile every channel inherits. */
+export const ProfileDefaultRequestSchema = guildScoped({ id: Schema.String });
 
 /** A decision on an approval card. `block` also writes a deny rule. */
 export const ApprovalReplyRequestSchema = guildScoped({

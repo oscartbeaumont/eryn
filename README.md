@@ -91,8 +91,8 @@ history, and policies are stored separately and are kept.
 
 ### Commands
 
-- `/eryn setup` — providers, models, MCP servers, and status (needs Manage Server)
-- `/eryn policy` — restrict tools and MCP servers in this channel or thread (needs Manage Server)
+- `/eryn setup` — providers, models, MCP servers, the default permission profile, and status (needs Manage Server)
+- `/eryn policy` — choose a profile or override tools in this channel or thread (needs Manage Server)
 - `/eryn reset` — wipe the server's files and restore the seeded defaults (needs Manage Server)
 - `/eryn stop` — stop the run in this conversation
 - `/eryn compact` — compact this conversation's history
@@ -102,12 +102,28 @@ history, and policies are stored separately and are kept.
 
 ## Permissions
 
-`/eryn policy` sets per-channel and per-thread tool limits. A policy is a
-ceiling, not the whole decision: every Discord tool also checks the Discord
-permissions of the member who prompted the turn, so a Full policy cannot let
-someone read a channel they cannot see themselves. Actions outside the current
-conversation are a separate **Cross-channel Discord** policy group, and an
-automated turn has no speaker, so it cannot use cross-channel tools.
+Permissions are named **profiles**, owned by the server. `/eryn setup` sets the
+server's default; `/eryn policy` chooses a profile for one channel or thread,
+or overrides individual groups on top of it. A channel with no override uses
+the server default.
+
+Three profiles are built in:
+
+- **Standard** is the default. Workspace reads and edits, the shell, web search,
+  subagents, and ordinary Discord conversation are allowed; channel
+  subscriptions and cross-channel Discord are not.
+- **Full** allows everything Eryn can do.
+- **None** allows nothing, including replies.
+
+A server admin can also build custom profiles from the Standard shape, edit
+each group, and then select them per channel. Deleting a profile makes channels
+that used it fall back to Standard.
+
+A profile is a ceiling, not the whole decision: every Discord tool also checks
+the Discord permissions of the member who prompted the turn, so a Full profile
+cannot let someone read a channel they cannot see themselves. Actions outside
+the current conversation are a separate **Cross-channel Discord** policy group,
+and an automated turn has no speaker, so it cannot use cross-channel tools.
 
 ### Schedules
 

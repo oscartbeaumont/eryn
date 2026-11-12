@@ -8,7 +8,7 @@
 
 import { CONFIG_PATH, INSTRUCTIONS_PATH, COMMANDS_ROOT, SKILLS_ROOT } from "./locations.ts";
 
-export const SEED_VERSION = 3;
+export const SEED_VERSION = 4;
 
 export const DEFAULT_CONFIG_PATH = CONFIG_PATH;
 export const DEFAULT_AGENTS_PATH = INSTRUCTIONS_PATH;
@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG = `{
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "build",
   "permissions": [{ "action": "*", "resource": "*", "effect": "allow" }],
+  "websearch": { "provider": "random" },
   "agents": { "title": { "disabled": true } },
   "experimental": { "schedules": true }
 }
@@ -188,6 +189,8 @@ The config is JSONC. Preserve unrelated fields when editing it. Useful fields:
 - \`commands\`
 - \`agents\`
 - \`permissions\` (the allow-all base is always kept; your rules are appended)
+- \`websearch\` (\`{ "provider": "random" }\` uses whichever search integration is
+  available; \`false\` disables web search)
 - \`experimental.schedules\` (always on)
 
 Do not add \`plugins\`: OpenCode cannot load plugin code at runtime on Workers.

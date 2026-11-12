@@ -75,6 +75,8 @@ export const KEYS = {
 	fs: "fs:",
 	/** The default files already written into the virtual filesystem. */
 	workspaceSeed: "config:workspace-seed",
+	/** One custom permission profile the server owns. */
+	policyProfile: "policy:profile:",
 	/** The server-wide policy patch. */
 	policyGuild: "policy:guild",
 	/** One channel's policy patch. */

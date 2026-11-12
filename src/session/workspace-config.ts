@@ -43,6 +43,10 @@ export {
 const BASE_CONFIG = {
 	default_agent: "build",
 	permissions: [{ action: "*", resource: "*", effect: "allow" }],
+	// Every channel is its own project, so without a stored provider choice the
+	// web search tool asks once per channel. Random uses whichever search
+	// integration is available and keeps the question out of the conversation.
+	websearch: { provider: "random" },
 	agents: { title: { disabled: true } },
 	experimental: { schedules: true },
 } as const;

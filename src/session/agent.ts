@@ -40,15 +40,21 @@ import type {
 	OAuthStatus,
 	Policy,
 	PolicyEffect,
+	PolicyProfile,
 	PolicyState,
+	ProfilesState,
 	PromptRequest,
 } from "./models";
 import { addScheduleToScope, scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
 import {
+	completeMcp,
+	completeTools,
 	compilePermissions,
+	isBuiltinProfile,
 	isDefaultPolicy,
 	overrideFor,
 	policyTitle,
+	profileList,
 	resolvePolicy,
 	summaryLines,
 	withOverride,
@@ -161,6 +167,19 @@ export interface GuildAgentShape {
 		channelId: string;
 		threadId?: string;
 	}): Promise<PolicyState>;
+	/** The server's built-in and custom permission profiles. */
+	profiles(): Promise<ProfilesState>;
+	/** Create or replace a custom profile. Built-in ids are refused. */
+	putProfile(input: {
+		id: string;
+		name: string;
+		tools: Record<string, PolicyEffect>;
+		mcp: Record<string, PolicyEffect>;
+	}): Promise<ProfilesState>;
+	/** Remove a custom profile; any scope using it falls back to Standard. */
+	removeProfile(id: string): Promise<ProfilesState>;
+	/** Choose the profile every channel inherits. */
+	setDefaultProfile(id: string): Promise<ProfilesState>;
 	/** Decide a pending permission card and, for always/block, write a policy override. */
 	replyApproval(input: {
 		threadId: string;
@@ -1212,11 +1231,20 @@ class GuildAgentImpl implements GuildAgentShape {
 		return await this.store.policy(this.scopeKey(scope, channelId, threadId));
 	}
 
+	private async profilesState(custom: readonly PolicyProfile[]): Promise<ProfilesState> {
+		const guild = await this.patchFor("guild", "");
+		return {
+			profiles: profileList(custom),
+			defaultProfile: guild?.profile ?? "standard",
+		};
+	}
+
 	private async policyFor(channelId: string, threadId?: string): Promise<PolicyState> {
+		const custom = await this.store.profiles();
 		const guild = await this.patchFor("guild", channelId);
 		const channel = await this.patchFor("channel", channelId);
 		const thread = threadId ? await this.patchFor("thread", channelId, threadId) : undefined;
-		const effective = resolvePolicy([guild, channel, thread]);
+		const effective = resolvePolicy([guild, channel, thread], custom);
 		const links = await this.store.links();
 		return {
 			scope: threadId ? "thread" : "channel",
@@ -1225,11 +1253,78 @@ class GuildAgentImpl implements GuildAgentShape {
 			...(threadId ? (thread ? { own: thread } : {}) : channel ? { own: channel } : {}),
 			effective,
 			mcpServers: links.map((link) => link.name),
+			profiles: profileList(custom),
+			defaultProfile: guild?.profile ?? "standard",
 		};
 	}
 
 	async policyState(input: { channelId: string; threadId?: string }): Promise<PolicyState> {
 		return await this.policyFor(input.channelId, input.threadId);
+	}
+
+	async profiles(): Promise<ProfilesState> {
+		return await this.profilesState(await this.store.profiles());
+	}
+
+	async putProfile(input: {
+		id: string;
+		name: string;
+		tools: Record<string, PolicyEffect>;
+		mcp: Record<string, PolicyEffect>;
+	}): Promise<ProfilesState> {
+		const id = input.id.trim();
+		if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(id)) {
+			throw new Error("A profile id must be a short lowercase slug.");
+		}
+		if (isBuiltinProfile(id)) throw new Error(`"${id}" is a built-in profile and cannot be replaced.`);
+		const name = input.name.trim().slice(0, 60);
+		if (!name) throw new Error("Give the profile a name.");
+		const existing = await this.store.getProfile(id);
+		if (!existing && (await this.store.profiles()).length >= 22) {
+			throw new Error("A server can have at most 22 custom profiles, so every profile fits in Discord's picker.");
+		}
+		const now = Date.now();
+		await this.store.putProfile({
+			id,
+			name,
+			tools: completeTools(input.tools),
+			mcp: completeMcp(input.mcp),
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+		});
+		await this.reapplyScope({ scope: "guild", channelId: "" });
+		return await this.profiles();
+	}
+
+	async removeProfile(id: string): Promise<ProfilesState> {
+		if (isBuiltinProfile(id)) throw new Error(`"${id}" is a built-in profile and cannot be removed.`);
+		await this.store.removeProfile(id);
+		// A server default that named the profile has nothing left to point at;
+		// clear it so Standard applies instead of a stale id.
+		const guild = await this.patchFor("guild", "");
+		if (guild?.profile === id) {
+			const { profile: _profile, ...rest } = guild;
+			await this.store.putPolicy(KEYS.policyGuild, { ...rest, updatedAt: Date.now() });
+		}
+		await this.reapplyScope({ scope: "guild", channelId: "" });
+		return await this.profiles();
+	}
+
+	async setDefaultProfile(id: string): Promise<ProfilesState> {
+		const custom = await this.store.profiles();
+		if (!profileList(custom).some((profile) => profile.id === id)) {
+			throw new Error("That profile does not exist.");
+		}
+		const guild = await this.patchFor("guild", "");
+		// Keep any server-wide group overrides the admin made; only the selected
+		// profile changes.
+		await this.store.putPolicy(KEYS.policyGuild, {
+			...(guild ?? {}),
+			profile: id,
+			updatedAt: Date.now(),
+		});
+		await this.reapplyScope({ scope: "guild", channelId: "" });
+		return await this.profiles();
 	}
 
 	async setPolicy(input: {
@@ -1334,6 +1429,13 @@ class GuildAgentImpl implements GuildAgentShape {
 			await this.applyPolicyToThread(host, threadId, value, context, config).catch((error) =>
 				log("session", `could not update ${threadId}: ${describeError(error)}`),
 			);
+			if (input.scope === "guild") {
+				await this.syncCard({
+					scope: context.kind === "channel" ? "channel" : "thread",
+					channelId: context.channel.id,
+					...(context.kind === "channel" ? {} : { threadId }),
+				});
+			}
 		}
 	}
 
@@ -1349,8 +1451,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		const id = scope === "thread" ? input.threadId ?? input.channelId : input.channelId;
 		const key = KEYS.policyCard + `${scope}:${id}`;
 		const state = await this.policyFor(input.channelId, input.threadId);
+		const custom = state.profiles.filter((profile) => !profile.builtin);
 		const existing = await this.store.policyCard(key);
-		if (isDefaultPolicy(state.effective)) {
+		if (isDefaultPolicy(state.effective, custom, state.defaultProfile)) {
 			if (!existing) return;
 			await this.rest.deleteMessage(existing.channelId, existing.messageId).catch(() => undefined);
 			await this.store.removePolicyCard(key);
@@ -1358,6 +1461,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		}
 		const content = this.policyCardText(state);
 		const components = [buttonRow([actionButton("Change", "policy:menu", 2)])];
+
 		if (existing) {
 			try {
 				await this.rest.editMessage(existing.channelId, existing.messageId, content, { components });
@@ -1377,8 +1481,9 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	private policyCardText(state: PolicyState): string {
+		const custom = state.profiles.filter((profile) => !profile.builtin);
 		const text = [
-			`🔒 **Permissions here: ${policyTitle(state.effective)}**`,
+			`🔒 **Permissions here: ${policyTitle(state.effective, custom)}**`,
 			summaryLines(state.effective, state.mcpServers).join(" · "),
 			"`/eryn policy` to change this.",
 		].join("\n");
