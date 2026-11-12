@@ -31,6 +31,7 @@ import {
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
 import { actionButton, buttonRow, selectRow } from "../../discord/components";
+import { formatMessage } from "../../discord/markdown";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
@@ -58,6 +59,22 @@ function channelSummary(channel: DiscordChannelRef) {
 const CHANNEL_ID = { type: "string", description: "Channel or thread id" };
 const MESSAGE_ID = { type: "string", description: "Message id" };
 const THREAD_ID = { type: "string", description: "Thread id" };
+
+/**
+ * Lay a message out for Discord and check it still fits.
+ *
+ * A table can grow when it becomes one block per row, so the limit is checked
+ * on the rendered message rather than on the Markdown the model wrote.
+ */
+function forDiscord(content: string): string {
+	const formatted = formatMessage(content);
+	if (formatted.length > MAX_CONTENT) {
+		throw new Error(
+			`Discord messages are limited to ${MAX_CONTENT} characters; this one needs ${formatted.length} once its tables are laid out. Split it into smaller messages.`,
+		);
+	}
+	return formatted;
+}
 
 /** The arguments the schemas above describe, so each tool casts once. */
 type ChannelInput = { channelId: string };
@@ -443,7 +460,10 @@ export function discordTools(
 			input: objectSchema(
 				{
 					channelId: CHANNEL_ID,
-					content: { type: "string", description: "Message text, up to 2000 characters" },
+					content: {
+						type: "string",
+						description: "Message text, up to 2000 characters. Markdown tables are laid out for Discord.",
+					},
 					replyTo: { type: "string", description: "Optional message id to reply to" },
 				},
 				["channelId", "content"],
@@ -464,7 +484,7 @@ export function discordTools(
 				);
 				if (!content.trim()) throw new Error("Message content is required.");
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
-				const sent = await rest.sendMessage(channelId, content, replyTo ? { replyTo } : {});
+				const sent = await rest.sendMessage(channelId, forDiscord(content), replyTo ? { replyTo } : {});
 				// A successful send is the usage signal: the turn either replied
 				// in its conversation or it did not. Content is not involved.
 				onMessageSent?.(channelId);
@@ -503,7 +523,7 @@ export function discordTools(
 				}
 				const authorId = context.authorId;
 				if (!authorId) throw new Error("This turn has no Discord user to answer.");
-				const asked = question.trim().slice(0, 2_000);
+				const asked = formatMessage(question.trim()).slice(0, 2_000);
 				if (!asked) throw new Error("A question is required.");
 
 				const options = [
@@ -781,7 +801,7 @@ export function discordTools(
 					own ? "edit its own message" : "edit messages",
 				);
 				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
-				await rest.editMessage(channelId, messageId, content);
+				await rest.editMessage(channelId, messageId, forDiscord(content));
 				return { ok: true };
 			},
 		},
