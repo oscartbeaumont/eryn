@@ -31,7 +31,7 @@ import {
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
 import { actionButton, buttonRow, selectRow } from "../../discord/components";
-import { formatMessage } from "../../discord/markdown";
+import { formatMessage, type FormattedMessage } from "../../discord/markdown";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
@@ -61,16 +61,16 @@ const MESSAGE_ID = { type: "string", description: "Message id" };
 const THREAD_ID = { type: "string", description: "Thread id" };
 
 /**
- * Lay a message out for Discord and check it still fits.
+ * Lay a message out for Discord and check its text still fits.
  *
- * A table can grow when it becomes one block per row, so the limit is checked
- * on the rendered message rather than on the Markdown the model wrote.
+ * A wide table moves into an embed, so the text limit applies to what is left
+ * in the message rather than to the Markdown the model wrote.
  */
-function forDiscord(content: string): string {
+function forDiscord(content: string): FormattedMessage {
 	const formatted = formatMessage(content);
-	if (formatted.length > MAX_CONTENT) {
+	if (formatted.content.length > MAX_CONTENT) {
 		throw new Error(
-			`Discord messages are limited to ${MAX_CONTENT} characters; this one needs ${formatted.length} once its tables are laid out. Split it into smaller messages.`,
+			`Discord messages are limited to ${MAX_CONTENT} characters; this one is ${formatted.content.length}. Split it into smaller messages.`,
 		);
 	}
 	return formatted;
@@ -483,8 +483,11 @@ export function discordTools(
 					{ allowWithoutAuthor: true },
 				);
 				if (!content.trim()) throw new Error("Message content is required.");
-				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
-				const sent = await rest.sendMessage(channelId, forDiscord(content), replyTo ? { replyTo } : {});
+				const formatted = forDiscord(content);
+				const sent = await rest.sendMessage(channelId, formatted.content, {
+					...(replyTo ? { replyTo } : {}),
+					...(formatted.embeds.length > 0 ? { embeds: formatted.embeds } : {}),
+				});
 				// A successful send is the usage signal: the turn either replied
 				// in its conversation or it did not. Content is not involved.
 				onMessageSent?.(channelId);
@@ -523,7 +526,7 @@ export function discordTools(
 				}
 				const authorId = context.authorId;
 				if (!authorId) throw new Error("This turn has no Discord user to answer.");
-				const asked = formatMessage(question.trim()).slice(0, 2_000);
+				const asked = formatMessage(question.trim()).content.slice(0, 2_000);
 				if (!asked) throw new Error("A question is required.");
 
 				const options = [
@@ -800,8 +803,16 @@ export function discordTools(
 					own ? Permission.ViewChannel : Permission.ViewChannel | Permission.ManageMessages,
 					own ? "edit its own message" : "edit messages",
 				);
-				if (content.length > MAX_CONTENT) throw new Error("Discord messages are limited to 2000 characters.");
-				await rest.editMessage(channelId, messageId, forDiscord(content));
+				const formatted = forDiscord(content);
+				await rest.editMessage(
+					channelId,
+					messageId,
+					formatted.content,
+					// Editing Eryn's own message replaces its layout, including
+					// removing an embed when the table is gone. Another author's
+					// embeds are left alone.
+					own ? { embeds: formatted.embeds } : {},
+				);
 				return { ok: true };
 			},
 		},

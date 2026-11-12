@@ -71,6 +71,21 @@ export interface DiscordAttachment {
 	proxy_url?: string;
 }
 
+/** One field of a rich embed. */
+export interface DiscordEmbedField {
+	name: string;
+	value: string;
+	inline?: boolean;
+}
+
+/** The subset of a rich embed Eryn builds, used to lay out a wide table. */
+export interface DiscordEmbed {
+	title?: string;
+	description?: string;
+	color?: number;
+	fields?: readonly DiscordEmbedField[];
+}
+
 /** A message as a tool needs to see it. */
 export interface DiscordMessageView {
 	id: string;
@@ -333,7 +348,12 @@ export function discordRest(token: string) {
 		async sendMessage(
 			channelId: string,
 			content: string,
-			options: { users?: readonly string[]; replyTo?: string; components?: readonly DiscordComponent[] } = {},
+			options: {
+				users?: readonly string[];
+				replyTo?: string;
+				components?: readonly DiscordComponent[];
+				embeds?: readonly DiscordEmbed[];
+			} = {},
 		): Promise<{ id: string }> {
 			const body: Record<string, unknown> = {
 				content,
@@ -342,6 +362,7 @@ export function discordRest(token: string) {
 			};
 			if (options.replyTo) body.message_reference = { message_id: options.replyTo, fail_if_not_exists: false };
 			if (options.components?.length) body.components = options.components;
+			if (options.embeds?.length) body.embeds = options.embeds;
 			return await create(`/channels/${channelId}/messages`, body, "Discord did not accept the message");
 		},
 
@@ -354,12 +375,13 @@ export function discordRest(token: string) {
 			channelId: string,
 			messageId: string,
 			content: string,
-			options: { components?: readonly DiscordComponent[] } = {},
+			options: { components?: readonly DiscordComponent[]; embeds?: readonly DiscordEmbed[] } = {},
 		): Promise<void> {
 			await request<void>("PATCH", messagePath(channelId, messageId), {
 				content,
 				allowed_mentions: { parse: [] },
 				...(options.components ? { components: options.components } : {}),
+				...(options.embeds !== undefined ? { embeds: options.embeds } : {}),
 			});
 		},
 
