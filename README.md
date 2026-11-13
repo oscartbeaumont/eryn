@@ -39,14 +39,58 @@ dispatches interactions. It forwards each guild's work to that guild's
 links, and a virtual filesystem kept in SQLite-backed Durable Object storage.
 Credentials and MCP tokens are sealed with AES-GCM under `ENCRYPTION_KEY`.
 
-### Projects and workspace
+### Workspace and memory
 
 Each Discord channel gets its own OpenCode project at
 `/eryn/channels/<channel id>`. Threads in that channel share the project, so
 the project list is grouped by channel instead of being one flat list of
-conversations. The agent's files live in a separate shared virtual workspace,
-not inside that project directory, so the grouping does not stop it reading or
-writing elsewhere.
+conversations.
+
+The agent's files live in a separate virtual workspace at `/workspace`, shared
+by every channel and thread in the server. That workspace is also its
+long-term memory: a note written in one thread is still there in the next, and
+survives restarts, deploys, and eviction. It is stored in the guild's Durable
+Object, so nothing written in one server is visible from another. There is no
+separate memory service; anything Eryn should remember has to become a file.
+
+`read`, `write`, `edit`, `list`, and `bash` replace OpenCode's built-in file
+tools, which expect a real disk. They act on the same store, so a file written
+by `write` can be read by `cat` in the shell. `bash` is a sandboxed shell
+mounted at `/workspace`; it cannot see `/eryn`, open a socket, or start a
+process outside the Worker. `/eryn` holds the configuration described below and
+is reachable through the file tools but not through the shell.
+
+### MCP servers
+
+External tools arrive through [MCP](https://modelcontextprotocol.io). An admin
+links a server in `/eryn setup` → **MCP servers** with its URL and, if it needs
+one, a bearer token. Eryn probes the server before saving the link, shows the
+tools it found, and offers all of them to the agent on the next turn. Links are
+guild-wide, so every conversation sees the same servers; the conversation
+policy decides which of their tools that conversation may use.
+
+If the server asks for OAuth, Eryn discovers its authorization server, registers
+a client, and sends the admin through the browser sign-in. Tokens are sealed
+with AES-GCM under `ENCRYPTION_KEY` and refreshed before they expire; a failed
+or cancelled sign-in leaves no link behind. Removing a link discards its token
+immediately, and `/eryn setup` can test one server or all of them without a
+turn.
+
+Tools are exposed as `<server>_<tool>`, so a server named `github` with a
+`create_issue` tool gives the agent `github_create_issue`. The same name is what
+the policy matches, per server or per tool.
+
+Each link has an approval mode. `discord` posts the server's elicitation
+questions in the conversation, `browser` sends the admin to the server's own
+page, `agent` lets the model answer, and `off` declines them. By default Eryn
+only adds the routing parameter to servers that document it, such as Executor,
+so a server with a strict OAuth resource URI is left untouched; choosing a mode
+in the add dialog applies it explicitly.
+
+A server that drives a browser, a desktop, or another machine is just an MCP
+server with those tools. Eryn calls them like any other tool; the work happens
+on that server, not in the Worker, and the same policy and approval rules
+apply.
 
 ### Questions and approvals
 
@@ -56,6 +100,75 @@ a select menu, free text is answered by replying in the thread, and the answer
 is submitted once every required field is in. The agent can ask the same kind of
 question itself with the `discord_ask` tool; that posts the question and ends the
 turn, and the answer arrives as the next message.
+
+### Schedules
+
+Ask Eryn to do something later, or on a repeating basis, and it creates a
+schedule in that conversation. A schedule holds a prompt, a timing rule, an
+optional condition, and an optional end. `when` can be a one-off (`in 20
+minutes`, `at 2026-10-27T09:00`), a fixed interval (`every 1 hour`), or a cron
+expression (`0 9 * * 1-5`), with an optional timezone. `ends` stops a repeat
+after a duration, a time, or a count.
+
+An `if` condition — a shell command or a small JavaScript check — gates each
+fire without calling the model. `until` instead waits for its condition, then
+wakes the session once and stops. The agent can list, pause, resume, and delete
+schedules. They belong to the conversation and go when it does.
+
+When a schedule fires, OpenCode writes a wake message into the same session and
+the agent runs the stored prompt. The turn is recognised by that wake message,
+not by a time window, so a human message sent immediately after a fire is still
+a human turn.
+
+A schedule has no person behind it, so it runs as a **capability scope**
+instead of borrowing its creator's permissions. The scope starts as the
+conversation only, with the creator's own read, send, thread-creation,
+reaction, and moderation permissions there. Its owner, or someone with Manage
+Server, can add another channel with `discord_join_channel` or
+`discord_subscribe_message`; the added channel records the editor's permissions
+there. A schedule cannot change its own scope, except that a thread it creates
+inside an in-scope channel inherits that channel's capabilities. People talking
+in the conversation must cover the whole scope with their own Discord
+permissions, or their message is not forwarded.
+
+A scope that includes message management therefore makes the conversation
+moderator-only, and one that can create threads also requires members to be
+able to send in threads. Schedules are public by default: a public thread or
+channel stays public, and the scope is not a visibility feature. The scope
+covers Discord only; workspace, shell, web, subagents, and MCP are still
+governed by the conversation policy.
+
+### Skills, commands, and agents
+
+Beyond instructions, three kinds of Markdown shape a server's behaviour. All
+live in the virtual filesystem, so a member can ask Eryn to add or change one.
+
+- **Skills** — `/eryn/.opencode/skills/<id>/SKILL.md`. Frontmatter carries
+  `name`, `description`, and optionally an `opencode/autoinvoke` flag under
+  `metadata`. Files beside `SKILL.md` are the skill's own references, and a
+  relative `read` from an active skill resolves there first.
+- **Commands** — `/eryn/.opencode/commands/<name>.md`. A prompt template with
+  `$ARGUMENTS`, `$1`, `$2`, and so on; an `!` block runs in the workspace shell
+  before the prompt is sent. Run one with `/eryn command <name>`, or list them
+  with `/eryn commands`.
+- **Agents** — `/eryn/.opencode/agents/<id>.md`. Frontmatter is agent config and
+  the body is the system prompt; `.opencode/agent` is the older alias.
+
+Eryn reads these from its own store instead of OpenCode's filesystem discovery,
+and rebuilds the host when they change. A skill keeps its real store path, which
+is why its relative supporting files resolve.
+
+### Plugins
+
+Eryn does not load plugins written by a server. OpenCode's plugin API evaluates
+JavaScript at runtime, and a Worker cannot. Eryn's own integration is compiled
+TypeScript bundled into the Worker: the workspace filesystem and shell, guild
+MCP links, workspace skills, Discord tools and schedule scopes, session and
+prompt assembly, command shell blocks, and MCP search guidance.
+
+`plugins` in `opencode.jsonc` is stripped before the host is built. The
+supported extension points are the files above and MCP; a capability that needs
+new code needs a fork.
 
 ### Customising Eryn
 
@@ -104,8 +217,8 @@ history, and policies are stored separately and are kept.
 
 Permissions are named **profiles**, owned by the server. `/eryn setup` sets the
 server's default; `/eryn policy` chooses a profile for one channel or thread,
-or overrides individual groups on top of it. A channel with no override uses
-the server default.
+or overrides individual groups on top of it. A thread with no override uses its
+channel, and a channel with no override uses the server default.
 
 Three profiles are built in:
 
@@ -116,39 +229,38 @@ Three profiles are built in:
 - **None** allows nothing, including replies.
 
 A server admin can also build custom profiles from the Standard shape, edit
-each group, and then select them per channel. Deleting a profile makes channels
-that used it fall back to Standard.
+each group, and then select them per channel.
 
 A profile is a ceiling, not the whole decision: every Discord tool also checks
 the Discord permissions of the member who prompted the turn, so a Full profile
 cannot let someone read a channel they cannot see themselves. Actions outside
-the current conversation are a separate **Cross-channel Discord** policy group,
-and an automated turn has no speaker, so it cannot use cross-channel tools.
+the current conversation are a separate **Cross-channel Discord** policy group.
 
-### Schedules
+### How a policy is applied
 
-A schedule runs as a capability scope, not as the person who created it. Its
-scope starts as the conversation only, with the creator's own read, send,
-thread-creation, reaction, and moderation permissions there. The scope
-owner or someone with Manage Server can add another channel with
-`discord_join_channel` or `discord_subscribe_message`, which stores the editor's
-permissions in that channel; a schedule turn cannot change its own scope,
-except that a thread it creates inside an in-scope channel inherits that
-channel's capabilities. People talking to the conversation must cover that scope
-with their own Discord
-permissions, or their message is not forwarded to the agent. A scope that
-includes message management therefore makes the conversation moderator-only,
-and one that can create threads also requires members to be able to send in
-threads.
+A policy is a stack: the server default, then any channel override, then any
+thread override. A thread with no patch inherits its channel, and a channel
+with no patch inherits the server. A layer that selects a profile resets every
+group to that profile; explicit group overrides in the same or a later layer
+are applied after it. Deleting a profile resolves channels and threads that
+named it to Standard rather than to the server default, so a removed profile
+cannot silently widen access.
 
-A schedule turn is identified by the wake message OpenCode's runner writes, not
-by a time window, so a human message sent right after a schedule fires is still
-treated as a human turn.
+The resolved policy compiles into the session's OpenCode permission rules. A
+blocked tool is removed from the model's tool list, not merely refused when
+called; a tool set to `ask` stays visible and posts an approval card in the
+conversation. **Always here** and **Block here** write an exact-tool override at
+the channel or thread where the approval was granted, so approving one read does
+not allow every tool that server exposes.
 
-Schedules are **public by default**: a public thread or channel stays public,
-and the scope is not a visibility feature. Private content needs a private
-thread or channel. The scope only covers Discord channels; workspace, shell,
-web, subagents, and MCP remain governed by the conversation policy.
+MCP follows the same layers. A policy can allow or block every server with `*`,
+then override one server, and an approval can name one tool. Links themselves
+are guild-wide; only their availability is per conversation.
+
+Discord is checked twice: against the policy group, and against the permissions
+of the member who prompted the turn. An automated turn has no speaker to borrow
+permissions from; a [schedule](#schedules) reaches only the channels recorded
+in its capability scope, and nothing outside it.
 
 ## Self-hosting
 
