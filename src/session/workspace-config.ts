@@ -48,7 +48,7 @@ const BASE_CONFIG = {
 	// integration is available and keeps the question out of the conversation.
 	websearch: { provider: "random" },
 	agents: { title: { disabled: true } },
-	experimental: { schedules: true },
+	experimental: { schedules: true, mcp_events: true },
 } as const;
 
 export interface WorkspaceSkill {
@@ -327,11 +327,12 @@ export async function readWorkspaceConfig(storage: DurableObjectStorage): Promis
 				...record(userAgentConfig?.title),
 			},
 		} as never,
-		// Schedules back the agent's schedule tools, so keep them enabled even
-		// when a hand-edited config omits or disables the flag.
+		// Eryn relies on schedules and MCP event watches, so keep both enabled
+		// even when a hand-edited config omits or disables either flag.
 		experimental: {
 			...record(userExperimental),
 			schedules: true,
+			mcp_events: true,
 		} as never,
 		...(skillUrls ? { skills: skillUrls } : {}),
 		...(instructionUrls ? { instructions: instructionUrls } : {}),

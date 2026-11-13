@@ -409,6 +409,7 @@ test("a missing or malformed config still gets Eryn's required base", async () =
 	const emptyConfig = empty.config as Record<string, unknown>;
 	assert.deepEqual(emptyConfig.permissions, [{ action: "*", resource: "*", effect: "allow" }]);
 	assert.equal((emptyConfig.experimental as Record<string, unknown>).schedules, true);
+	assert.equal((emptyConfig.experimental as Record<string, unknown>).mcp_events, true);
 	assert.equal(emptyConfig.default_agent, "build");
 	assert.equal((emptyConfig.agents as Record<string, unknown>).title instanceof Object, true);
 
@@ -417,6 +418,7 @@ test("a missing or malformed config still gets Eryn's required base", async () =
 	const malformedConfig = malformed.config as Record<string, unknown>;
 	assert.deepEqual(malformedConfig.permissions, [{ action: "*", resource: "*", effect: "allow" }]);
 	assert.equal((malformedConfig.experimental as Record<string, unknown>).schedules, true);
+	assert.equal((malformedConfig.experimental as Record<string, unknown>).mcp_events, true);
 
 	await write(
 		storage,
@@ -431,6 +433,7 @@ test("a missing or malformed config still gets Eryn's required base", async () =
 	assert.equal(validConfig.default_agent, "plan");
 	assert.deepEqual(validConfig.permissions, [{ action: "*", resource: "*", effect: "allow" }]);
 	assert.equal((validConfig.experimental as Record<string, unknown>).schedules, true);
+	assert.equal((validConfig.experimental as Record<string, unknown>).mcp_events, true);
 	assert.equal(
 		((validConfig.agents as Record<string, unknown>).title as Record<string, unknown>).disabled,
 		true,

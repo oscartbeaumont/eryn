@@ -22,7 +22,7 @@ export const DEFAULT_CONFIG = `{
   "permissions": [{ "action": "*", "resource": "*", "effect": "allow" }],
   "websearch": { "provider": "random" },
   "agents": { "title": { "disabled": true } },
-  "experimental": { "schedules": true }
+  "experimental": { "schedules": true, "mcp_events": true }
 }
 `;
 
@@ -192,6 +192,8 @@ The config is JSONC. Preserve unrelated fields when editing it. Useful fields:
 - \`websearch\` (\`{ "provider": "random" }\` uses whichever search integration is
   available; \`false\` disables web search)
 - \`experimental.schedules\` (always on)
+- MCP event watching is enabled by default; the server keeps
+  \`experimental.mcp_events\` on for every guild.
 
 Do not add \`plugins\`: OpenCode cannot load plugin code at runtime on Workers.
 Provider credentials and MCP links are managed by \`/eryn setup\`, not this file.
