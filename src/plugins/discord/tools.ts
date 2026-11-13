@@ -23,10 +23,13 @@ import type { Plugin } from "@opencode/plugin";
 
 import {
 	MAX_CONTENT,
+	MAX_FILE_BYTES,
+	MAX_FILES,
 	THREAD_TYPES,
 	type DiscordChannelRef,
 	type DiscordMessageView,
 	type DiscordRest,
+	type DiscordUpload,
 } from "../../discord/api";
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
@@ -34,6 +37,8 @@ import { actionButton, buttonRow, selectRow } from "../../discord/components";
 import { formatMessage, type FormattedMessage } from "../../discord/markdown";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
+import { uploadNames } from "../../discord/uploads";
+import { WORKSPACE_ROOT } from "../../session/locations";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
 import {
 	addChannelToScope,
@@ -41,6 +46,9 @@ import {
 	removeChannelFromScope,
 	scopeAllows,
 } from "../../session/schedule-scope";
+import { base64ToBytes } from "../workspace/bytes";
+import { resolvePath } from "../workspace/paths.ts";
+import type { FileStore } from "../workspace/store";
 import { objectSchema, toolExecute, type ToolCall, type ToolSpec } from "../tool";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "./context";
 
@@ -81,6 +89,42 @@ type ChannelInput = { channelId: string };
 type MessageInput = ChannelInput & { messageId: string };
 type ThreadInput = { threadId: string };
 
+/** A byte count as a person would read it. */
+function formatBytes(bytes: number): string {
+	const megabytes = bytes / (1024 * 1024);
+	if (megabytes >= 1) return `${Number(megabytes.toFixed(1))} MB`;
+	return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * Turn workspace paths into uploads.
+ *
+ * Only the shared workspace is eligible. That is where the agent writes, and
+ * allowing any stored path would let it post a file from `/eryn` — its own
+ * configuration — into a channel. The bytes come from the same store the file
+ * tools use, so a document just written by `write` or `bash` is attachable.
+ */
+async function readUploads(store: FileStore, paths: readonly string[]): Promise<DiscordUpload[]> {
+	const resolved = paths.map((path) => resolvePath(WORKSPACE_ROOT, path));
+	const names = uploadNames(resolved);
+	const uploads: DiscordUpload[] = [];
+	for (const [index, path] of resolved.entries()) {
+		if (!path.startsWith(`${WORKSPACE_ROOT}/`)) {
+			throw new Error(`Eryn can only attach files from ${WORKSPACE_ROOT}; ${paths[index]} is outside it.`);
+		}
+		const stored = await store.get(path);
+		if (!stored) throw new Error(`Attachment ${paths[index]} was not found in the workspace.`);
+		const data = base64ToBytes(stored.b);
+		if (data.byteLength > MAX_FILE_BYTES) {
+			throw new Error(
+				`Attachment ${paths[index]} is ${formatBytes(data.byteLength)}; Discord accepts at most ${formatBytes(MAX_FILE_BYTES)} per file.`,
+			);
+		}
+		uploads.push({ filename: names[index], data });
+	}
+	return uploads;
+}
+
 /** The JSON metadata boundary: stored scope arrays are readonly for readers. */
 type SessionMetadata = NonNullable<Parameters<Plugin.Context["session"]["update"]>[0]["metadata"]>;
 
@@ -99,6 +143,7 @@ export type SetMessageSubscription = (watch: MessageWatch, subscribed: boolean) 
 export function discordTools(
 	rest: DiscordRest,
 	guildId: string,
+	store: FileStore,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
 	authority: DiscordAuthority,
@@ -456,21 +501,31 @@ export function discordTools(
 		{
 			name: "discord_send_message",
 			description:
-				"Send a message to a channel or thread in this server. This is how you reply: your own output is not posted to Discord. Pass the thread id from the message's <thread> element, or the channel id from its <channel> element, as channelId. Mentions are suppressed; replyTo attaches the message as a reply.",
+				"Send a message to a channel or thread in this server. This is how you reply: your own output is not posted to Discord. Pass the thread id from the message's <thread> element, or the channel id from its <channel> element, as channelId. Mentions are suppressed; replyTo attaches the message as a reply. Add workspace files with `files` to upload them as attachments, which is how to share something too long to paste: write it with the write tool first.",
 			input: objectSchema(
 				{
 					channelId: CHANNEL_ID,
 					content: {
 						type: "string",
-						description: "Message text, up to 2000 characters. Markdown tables are laid out for Discord.",
+						description:
+							"Message text, up to 2000 characters; optional when files are attached. Markdown tables are laid out for Discord.",
 					},
 					replyTo: { type: "string", description: "Optional message id to reply to" },
+					files: {
+						type: "array",
+						items: { type: "string" },
+						description: `Workspace paths to attach, such as /workspace/report.md or report.md (up to ${MAX_FILES} files, ${formatBytes(MAX_FILE_BYTES)} each)`,
+					},
 				},
-				["channelId", "content"],
+				["channelId"],
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, content, replyTo } = rawInput as ChannelInput & { content: string; replyTo?: string };
+				const { channelId, content, replyTo, files: rawFiles } = rawInput as ChannelInput & {
+					content?: string;
+					replyTo?: string;
+					files?: string[];
+				};
 				const found = await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -482,11 +537,18 @@ export function discordTools(
 					"send messages",
 					{ allowWithoutAuthor: true },
 				);
-				if (!content.trim()) throw new Error("Message content is required.");
-				const formatted = forDiscord(content);
+				const files = [...new Set((rawFiles ?? []).map((file) => file.trim()).filter(Boolean))];
+				if (files.length > MAX_FILES) {
+					throw new Error(`A message can carry at most ${MAX_FILES} files; this one has ${files.length}.`);
+				}
+				const text = content ?? "";
+				if (!text.trim() && files.length === 0) throw new Error("Message content or a file is required.");
+				const formatted = forDiscord(text);
+				const uploads = await readUploads(store, files);
 				const sent = await rest.sendMessage(channelId, formatted.content, {
 					...(replyTo ? { replyTo } : {}),
 					...(formatted.embeds.length > 0 ? { embeds: formatted.embeds } : {}),
+					...(uploads.length > 0 ? { files: uploads } : {}),
 				});
 				// A successful send is the usage signal: the turn either replied
 				// in its conversation or it did not. Content is not involved.

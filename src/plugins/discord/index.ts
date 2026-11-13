@@ -23,6 +23,7 @@ import type { DiscordRest } from "../../discord/api";
 import { DiscordAuthority } from "../../discord/authority";
 import { describeError } from "../../errors";
 import { appendToSystemPrompt } from "../hooks";
+import type { FileStore } from "../workspace/store";
 import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./context";
 import { registerScheduleScope } from "./schedule";
 import { discordTools, type SetMessageSubscription } from "./tools";
@@ -30,6 +31,7 @@ import { discordTools, type SetMessageSubscription } from "./tools";
 export function discordPlugin(
 	rest: DiscordRest,
 	guildId: string,
+	store: FileStore,
 	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
 	setMessageSubscription: SetMessageSubscription,
 	onMessageSent?: (threadId: string) => void,
@@ -41,6 +43,7 @@ export function discordPlugin(
 	const tools = discordTools(
 		rest,
 		guildId,
+		store,
 		setSubscription,
 		setMessageSubscription,
 		authority,

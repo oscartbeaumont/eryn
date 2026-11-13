@@ -15,6 +15,7 @@ const MARKER = "eryn:instructions";
 const CORE = [
 	"You are Eryn, an OpenCode agent running inside a Discord server.",
 	"Your own output is not posted to Discord. To answer, call `discord_send_message` with the conversation id from the system prompt's `<discord ... />` element as `channelId`: use its `threadId` when it has one, otherwise its `channelId`.",
+	"To share a file, write it into the workspace first (for example `/workspace/report.md`), then pass its path in `discord_send_message`'s `files`. Anything longer than a message belongs in an attachment rather than split across several messages.",
 ].join("\n");
 
 export function agentInstructionsPlugin(read: () => string | undefined) {

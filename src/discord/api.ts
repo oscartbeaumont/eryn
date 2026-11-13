@@ -21,6 +21,12 @@ export const THREAD_TYPES = new Set([10, 11, 12]);
 /** Discord rejects message content longer than this. */
 export const MAX_CONTENT = 2_000;
 
+/** The most files one message may carry. */
+export const MAX_FILES = 10;
+
+/** The largest file a guild without boosts can upload, in bytes. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
 /** Fallback thread name when a request is empty. */
 export const DEFAULT_THREAD_NAME = "eryn";
 
@@ -84,6 +90,13 @@ export interface DiscordEmbed {
 	description?: string;
 	color?: number;
 	fields?: readonly DiscordEmbedField[];
+}
+
+/** One file to upload with a message. */
+export interface DiscordUpload {
+	filename: string;
+	/** The file's bytes, which are sent as a multipart part rather than base64. */
+	data: Uint8Array;
 }
 
 /** A message as a tool needs to see it. */
@@ -273,13 +286,13 @@ export function discordRest(token: string) {
 		body?: unknown,
 	): Promise<T | undefined> {
 		const headers = new Headers({ Authorization: `Bot ${token}` });
-		if (body !== undefined) headers.set("Content-Type", "application/json");
+		// A multipart request must set its own boundary, so its Content-Type is
+		// left to fetch rather than overwritten with JSON.
+		const multipart = body instanceof FormData;
+		if (body !== undefined && !multipart) headers.set("Content-Type", "application/json");
+		const encoded = multipart || body === undefined ? body : JSON.stringify(body);
 		const fetchOnce = Effect.promise(async (): Promise<Attempt> => {
-			const response = await fetch(`${API}${path}`, {
-				method,
-				headers,
-				body: body === undefined ? undefined : JSON.stringify(body),
-			});
+			const response = await fetch(`${API}${path}`, { method, headers, body: encoded as BodyInit | undefined });
 			const retryAfter =
 				response.status === 429 ? retryDelay(await response.json().catch(() => undefined)) : undefined;
 			return { response, ...(retryAfter === undefined ? {} : { retryAfter }) };
@@ -353,6 +366,7 @@ export function discordRest(token: string) {
 				replyTo?: string;
 				components?: readonly DiscordComponent[];
 				embeds?: readonly DiscordEmbed[];
+				files?: readonly DiscordUpload[];
 			} = {},
 		): Promise<{ id: string }> {
 			const body: Record<string, unknown> = {
@@ -363,7 +377,23 @@ export function discordRest(token: string) {
 			if (options.replyTo) body.message_reference = { message_id: options.replyTo, fail_if_not_exists: false };
 			if (options.components?.length) body.components = options.components;
 			if (options.embeds?.length) body.embeds = options.embeds;
-			return await create(`/channels/${channelId}/messages`, body, "Discord did not accept the message");
+			const path = `/channels/${channelId}/messages`;
+
+			const files = options.files ?? [];
+			if (files.length === 0) {
+				return await create(path, body, "Discord did not accept the message");
+			}
+
+			// Files are uploaded as multipart/form-data: the message itself goes in
+			// `payload_json` and each file in `files[n]`. The `attachments` entries
+			// are what tie part n to the filename Discord should show.
+			body.attachments = files.map((file, index) => ({ id: String(index), filename: file.filename }));
+			const form = new FormData();
+			form.append("payload_json", JSON.stringify(body));
+			files.forEach((file, index) => {
+				form.append(`files[${index}]`, new Blob([file.data]), file.filename);
+			});
+			return await create(path, form, "Discord did not accept the message");
 		},
 
 		/** Add a user to a thread so they follow it. This does not notify them. */

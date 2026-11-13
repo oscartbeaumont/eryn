@@ -24,6 +24,7 @@ import {
 	workspacePlugin,
 	workspaceSkillsPlugin,
 } from "../plugins";
+import { fileStore } from "../plugins/workspace/store";
 import { createHost, type HostInterface } from "./host";
 import type { DiscordContext, McpLink, ProviderConnection } from "./models";
 import { seedWorkspace } from "./seed";
@@ -149,6 +150,7 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 		discordPlugin(
 			rest,
 			guildId,
+			fileStore(storage),
 			(kind, id, subscribed) => setSubscription(env, guildId, kind, id, subscribed),
 			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
 			onMessageSent,

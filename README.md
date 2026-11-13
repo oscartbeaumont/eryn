@@ -60,6 +60,10 @@ mounted at `/workspace`; it cannot see `/eryn`, open a socket, or start a
 process outside the Worker. `/eryn` holds the configuration described below and
 is reachable through the file tools but not through the shell.
 
+A workspace file can be posted to Discord: `discord_send_message` takes `files`
+paths and uploads them as attachments, so a long document goes out as one file
+instead of a paste split across messages.
+
 ### MCP servers
 
 External tools arrive through [MCP](https://modelcontextprotocol.io). An admin
