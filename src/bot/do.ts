@@ -618,6 +618,7 @@ export class BotGateway extends DurableObject<Env> {
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) {
 				if (!isMention(message, this.botUserId, roleId)) return;
+				log(`answering a mention in thread ${channel.id}, which Eryn does not own`);
 				// A mention still has to reach a thread the gateway is not already
 				// following. Joining is idempotent and, unlike ownership, does not
 				// make every later message in the thread a request.
