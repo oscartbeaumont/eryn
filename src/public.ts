@@ -25,11 +25,12 @@ export const POSTHOG_PROXY_PATH = "/ph_7Qm2";
 
 /**
  * View Audit Log (so the install message can find who added the bot), View
- * Channels, Send Messages, Read Message History, Create Public Threads, and
- * Send Messages in Threads.
+ * Channels, Send Messages, Read Message History, Manage Threads (so mentions in
+ * threads Eryn did not create are delivered), Create Public Threads, and Send
+ * Messages in Threads.
  */
 const BOT_PERMISSIONS =
-	(1n << 7n) | (1n << 10n) | (1n << 11n) | (1n << 16n) | (1n << 35n) | (1n << 38n);
+	(1n << 7n) | (1n << 10n) | (1n << 11n) | (1n << 16n) | (1n << 34n) | (1n << 35n) | (1n << 38n);
 
 /** The Discord authorization screen that installs the bot into a server. */
 export function installUrl(clientId: string): string {

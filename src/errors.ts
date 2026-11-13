@@ -37,11 +37,18 @@ export function describeError(error: unknown): string {
  */
 export function classifyError(error: unknown): string {
 	const message = describeError(error).toLowerCase();
+	// Check quota first: an exhausted account often also arrives as a 429, and
+	// "the account is out of credit" needs a different response from "slow down".
+	if (
+		/quota|billing|credit|payment|usage limit|out of (?:inference|usage)|extra usage|spend limit|budget limit|go-limit/.test(
+			message,
+		)
+	)
+		return "quota";
 	if (/rate.?limit|too many requests|\b429\b/.test(message)) return "rate_limit";
 	if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|api.?key|credential|sign.?in/.test(message)) return "auth";
 	if (/context|token limit|too long|maximum.{0,20}tokens/.test(message)) return "context_length";
 	if (/timeout|timed out|deadline/.test(message)) return "timeout";
 	if (/network|fetch|connect|dns|socket|econn/.test(message)) return "network";
-	if (/quota|billing|credit|payment/.test(message)) return "quota";
 	return "other";
 }

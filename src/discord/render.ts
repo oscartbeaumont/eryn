@@ -7,9 +7,15 @@
  */
 
 import type { DiscordChannelRef, DiscordMessageView } from "./api";
-import { openingTag, selfClosing } from "./xml";
+import { openingTag, selfClosing } from "./xml.ts";
 
 type Attachment = NonNullable<DiscordMessageView["attachments"]>[number];
+
+/**
+ * How much of a failure to quote. Discord caps a message at 2,000 characters;
+ * this leaves room for the heading, quoting markers, and the hint.
+ */
+const MAX_FAILURE_TEXT = 1_400;
 
 export interface RenderUser {
 	name: string;
@@ -120,21 +126,48 @@ export function renderConversation(context: {
 }
 
 /**
+ * The action a failure calls for, when the provider's message identifies one.
+ *
+ * First match wins. An exhausted account is checked before a rate limit because
+ * the provider may report both, and topping up is a different action from
+ * waiting for a throttle to clear.
+ */
+const FAILURE_HINTS: readonly (readonly [RegExp, string])[] = [
+	[
+		/quota|billing|credit|payment|usage limit|out of (?:inference|usage)|extra usage|spend limit|budget limit|go-limit|\b402\b/i,
+		"This server's provider is out of credit or usage for that model — top up the account, turn on Extra Usage, or pick another model with `/eryn setup`.",
+	],
+	[/credential|unauthor|401|403/i, "The key for this server was rejected — check or replace it with `/eryn setup`."],
+	[/deprecat|unavailable|not found/i, "The model for this server is no longer available — pick another with `/eryn setup`."],
+	[/rate.?limit|too many requests|\b429\b/i, "The provider is rate limiting this server — try again in a moment."],
+	[
+		/context|token limit|too long|maximum.{0,20}tokens/i,
+		"The conversation is too long for this model — start a new thread or compact it.",
+	],
+	[
+		/timed out|timeout|deadline/i,
+		"The model or provider did not respond in time — check the provider's status and usage, then try again.",
+	],
+];
+
+/**
  * A message that reports a failed turn. It is deliberately distinct from
  * anything the agent wrote, so a reader can tell the turn stopped rather than
  * the agent choosing to say this.
+ *
+ * The provider's own message is quoted because it is the only place the real
+ * reason appears. It is capped well below Discord's limit so a long response
+ * body cannot make the failure report itself fail to send.
  */
 export function renderFailure(error: string): string {
-	const hint = /deprecat|unavailable|not found/i.test(error)
-		? "\n\nThe model for this server is no longer available — pick another with `/eryn setup`."
-		: /credential|unauthor|401|403/i.test(error)
-			? "\n\nThe key for this server was rejected — check or replace it with `/eryn setup`."
-			: "";
-	const quoted = (error.trim() || "Unknown error.")
+	const reported = error.trim() || "Unknown error.";
+	const shown = reported.length > MAX_FAILURE_TEXT ? `${reported.slice(0, MAX_FAILURE_TEXT - 1)}…` : reported;
+	const hint = FAILURE_HINTS.find(([pattern]) => pattern.test(reported))?.[1] ?? "";
+	const quoted = shown
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n");
-	return `⚠️ **Eryn could not finish that turn.**\n${quoted}${hint}`;
+	return `⚠️ **Eryn could not finish that turn.**\n${quoted}${hint ? `\n\n${hint}` : ""}`;
 }
 
 function replaceBotMentions(text: string, botUserId: string | undefined): string {

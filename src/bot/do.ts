@@ -612,8 +612,19 @@ export class BotGateway extends DurableObject<Env> {
 		const roleId = await this.lookups.botRoleMention(message, this.botUserId);
 
 		// A message inside a thread we own goes straight to that thread's session.
+		// A thread Eryn does not own is only a request when it is mentioned: the
+		// thread may be someone's notes, and adopting it would make Eryn answer
+		// every later message there.
 		if (THREAD_TYPES.has(channel.type)) {
-			if (!(await this.ownsThread(channel.id))) return;
+			if (!(await this.ownsThread(channel.id))) {
+				if (!isMention(message, this.botUserId, roleId)) return;
+				// A mention still has to reach a thread the gateway is not already
+				// following. Joining is idempotent and, unlike ownership, does not
+				// make every later message in the thread a request.
+				await this.rest
+					.joinThread(channel.id)
+					.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
+			}
 			// The agent is told about the channel the request came from, which for a
 			// message inside a thread is the thread's parent — the thread is where
 			// the reply goes, the parent is the room it belongs to.
