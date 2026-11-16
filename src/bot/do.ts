@@ -27,7 +27,7 @@ import { INTERACTIONS_PATH, log as botLog } from "../config";
 import { ORIGIN_HEADER, deployRestart } from "../deploy";
 import { describeError } from "../errors";
 import { isLoopback, json } from "../http";
-import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
+import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordChannelRef, type DiscordRest } from "../discord/api";
 import { applicationId, resolveOrigin } from "../discord/application";
 import { renderChannelRenamed, renderMessage, renderThreadCreated } from "../discord/render";
 import {
@@ -42,6 +42,7 @@ import { DiscordContextSchema, type DiscordContext } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
+import { ConversationQueues, type ConversationTicket } from "./conversation-queue";
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
 import { attachmentsOf, authorInfo, isBotMessage, isMention, isReplyTo, isStopText, mentionInfo, stripMention, threadName } from "./message";
@@ -163,6 +164,10 @@ export class BotGateway extends DurableObject<Env> {
 	private readonly lookups: DiscordLookups;
 	private readonly keepAliveMs = KEEPALIVE_MS;
 	private readonly locks = new Map<string, Promise<void>>();
+	/** Per-conversation arrival order for inbound messages. */
+	private readonly conversations = new ConversationQueues((message, error) =>
+		log(`${message}: ${describeError(error)}`),
+	);
 
 	private botUserId: string | undefined;
 	private initialization: Promise<void> | undefined;
@@ -604,101 +609,32 @@ export class BotGateway extends DurableObject<Env> {
 		if (guildId === undefined) return;
 		if (isBotMessage(message, this.botUserId)) return;
 
-		const channel = await this.lookups.channel(message.channel_id);
-		if (!channel) return;
-
-		// Discord also creates a managed role named after the bot, and its `@`
-		// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
-		const roleId = await this.lookups.botRoleMention(message, this.botUserId);
-
-		// A message inside a thread we own goes straight to that thread's session.
-		// A thread Eryn does not own becomes one the first time it is addressed:
-		// a mention, or a reply to one of Eryn's messages, is an invitation to
-		// the conversation, and later messages there are follow-ups.
-		if (THREAD_TYPES.has(channel.type)) {
-			if (!(await this.ownsThread(channel.id))) {
-				if (!(await this.addressed(message, roleId))) return;
-				log(`joining and adopting thread ${channel.id} after being addressed`);
-				// A mention still has to reach a thread the gateway is not already
-				// following. Joining is idempotent. A mention (or a reply to one of
-				// Eryn's messages) is an invitation to the conversation, so the
-				// thread is adopted here: later messages in it are follow-ups, and a
-				// follow-up without an `@` must not be dropped.
-				await this.rest
-					.joinThread(channel.id)
-					.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
-				await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
-			}
-			// The agent is told about the channel the request came from, which for a
-			// message inside a thread is the thread's parent — the thread is where
-			// the reply goes, the parent is the room it belongs to.
-			const parent = channel.parent_id ? await this.lookups.channel(channel.parent_id) : undefined;
-			await this.handleOwned(
-				guildId,
-				channel,
-				message,
-				roleId,
-				await this.lookups.context(guildId, parent, channel),
-			);
-			return;
-		}
-
-		// A message in a subscribed channel is a request too, even without a
-		// mention; the reply lands in the channel rather than in a new thread.
-		if (await this.ownsChannel(channel.id)) {
-			await this.handleOwned(
-				guildId,
-				channel,
-				message,
-				roleId,
-				await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel"),
-			);
-			return;
-		}
-
-		// Otherwise require an explicit mention (or a reply to Eryn) and open a
-		// thread for the request.
-		if (!(await this.addressed(message, roleId))) return;
-
-		const text = stripMention(message.content ?? "", this.botUserId, roleId);
-		const name = threadName(text);
-		let threadId: string;
+		// Reserve this conversation's next position before the first await. The
+		// role lookup and the checks below can finish in any order, and without
+		// this a later message can reach the model first. A message that turns out
+		// not to be a turn releases the reservation in the finally.
+		const ticket = this.conversations.begin(message.channel_id);
 		try {
-			threadId = await this.createThread(channel.id, message.id, name);
-		} catch (error) {
-			log(`could not start a thread in ${channel.id}: ${describeError(error)}`);
-			await this.rest
-				.sendMessage(channel.id, `I could not start a thread for that: ${describeError(error)}`)
-				.catch(() => undefined);
-			return;
-		}
+			const channel = await this.lookups.channel(message.channel_id);
+			if (!channel) return;
 
-		await this.ctx.storage.put(THREAD_PREFIX + threadId, true);
-		// Add the requester to the thread, silently, so a completion ping lands
-		// for someone who has already navigated away.
-		const authorId = message.author?.id;
-		if (authorId) {
-			await this.rest
-				.addThreadMember(threadId, authorId)
-				.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
+			// A message inside a thread goes to that thread's session. A thread
+			// Eryn does not own becomes one the first time it is addressed: a
+			// mention, or a reply to one of Eryn's messages, is an invitation, and
+			// later messages there are follow-ups.
+			if (THREAD_TYPES.has(channel.type) || (await this.ownsChannel(channel.id))) {
+				await this.handleConversation(guildId, channel, message, ticket);
+				return;
+			}
+
+			// Otherwise require an explicit mention (or a reply to Eryn) and open a
+			// thread for the request. The new thread is its own conversation, so the
+			// parent channel's reservation is released and the thread's is taken.
+			ticket.skip();
+			await this.openThread(guildId, channel, message);
+		} finally {
+			ticket.skip();
 		}
-		if (!text && attachmentsOf(message).length === 0) {
-			await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
-			return;
-		}
-		if ((await this.guildReady(guildId)) === false) {
-			await this.requireSetup(threadId);
-			return;
-		}
-		await this.forward(
-			guildId,
-			threadId,
-			name,
-			text,
-			message,
-			await this.lookups.context(guildId, channel, { id: threadId, name }),
-			await this.takeRenameNotice(threadId),
-		);
 	}
 
 	/**
@@ -990,76 +926,194 @@ export class BotGateway extends DurableObject<Env> {
 	}
 
 	/**
-	 * Handle a message in a conversation Eryn owns, whether a thread or a
-	 * subscribed channel. Both forms read the request, honour stop words, and
-	 * forward it to the same session.
+	 * Handle one message in a conversation Eryn owns, in arrival order.
+	 *
+	 * The reservation was taken when the event arrived. Stop words and form
+	 * answers run immediately, before the turn is queued: both are meant to
+	 * affect the turn that is already running, so queuing them behind it would
+	 * stall the conversation until the turn deadline. Everything else settles
+	 * the ticket as the turn, and the conversation queue starts it after every
+	 * earlier message.
 	 */
-	private async handleOwned(
+	private async handleConversation(
 		guildId: string,
-		channel: DiscordChannel,
+		channel: DiscordChannelRef,
 		message: DiscordMessage,
-		roleId: string | undefined,
-		context: DiscordContext,
+		ticket: ConversationTicket,
 	): Promise<void> {
-		const text = stripMention(message.content ?? "", this.botUserId, roleId);
-		if (!text && attachmentsOf(message).length === 0) return;
-		if (isStopText(text)) {
-			await this.stopThread(guildId, channel.id);
-			return;
-		}
-		const authorId = message.author?.id;
-		if (!authorId) return;
+		try {
+			const botUserId = this.botUserId;
+			if (!botUserId) return;
+			// Wait for the message before this one to finish its acquisition check.
+			// Turn order is already reserved; this also means a follow-up in a thread
+			// Eryn is being invited to sees the adoption that the earlier message made.
+			await ticket.previousChecked;
+			// Discord also creates a managed role named after the bot, and its `@`
+			// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
+			const roleId = await this.lookups.botRoleMention(message, botUserId);
+			const thread = THREAD_TYPES.has(channel.type);
+			if (thread && !(await this.ownsThread(channel.id))) {
+				if (!(await this.addressed(message, roleId))) return;
+				log(`joining and adopting thread ${channel.id} after being addressed`);
+				// A mention still has to reach a thread the gateway is not already
+				// following. Joining is idempotent. A mention (or a reply to one of
+				// Eryn's messages) is an invitation to the conversation, so the
+				// thread is adopted here: later messages in it are follow-ups, and a
+				// follow-up without an `@` must not be dropped.
+				await this.rest
+					.joinThread(channel.id)
+					.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
+				await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
+			}
 
-		// A running turn blocked on a question cannot take a new prompt. While a
-		// form waits for free text, a message from the requester is the answer.
-		if (text) {
-			const answered: { consumed: boolean; message?: string } = await this.session(guildId)
-				.answerFormText({ threadId: channel.id, userId: authorId, text })
-				.catch((error) => {
-					log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
-					return { consumed: false };
-				});
-			if (answered.consumed) {
-				if (answered.message) {
-					await this.rest.sendMessage(channel.id, answered.message).catch(() => undefined);
-				}
+			const text = stripMention(message.content ?? "", botUserId, roleId);
+			if (!text && attachmentsOf(message).length === 0) return;
+			if (isStopText(text)) {
+				await this.stopThread(guildId, channel.id);
 				return;
 			}
-		}
+			const authorId = message.author?.id;
+			if (!authorId) return;
 
-		if ((await this.guildReady(guildId)) === false) {
-			await this.requireSetup(channel.id);
-			return;
-		}
-		// A scheduled conversation has a capability scope. A member below that
-		// scope may still read a public thread, but must not steer the session.
-		const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
-			log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
-			return { ok: false, message: "Eryn could not verify your access to this conversation." };
-		});
-		if (!allowed.ok) {
-			await this.rest
-				.sendMessage(
+			// A running turn blocked on a question cannot take a new prompt. While
+			// a form waits for free text, a message from the requester is the answer.
+			if (text) {
+				const answered: { consumed: boolean; message?: string } = await this.session(guildId)
+					.answerFormText({ threadId: channel.id, userId: authorId, text })
+					.catch((error) => {
+						log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
+						return { consumed: false };
+					});
+				if (answered.consumed) {
+					if (answered.message) {
+						await this.rest.sendMessage(channel.id, answered.message).catch(() => undefined);
+					}
+					return;
+				}
+			}
+
+			ticket.ready(async () => {
+				if ((await this.guildReady(guildId)) === false) {
+					await this.requireSetup(channel.id);
+					return;
+				}
+				// A scheduled conversation has a capability scope. A member below that
+				// scope may still read a public thread, but must not steer the session.
+				const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
+					log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
+					return { ok: false, message: "Eryn could not verify your access to this conversation." };
+				});
+				if (!allowed.ok) {
+					await this.rest
+						.sendMessage(
+							channel.id,
+							allowed.message ??
+								"Only people who can access every channel this schedule uses can talk to Eryn here.",
+						)
+						.catch(() => undefined);
+					return;
+				}
+				// The agent is told about the channel the request came from, which for
+				// a message inside a thread is the thread's parent — the thread is
+				// where the reply goes, the parent is the room it belongs to.
+				const parent =
+					thread && channel.parent_id ? await this.lookups.channel(channel.parent_id) : undefined;
+				const discord = thread
+					? await this.lookups.context(guildId, parent, channel)
+					: await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel");
+				await this.forward(
+					guildId,
 					channel.id,
-					allowed.message ?? "Only people who can access every channel this schedule uses can talk to Eryn here.",
-				)
-				.catch(() => undefined);
-			return;
+					threadName(text),
+					text,
+					message,
+					discord,
+					await this.takeRenameNotice(channel.id),
+				);
+			});
+		} finally {
+			// A no-op once the ticket is ready; this releases the reservation on
+			// every early return, so one unhandled message cannot stall the queue.
+			ticket.skip();
 		}
-		await this.forward(
-			guildId,
-			channel.id,
-			threadName(text),
-			text,
-			message,
-			context,
-			await this.takeRenameNotice(channel.id),
-		);
+		await ticket.done;
 	}
 
 	/**
-	 * Forward a prompt to the guild's session object and wait for the turn,
-	 * serialised per thread so messages keep their order.
+	 * Open a thread for a request in a channel, then run it in that thread's
+	 * queue.
+	 *
+	 * A thread made from a message has the message's id, so the queue position is
+	 * reserved under that id before the thread is created. That closes the window
+	 * where a follow-up sent into the new thread could otherwise start first.
+	 */
+	private async openThread(
+		guildId: string,
+		channel: DiscordChannelRef,
+		message: DiscordMessage,
+	): Promise<void> {
+		const ticket = this.conversations.begin(message.id);
+		try {
+			const botUserId = this.botUserId;
+			if (!botUserId) return;
+			await ticket.previousChecked;
+			// Discord also creates a managed role named after the bot, and its `@`
+			// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
+			const roleId = await this.lookups.botRoleMention(message, botUserId);
+			if (!(await this.addressed(message, roleId))) return;
+
+			const text = stripMention(message.content ?? "", botUserId, roleId);
+			const name = threadName(text);
+			let threadId: string;
+			try {
+				threadId = await this.createThread(channel.id, message.id, name);
+			} catch (error) {
+				log(`could not start a thread in ${channel.id}: ${describeError(error)}`);
+				await this.rest
+					.sendMessage(channel.id, `I could not start a thread for that: ${describeError(error)}`)
+					.catch(() => undefined);
+				return;
+			}
+
+			await this.ctx.storage.put(THREAD_PREFIX + threadId, true);
+			// Add the requester to the thread, silently, so a completion ping lands
+			// for someone who has already navigated away.
+			const authorId = message.author?.id;
+			if (authorId) {
+				await this.rest
+					.addThreadMember(threadId, authorId)
+					.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
+			}
+			if (!text && attachmentsOf(message).length === 0) {
+				await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
+				return;
+			}
+			ticket.ready(async () => {
+				if ((await this.guildReady(guildId)) === false) {
+					await this.requireSetup(threadId);
+					return;
+				}
+				await this.forward(
+					guildId,
+					threadId,
+					name,
+					text,
+					message,
+					await this.lookups.context(guildId, channel, { id: threadId, name }),
+					await this.takeRenameNotice(threadId),
+				);
+			});
+		} finally {
+			ticket.skip();
+		}
+		await ticket.done;
+	}
+
+	/**
+	 * Forward a prompt to the guild's session object and wait for the turn.
+	 *
+	 * The conversation queue starts message turns in arrival order; this lock
+	 * also serialises an automated notice (`onThreadCreate`) with them.
 	 */
 	private forward(
 		guildId: string,

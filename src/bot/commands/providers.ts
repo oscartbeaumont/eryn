@@ -20,6 +20,7 @@ import {
 } from "../../discord/components";
 import type { IntegrationOption } from "../../session/models";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID, payloadId } from "../ids";
+import { decodeProviderChoice, encodeProviderChoice } from "../provider-choice";
 import {
 	claim,
 	responder,
@@ -102,7 +103,9 @@ function connectable(providers: readonly IntegrationOption[]): IntegrationOption
 function providerOptions(providers: readonly IntegrationOption[]): DiscordSelectOption[] {
 	return providers.slice(0, MAX_SELECT_OPTIONS).map((provider) => ({
 		label: provider.name.slice(0, 100),
-		value: provider.id,
+		// The hint lets the pick handler answer before Discord's deadline. See
+		// `provider-choice.ts`.
+		value: encodeProviderChoice(provider.id, provider.methods),
 		description: (provider.connected ? "connected" : provider.methods.map((method) => method.label).join(", ")).slice(0, 100),
 	}));
 }
@@ -143,7 +146,7 @@ function signInRow(request: InteractionRequest, integrationID: string, attemptID
 }
 
 /** The provider list, with a select for the full set and buttons for the common ones. */
-export async function providerScreen(request: InteractionRequest): Promise<void> {
+export async function providerScreen(request: InteractionRequest, notice?: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	// Connections come from the status, not the catalogue: a connected provider
@@ -163,6 +166,7 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 	if (!providers.length) {
 		await answer.reply(
 			[
+				...(notice ? [notice, ""] : []),
 				"**Providers**",
 				connected.length
 					? `Connected: **${connected.join("**, **")}**`
@@ -182,7 +186,13 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 	if (recommended.length) {
 		components.push(
 			buttonRow(
-				recommended.map((provider) => actionButton(provider.name, PICK_ID.of(provider.id, request.dmGuildId), 2)),
+				recommended.map((provider) =>
+					actionButton(
+						provider.name,
+						PICK_ID.of(encodeProviderChoice(provider.id, provider.methods), request.dmGuildId),
+						2,
+					),
+				),
 			),
 		);
 	}
@@ -199,6 +209,7 @@ export async function providerScreen(request: InteractionRequest): Promise<void>
 
 	await answer.reply(
 		[
+			...(notice ? [notice, ""] : []),
 			"**Providers**",
 			connected.length
 				? `Connected: **${connected.join("**, **")}**`
@@ -259,22 +270,43 @@ async function searchProviders(request: InteractionRequest, query: string): Prom
 	);
 }
 
-/** A provider was chosen: one method starts straight away, several are offered as buttons. */
-async function pickProviderMethod(request: InteractionRequest, integrationID: string): Promise<void> {
+/**
+ * A provider was chosen: one method starts straight away, several are offered
+ * as buttons.
+ *
+ * The hint in the picker value decides how the interaction is answered. A
+ * single API-key method must open its modal as the first response, so it cannot
+ * wait for the provider list; every other case acknowledges first, which keeps
+ * a cold guild host from missing Discord's three-second window.
+ */
+async function pickProviderMethod(request: InteractionRequest, value: string): Promise<void> {
+	const { providerId: integrationID, choice } = decodeProviderChoice(value);
 	const answer = responder(request);
-	// The provider list can build the host, so ack after the one branch that
-	// needs to open a modal as the initial interaction response.
-	const providers = await request.session.providers();
+
+	if (choice === "key") {
+		// The hint came from the list this screen rendered. A provider that
+		// vanished fails at submit and offers the way back, which is better than
+		// delaying every key connection on a network round trip.
+		await answer.modal(keyModal(request, integrationID));
+		return;
+	}
+
+	await answer.defer();
+	const providers = await request.session.providers().catch(() => undefined);
+	if (!providers) {
+		await answer.update(PROVIDERS_UNAVAILABLE, [backRow(request, PROVIDER_SCREEN_ID)]);
+		return;
+	}
 	const provider = providers.find((candidate) => candidate.id === integrationID);
 	if (!provider) {
-		await answer.reply("That provider is no longer available.", [
-			backRow(request, PROVIDER_SCREEN_ID),
-		]);
+		// The screen is stale. Show the current list with a note rather than a
+		// dead-end error.
+		await providerScreen(request, `**${integrationID}** is no longer available. Pick another provider below.`);
 		return;
 	}
 	const methods = provider.methods.filter((method) => method.supported);
 	if (!methods.length) {
-		await answer.reply(`**${provider.name}** has no way to be connected in this deployment.`, [
+		await answer.update(`**${provider.name}** has no way to be connected in this deployment.`, [
 			backRow(request, PROVIDER_SCREEN_ID),
 		]);
 		return;
@@ -282,13 +314,20 @@ async function pickProviderMethod(request: InteractionRequest, integrationID: st
 	if (methods.length === 1) {
 		const method = methods[0]!;
 		if (method.type === "key") {
-			await answer.modal(keyModal(request, integrationID));
+			// An older screen carried no hint, or the methods changed since it was
+			// drawn. A modal cannot follow an acknowledgement, so offer a button
+			// that opens it on the next click.
+			await answer.update(`**${provider.name}** is connected with an API key.`, [
+				buttonRow([
+					actionButton("Enter API key", KEY_ID.of(integrationID, request.dmGuildId), 1),
+					actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2),
+				]),
+			]);
 			return;
 		}
 		await startProviderMethod(request, integrationID, method.id ?? "key");
 		return;
 	}
-	await answer.defer();
 	await answer.update(
 		provider.connected
 			? `**${provider.name}** is connected. How should it be reconnected?`
