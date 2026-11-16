@@ -28,9 +28,15 @@ export function isBotMessage(message: DiscordMessage, botUserId: string): boolea
 
 /** The files a message carried, in the shape the session accepts. */
 export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
-	return (message.attachments ?? []).flatMap((attachment) => {
+	// A reply shows the message it answers inline, and that is often where the
+	// screenshot is: "put this on the calendar" replying to an image. Discord
+	// keeps the two attachment arrays separate, so carry both.
+	const sources = [...(message.attachments ?? []), ...(message.referenced_message?.attachments ?? [])];
+	const seen = new Set<string>();
+	return sources.flatMap((attachment) => {
 		const url = attachment.url ?? attachment.proxy_url;
-		if (!url) return [];
+		if (!url || seen.has(url)) return [];
+		seen.add(url);
 		return [
 			{
 				url,

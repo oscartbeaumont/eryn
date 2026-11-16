@@ -26,6 +26,7 @@ import {
 	MAX_FILE_BYTES,
 	MAX_FILES,
 	THREAD_TYPES,
+	type DiscordAttachment,
 	type DiscordChannelRef,
 	type DiscordMessageView,
 	type DiscordRest,
@@ -38,6 +39,7 @@ import { formatMessage, type FormattedMessage } from "../../discord/markdown";
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import { uploadNames } from "../../discord/uploads";
+import { fetchAttachmentFiles } from "../../session/attachments";
 import { WORKSPACE_ROOT } from "../../session/locations";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
 import {
@@ -49,7 +51,7 @@ import {
 import { base64ToBytes } from "../workspace/bytes";
 import { resolvePath } from "../workspace/paths.ts";
 import type { FileStore } from "../workspace/store";
-import { objectSchema, toolExecute, type ToolCall, type ToolSpec } from "../tool";
+import { objectSchema, toolExecute, ToolOutput, type ToolCall, type ToolSpec } from "../tool";
 import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
@@ -94,6 +96,58 @@ function formatBytes(bytes: number): string {
 	const megabytes = bytes / (1024 * 1024);
 	if (megabytes >= 1) return `${Number(megabytes.toFixed(1))} MB`;
 	return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/** How many pictures one read may carry, so history cannot flood the prompt. */
+const MAX_READ_IMAGES = 8;
+/** Discord does not always declare a content type, so fall back to the name. */
+const IMAGE_NAME = /\.(?:png|jpe?g|gif|webp)$/i;
+
+/**
+ * Whether an attachment looks like an image this bot can show the model.
+ *
+ * The declared type wins; the filename is only consulted when Discord left it
+ * out, because an extension is a weaker claim than a MIME type.
+ */
+function isImageAttachment(attachment: DiscordAttachment): boolean {
+	if (attachment.content_type) return attachment.content_type.startsWith("image/");
+	return IMAGE_NAME.test(attachment.filename ?? "");
+}
+
+/**
+ * The image attachments of read messages, as prompt files.
+ *
+ * `renderMessage` can only describe an attachment, and a URL is not something
+ * the model can look at. These are fetched and embedded so a screenshot read
+ * from history reaches the model as pixels; anything left out is reported, for
+ * the same reason a live prompt reports it.
+ */
+async function readMessageImages(messages: readonly DiscordMessageView[]): Promise<{
+	files: { uri: string; mime: string; name?: string }[];
+	note?: string;
+}> {
+	const images = messages.flatMap((message) =>
+		(message.attachments ?? []).flatMap((attachment) => {
+			const url = attachment.url ?? attachment.proxy_url;
+			return url && isImageAttachment(attachment) ? [{ attachment, url }] : [];
+		}),
+	);
+	const selected = images.slice(0, MAX_READ_IMAGES);
+	const attached = await fetchAttachmentFiles(
+		selected.map(({ attachment, url }) => ({
+			url,
+			...(attachment.filename ? { name: attachment.filename } : {}),
+			...(attachment.content_type ? { contentType: attachment.content_type } : {}),
+			...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
+		})),
+	);
+	const notes = [...attached.notes];
+	const omitted = images.length - selected.length;
+	if (omitted > 0) notes.push(`${omitted} more image${omitted === 1 ? "" : "s"} not attached`);
+	return {
+		files: attached.files,
+		...(notes.length > 0 ? { note: `[Images not attached: ${notes.join("; ")}]` } : {}),
+	};
 }
 
 /**
@@ -473,7 +527,7 @@ export function discordTools(
 		{
 			name: "discord_read_messages",
 			description:
-				"Read recent messages from a channel or thread in this server. Messages are returned newest first with author and attachment details.",
+				"Read recent messages from a channel or thread in this server. Messages are returned newest first with author and attachment details. Image attachments are included as pictures you can see.",
 			input: objectSchema(
 				{
 					channelId: CHANNEL_ID,
@@ -497,7 +551,15 @@ export function discordTools(
 					limit: Math.min(Math.max(Math.trunc(limit ?? 20), 1), 50),
 					...(before ? { before } : {}),
 				});
-				return [renderChannel(channelInfo), ...messages.map((message) => renderMessage(message, botUserId))].join("\n\n");
+				const text = [
+					renderChannel(channelInfo),
+					...messages.map((message) => renderMessage(message, botUserId)),
+				].join("\n\n");
+				const images = await readMessageImages(messages);
+				return new ToolOutput(
+					images.note ? `${text}\n\n${images.note}` : text,
+					images.files,
+				);
 			},
 		},
 

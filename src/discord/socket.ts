@@ -70,6 +70,11 @@ export interface DiscordMessage {
 	thread?: { id: string; parent_id?: string };
 	/** Files the message carries. The URL is signed by Discord and short-lived. */
 	attachments?: DiscordAttachment[];
+	/**
+	 * The message this one replies to, when Discord included it. A reply often
+	 * asks about the screenshot in the message above, so its files matter too.
+	 */
+	referenced_message?: DiscordMessage | null;
 }
 
 /**

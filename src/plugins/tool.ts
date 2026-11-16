@@ -8,7 +8,7 @@
 
 import type { Plugin } from "@opencode/plugin";
 
-import { describeError } from "../errors";
+import { describeError } from "../errors.ts";
 
 /** The JSON-schema shape OpenCode's tool editor expects. */
 export function objectSchema(properties: Record<string, unknown>, required: string[] = []) {
@@ -22,6 +22,30 @@ export interface ToolCall {
 	readonly sessionID: string;
 }
 
+/** A file a tool result carries to the model, alongside its text. */
+export interface ToolFile {
+	readonly uri: string;
+	readonly mime: string;
+	readonly name?: string;
+}
+
+/**
+ * A tool result that is more than text.
+ *
+ * A URL in text is something the model can only ask about; a file is something
+ * it can read. Screenshots read through `discord_read_messages` use this so the
+ * pixels reach the model rather than an attachment link it cannot open.
+ */
+export class ToolOutput {
+	readonly text: string;
+	readonly files: readonly ToolFile[];
+
+	constructor(text: string, files: readonly ToolFile[] = []) {
+		this.text = text;
+		this.files = files;
+	}
+}
+
 /** One tool, before it is registered with the editor. */
 export interface ToolSpec {
 	readonly name: string;
@@ -33,11 +57,28 @@ export interface ToolSpec {
 	 * `ask` or `deny` ends the step instead of being reported to the model.
 	 */
 	guard?(input: Record<string, unknown>, call: ToolCall): Promise<void>;
-	/** A string is sent as-is; any other value is JSON-encoded. */
+	/**
+	 * A string is sent as-is, a {@link ToolOutput} becomes text plus readable
+	 * files, and any other value is JSON-encoded.
+	 */
 	run(input: Record<string, unknown>, call: ToolCall): Promise<unknown>;
 }
 
 function content(result: unknown) {
+	if (result instanceof ToolOutput) {
+		if (result.files.length === 0) return { content: result.text };
+		return {
+			content: [
+				{ type: "text" as const, text: result.text },
+				...result.files.map((file) => ({
+					type: "file" as const,
+					uri: file.uri,
+					mime: file.mime,
+					...(file.name ? { name: file.name } : {}),
+				})),
+			],
+		};
+	}
 	return { content: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
 }
 

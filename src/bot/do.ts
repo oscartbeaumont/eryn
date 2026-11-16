@@ -29,7 +29,7 @@ import { describeError } from "../errors";
 import { isLoopback, json } from "../http";
 import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordRest } from "../discord/api";
 import { applicationId, resolveOrigin } from "../discord/application";
-import { renderChannelRenamed, renderThreadCreated } from "../discord/render";
+import { renderChannelRenamed, renderMessage, renderThreadCreated } from "../discord/render";
 import {
 	DiscordSocket,
 	type DiscordChannel,
@@ -1066,11 +1066,18 @@ export class BotGateway extends DurableObject<Env> {
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const client = this.session(guildId);
+			// A reply is a request about the message it answers, and the reply
+			// itself may be nothing but "this". Put that message in front of the
+			// request so the model can resolve what "this" is, even when the
+			// parent is too old to appear in `discord_read_messages`.
+			const parent = message.referenced_message
+				? renderMessage(message.referenced_message, this.botUserId)
+				: undefined;
 			try {
 				await client.prompt({
 					threadId,
 					title,
-					text,
+					text: parent ? `${parent}\n\n${text}` : text,
 					author: authorInfo(message),
 					mentions: mentionInfo(message, this.botUserId),
 					discord,

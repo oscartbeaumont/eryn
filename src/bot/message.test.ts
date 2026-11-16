@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { stripMention, threadName } from "./message.ts";
+import type { DiscordMessage } from "../discord/socket.ts";
+import { attachmentsOf, stripMention, threadName } from "./message.ts";
 
 const BOT = "bot-1";
 const ROLE = "role-1";
@@ -43,4 +44,49 @@ test("indented code keeps its indentation", () => {
 
 test("a thread name is still flattened to one line", () => {
 	assert.equal(threadName("first\nsecond\tthird"), "first second third");
+});
+
+function message(overrides: Partial<DiscordMessage>): DiscordMessage {
+	return { id: "m1", channel_id: "c1", ...overrides };
+}
+
+test("a message's own attachments are carried", () => {
+	const files = attachmentsOf(
+		message({
+			attachments: [
+				{ url: "https://cdn.discordapp.com/a.png", filename: "a.png", content_type: "image/png", size: 10 },
+			],
+		}),
+	);
+	assert.deepEqual(files, [
+		{ url: "https://cdn.discordapp.com/a.png", name: "a.png", contentType: "image/png", size: 10 },
+	]);
+});
+
+test("a reply carries the attachments of the message it answers", () => {
+	const files = attachmentsOf(
+		message({
+			referenced_message: message({
+				id: "m0",
+				attachments: [{ url: "https://cdn.discordapp.com/ticket.png", filename: "ticket.png" }],
+			}),
+		}),
+	);
+	assert.deepEqual(files, [{ url: "https://cdn.discordapp.com/ticket.png", name: "ticket.png" }]);
+});
+
+test("an attachment present on both messages is sent once", () => {
+	const attachment = { url: "https://cdn.discordapp.com/same.png", filename: "same.png" };
+	const files = attachmentsOf(
+		message({
+			attachments: [attachment],
+			referenced_message: message({ id: "m0", attachments: [attachment] }),
+		}),
+	);
+	assert.equal(files.length, 1);
+});
+
+test("an attachment without a URL is ignored", () => {
+	const files = attachmentsOf(message({ attachments: [{ filename: "broken.png" }] }));
+	assert.deepEqual(files, []);
 });

@@ -9,8 +9,8 @@
 
 import { Base64 } from "effect/encoding";
 
-import { describeError } from "../errors";
-import { fetchWithRedirects } from "../http";
+import { describeError } from "../errors.ts";
+import { fetchWithRedirects } from "../http.ts";
 import type { PromptAttachment } from "./models";
 
 /** A Discord attachment larger than this is skipped rather than decoded in the isolate. */
@@ -20,8 +20,15 @@ const ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image
 /** Discord's CDN hosts, so an attachment URL cannot point anywhere else. */
 const ATTACHMENT_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 
+export interface AttachmentFile {
+	readonly uri: string;
+	/** The media type the file was served as, so a tool can label it. */
+	readonly mime: string;
+	readonly name?: string;
+}
+
 export interface AttachmentFiles {
-	readonly files: { uri: string; name?: string }[];
+	readonly files: AttachmentFile[];
 	/** Why an attachment was left out, in the order they were seen. */
 	readonly notes: string[];
 }
@@ -49,7 +56,7 @@ async function readCapped(response: Response, limit: number): Promise<Uint8Array
 export async function fetchAttachmentFiles(
 	attachments: readonly PromptAttachment[] | undefined,
 ): Promise<AttachmentFiles> {
-	const files: { uri: string; name?: string }[] = [];
+	const files: AttachmentFile[] = [];
 	const notes: string[] = [];
 	for (const attachment of attachments ?? []) {
 		const name = attachment.name?.trim() || "attachment";
@@ -74,7 +81,11 @@ export async function fetchAttachmentFiles(
 			continue;
 		}
 		try {
-			const response = await fetchWithRedirects(url, { headers: { accept: "image/*" } });
+			const response = await fetchWithRedirects(url, {
+				headers: { accept: "image/*" },
+				// A slow CDN must not hold a turn (or a tool call) open forever.
+				signal: AbortSignal.timeout(20_000),
+			});
 			if (!response.ok) {
 				notes.push(`${name}: download failed (HTTP ${response.status})`);
 				continue;
@@ -96,7 +107,7 @@ export async function fetchAttachmentFiles(
 				notes.push(`${name}: larger than 5 MB`);
 				continue;
 			}
-			files.push({ uri: `data:${type};base64,${Base64.encode(bytes)}`, name });
+			files.push({ uri: `data:${type};base64,${Base64.encode(bytes)}`, name, mime: type });
 		} catch (error) {
 			notes.push(`${name}: ${describeError(error)}`);
 		}
