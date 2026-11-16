@@ -75,6 +75,8 @@ export interface DiscordMessage {
 	 * asks about the screenshot in the message above, so its files matter too.
 	 */
 	referenced_message?: DiscordMessage | null;
+	/** The ids a reply points at, used when `referenced_message` is absent. */
+	message_reference?: { message_id?: string; channel_id?: string; guild_id?: string };
 }
 
 /**

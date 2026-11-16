@@ -44,7 +44,7 @@ import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
-import { attachmentsOf, authorInfo, isBotMessage, isMention, isStopText, mentionInfo, stripMention, threadName } from "./message";
+import { attachmentsOf, authorInfo, isBotMessage, isMention, isReplyTo, isStopText, mentionInfo, stripMention, threadName } from "./message";
 
 const WAKE_PATH = "/wake";
 const INTERACTION_PATH = "/interaction";
@@ -612,19 +612,22 @@ export class BotGateway extends DurableObject<Env> {
 		const roleId = await this.lookups.botRoleMention(message, this.botUserId);
 
 		// A message inside a thread we own goes straight to that thread's session.
-		// A thread Eryn does not own is only a request when it is mentioned: the
-		// thread may be someone's notes, and adopting it would make Eryn answer
-		// every later message there.
+		// A thread Eryn does not own becomes one the first time it is addressed:
+		// a mention, or a reply to one of Eryn's messages, is an invitation to
+		// the conversation, and later messages there are follow-ups.
 		if (THREAD_TYPES.has(channel.type)) {
 			if (!(await this.ownsThread(channel.id))) {
-				if (!isMention(message, this.botUserId, roleId)) return;
-				log(`answering a mention in thread ${channel.id}, which Eryn does not own`);
+				if (!(await this.addressed(message, roleId))) return;
+				log(`joining and adopting thread ${channel.id} after being addressed`);
 				// A mention still has to reach a thread the gateway is not already
-				// following. Joining is idempotent and, unlike ownership, does not
-				// make every later message in the thread a request.
+				// following. Joining is idempotent. A mention (or a reply to one of
+				// Eryn's messages) is an invitation to the conversation, so the
+				// thread is adopted here: later messages in it are follow-ups, and a
+				// follow-up without an `@` must not be dropped.
 				await this.rest
 					.joinThread(channel.id)
 					.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
+				await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
 			}
 			// The agent is told about the channel the request came from, which for a
 			// message inside a thread is the thread's parent — the thread is where
@@ -653,8 +656,9 @@ export class BotGateway extends DurableObject<Env> {
 			return;
 		}
 
-		// Otherwise require an explicit mention and open a thread for the request.
-		if (!isMention(message, this.botUserId, roleId)) return;
+		// Otherwise require an explicit mention (or a reply to Eryn) and open a
+		// thread for the request.
+		if (!(await this.addressed(message, roleId))) return;
 
 		const text = stripMention(message.content ?? "", this.botUserId, roleId);
 		const name = threadName(text);
@@ -1126,6 +1130,26 @@ export class BotGateway extends DurableObject<Env> {
 	/** Whether Eryn owns this conversation, which may be a thread or a channel. */
 	private owns(channel: { id: string; type?: number }): Promise<boolean> {
 		return THREAD_TYPES.has(channel.type ?? 0) ? this.ownsThread(channel.id) : this.ownsChannel(channel.id);
+	}
+
+	/**
+	 * Whether a message is talking to Eryn: a ping, a managed-role ping, or a
+	 * reply to one of its messages.
+	 *
+	 * Discord's reply button is how people answer a question without retyping
+	 * the bot's name, so it has to count as addressing Eryn or a follow-up in
+	 * the conversation silently disappears.
+	 */
+	private async addressed(message: DiscordMessage, roleId: string | undefined): Promise<boolean> {
+		if (isMention(message, this.botUserId, roleId) || isReplyTo(message, this.botUserId)) return true;
+		const referenced = message.referenced_message;
+		if (referenced?.author !== undefined) return false;
+		// A gateway payload can omit the referenced message. Ask REST rather
+		// than dropping a reply that may be aimed at Eryn.
+		const messageId = referenced?.id ?? message.message_reference?.message_id;
+		if (messageId === undefined || this.botUserId === undefined) return false;
+		const original = await this.rest.message(message.channel_id, messageId).catch(() => undefined);
+		return original?.author?.id === this.botUserId;
 	}
 
 	private ownsThread(threadId: string): Promise<boolean> {

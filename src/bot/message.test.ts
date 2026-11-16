@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { DiscordMessage } from "../discord/socket.ts";
-import { attachmentsOf, stripMention, threadName } from "./message.ts";
+import { attachmentsOf, isReplyTo, stripMention, threadName } from "./message.ts";
 
 const BOT = "bot-1";
 const ROLE = "role-1";
@@ -89,4 +89,22 @@ test("an attachment present on both messages is sent once", () => {
 test("an attachment without a URL is ignored", () => {
 	const files = attachmentsOf(message({ attachments: [{ filename: "broken.png" }] }));
 	assert.deepEqual(files, []);
+});
+
+test("a reply to one of Eryn's messages addresses it", () => {
+	const reply = message({
+		referenced_message: message({ id: "m0", author: { id: "eryn" } }),
+	});
+	assert.equal(isReplyTo(reply, "eryn"), true);
+});
+
+test("a reply to someone else does not address Eryn", () => {
+	const reply = message({
+		referenced_message: message({ id: "m0", author: { id: "oscar" } }),
+	});
+	assert.equal(isReplyTo(reply, "eryn"), false);
+});
+
+test("a message that is not a reply does not address Eryn", () => {
+	assert.equal(isReplyTo(message({}), "eryn"), false);
 });

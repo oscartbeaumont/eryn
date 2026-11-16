@@ -106,6 +106,17 @@ export function isMention(message: DiscordMessage, botUserId: string | undefined
 }
 
 /**
+ * Whether a message replies to one of the bot's own messages.
+ *
+ * Discord's reply button is an alternative to a ping, and a person who uses it
+ * is still talking to the bot. Treated as addressing it so a follow-up in a
+ * conversation does not disappear just because it has no `@` in it.
+ */
+export function isReplyTo(message: DiscordMessage, userId: string | undefined): boolean {
+	return userId !== undefined && message.referenced_message?.author?.id === userId;
+}
+
+/**
  * A message's text with the bot's ping replaced by its name.
  *
  * A message that was only a ping stays empty: it should not become a one-word
