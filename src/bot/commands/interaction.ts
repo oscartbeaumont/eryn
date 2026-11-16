@@ -39,6 +39,8 @@ export interface CommandContext {
 	readonly context: (guildId: string, channelId: string) => Promise<DiscordContext | undefined>;
 	/** Remove the guild's public install greeting, whose job the setup flow has finished. */
 	readonly dismissGreeting: (guildId: string) => Promise<void>;
+	/** The bot's own guild-wide permissions, or undefined when they cannot be read. */
+	readonly botPermissions: (guildId: string) => Promise<bigint | undefined>;
 	readonly rest: DiscordRest;
 }
 

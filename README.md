@@ -307,6 +307,17 @@ application's interactions endpoint at `<origin>/interactions` and answers
 Discord's verification ping. Keep `<worker>.<subdomain>.workers.dev` or attach
 a custom domain after that, and open the site once more.
 
+### Updating an existing install
+
+Discord applies a bot's permissions when it is installed. A server that added
+Eryn before a tool existed keeps the old role, and that tool fails with a
+missing-permission error. `/eryn setup` notices the missing permissions and
+shows a **Grant permissions** button. It re-authorises the bot for that server
+with the union of its current and required permissions, which updates the
+managed role in place; the server's files, provider keys, MCP links, sessions,
+and policies are untouched. Reinstalling is not required, and an admin can also
+add the permissions by hand under **Server Settings → Roles → Eryn**.
+
 ### Deploying without the button
 
 ```sh

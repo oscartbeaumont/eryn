@@ -24,34 +24,49 @@ export const POSTHOG_PROJECT_TOKEN = "phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZ
 export const POSTHOG_PROXY_PATH = "/ph_7Qm2";
 
 /**
- * The permissions the bot needs, which is everything its tools can use:
- * View Audit Log (so the install message can find who added the bot), Add
- * Reactions, View Channels, Send Messages, Manage Messages (editing, deleting,
- * and pinning someone else's message when the speaker may), Embed Links and
- * Attach Files (table embeds and uploaded workspace files), Read Message
- * History, Manage Threads (so mentions in threads Eryn did not create are
- * delivered), Create Public Threads, and Send Messages in Threads.
+ * Every permission the bot's tools use, with the label shown to an admin when
+ * one is missing. The mask and the labels come from this one list, so a tool
+ * cannot be added without its permission appearing in the setup warning.
  */
-const BOT_PERMISSIONS =
-	(1n << 7n) | // View Audit Log
-	(1n << 6n) | // Add Reactions
-	(1n << 10n) | // View Channels
-	(1n << 11n) | // Send Messages
-	(1n << 13n) | // Manage Messages
-	(1n << 14n) | // Embed Links
-	(1n << 15n) | // Attach Files
-	(1n << 16n) | // Read Message History
-	(1n << 34n) | // Manage Threads
-	(1n << 35n) | // Create Public Threads
-	(1n << 38n); // Send Messages in Threads
+export const BOT_PERMISSION_LABELS: readonly (readonly [bigint, string])[] = [
+	[1n << 7n, "View Audit Log"],
+	[1n << 6n, "Add Reactions"],
+	[1n << 10n, "View Channels"],
+	[1n << 11n, "Send Messages"],
+	[1n << 13n, "Manage Messages"],
+	[1n << 14n, "Embed Links"],
+	[1n << 15n, "Attach Files"],
+	[1n << 16n, "Read Message History"],
+	[1n << 34n, "Manage Threads"],
+	[1n << 35n, "Create Public Threads"],
+	[1n << 38n, "Send Messages in Threads"],
+];
 
-/** The Discord authorization screen that installs the bot into a server. */
-export function installUrl(clientId: string): string {
+/** The permissions the bot needs, combined into one mask. */
+export const BOT_PERMISSIONS = BOT_PERMISSION_LABELS.reduce((mask, [bit]) => mask | bit, 0n);
+
+/**
+ * The Discord authorization screen for the bot.
+ *
+ * With a `guildId`, Discord preselects that server and applies `permissions` to
+ * the bot's existing managed role, so an installed bot can be granted a
+ * permission it did not ask for originally without being removed. The caller
+ * passes the union of the role's current permissions and the required set, so
+ * a permission an admin granted by hand is preserved.
+ */
+export function installUrl(
+	clientId: string,
+	options: { guildId?: string; permissions?: bigint } = {},
+): string {
 	const params = new URLSearchParams({
 		client_id: clientId,
 		scope: "bot applications.commands",
-		permissions: BOT_PERMISSIONS.toString(),
+		permissions: (options.permissions ?? BOT_PERMISSIONS).toString(),
 	});
+	if (options.guildId) {
+		params.set("guild_id", options.guildId);
+		params.set("disable_guild_select", "true");
+	}
 	return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 

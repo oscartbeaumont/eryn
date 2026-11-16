@@ -512,16 +512,22 @@ export function discordRest(token: string) {
 			}
 		},
 
-		/** The guilds the bot is a member of. */
-		async guilds(): Promise<{ id: string; name: string }[]> {
-			const result = await request<{ id?: unknown; name?: unknown }[]>("GET", "/users/@me/guilds");
+		/** The guilds the bot is a member of, with its own permissions in each. */
+		async guilds(): Promise<{ id: string; name: string; permissions?: string }[]> {
+			const result = await request<
+				{ id?: unknown; name?: unknown; permissions?: unknown }[]
+			>("GET", "/users/@me/guilds");
 			if (!Array.isArray(result)) return [];
 			return result
 				.filter(
-					(guild): guild is { id: string; name: string } =>
+					(guild): guild is { id: string; name: string; permissions?: unknown } =>
 						typeof guild.id === "string" && typeof guild.name === "string",
 				)
-				.map((guild) => ({ id: guild.id, name: guild.name }));
+				.map((guild) => ({
+					id: guild.id,
+					name: guild.name,
+					...(typeof guild.permissions === "string" ? { permissions: guild.permissions } : {}),
+				}));
 		},
 
 		/**

@@ -8,8 +8,9 @@
  * opens a fresh ephemeral menu rather than editing that message.
  */
 
-import { actionButton, buttonRow, type DiscordButton } from "../../discord/components";
+import { actionButton, buttonRow, linkButton, type DiscordButton } from "../../discord/components";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
+import { grantPermissionsUrl, missingPermissionNames } from "../permissions";
 import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
 import { claim, responder, closeRow, type InteractionRequest } from "./interaction";
 import { MODEL_SCREEN_ID } from "./models";
@@ -46,6 +47,16 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	const defaultProfile = profiles?.profiles.find(
 		(profile) => profile.id === profiles.defaultProfile,
 	);
+	// A guild installed before a tool existed still has the old role. Discord
+	// applies new permissions only on install or re-authorisation, so point at
+	// the link that updates the role in place. `undefined` means the lookup
+	// failed, in which case this stays quiet rather than guessing.
+	const current = await request.ctx.botPermissions(request.guildId).catch(() => undefined);
+	const missing = current === undefined ? [] : missingPermissionNames(current);
+	const grantUrl =
+		current === undefined || missing.length === 0
+			? undefined
+			: grantPermissionsUrl(request.ctx.applicationId, request.guildId, current);
 	const providers = status.providers.map((provider) => provider.integrationID).join(", ") || "none";
 	const links = status.links.length;
 	const lines = status.ready
@@ -62,6 +73,12 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 				...(links ? [`MCP servers: ${links} linked`] : []),
 				...(profiles ? [`Default profile: **${defaultProfile?.name ?? "Standard"}**`] : []),
 			];
+	if (missing.length) {
+		lines.push(
+			"",
+			`**Missing permissions:** ${missing.join(", ")}. Some tools will fail until they are granted.`,
+		);
+	}
 	const buttons: DiscordButton[] = [
 		actionButton(
 			status.ready ? "Change provider" : "Connect provider",
@@ -73,7 +90,9 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2));
 	if (!request.dmGuildId) buttons.push(actionButton("Permissions", request.id(PROFILES_SCREEN_ID), 2));
 	buttons.push(actionButton("Close", request.id(SETUP_CLOSE_ID), 2));
-	await answer.reply(lines.join("\n"), [buttonRow(buttons)]);
+	const components = [buttonRow(buttons)];
+	if (grantUrl) components.push(buttonRow([linkButton("Grant permissions", grantUrl)]));
+	await answer.reply(lines.join("\n"), components);
 }
 
 /** Each menu button routes to the screen that owns it. */

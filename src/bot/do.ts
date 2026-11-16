@@ -756,16 +756,18 @@ export class BotGateway extends DurableObject<Env> {
 			await this.answerAsk(interaction, customId);
 			return;
 		}
+		const botUserId = this.botUserId ?? (await applicationId(this.env));
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
-			applicationId: this.botUserId ?? (await applicationId(this.env)),
+			applicationId: botUserId,
 			session: (guildId) => this.session(guildId),
 			analytics: (guildId) => this.analytics(guildId),
 			ownsConversation: async (channelId) =>
 				(await this.ownsThread(channelId)) || (await this.ownsChannel(channelId)),
 			context: (guildId, channelId) => this.conversationContext(guildId, channelId),
 			dismissGreeting: (guildId) => dismissInstallGreeting(this.rest, this.ctx.storage, guildId),
+			botPermissions: (guildId) => this.lookups.botPermissions(guildId, botUserId),
 			rest: this.rest,
 		};
 		await handleInteraction(ctx, interaction);

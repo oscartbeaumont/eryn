@@ -11,6 +11,7 @@
  */
 
 import type { DiscordChannelRef, DiscordRest } from "../discord/api";
+import { guildPermissions, parsePermissions } from "../discord/permissions";
 import type { DiscordChannel, DiscordMessage } from "../discord/socket";
 import type { DiscordContext } from "../session/models";
 
@@ -97,6 +98,39 @@ export class DiscordLookups {
 		if (!role) return undefined;
 		this.botRoles.set(guildId, role.id);
 		return role.id;
+	}
+
+	/**
+	 * The bot's own guild-wide permissions.
+	 *
+	 * Used by `/eryn setup` to notice a role that predates a tool: Discord only
+	 * applies the install link's permissions on install or re-authorisation.
+	 * `GET /users/@me/guilds` reports the bot's own permissions, so the common
+	 * path needs no member lookup and cannot be blocked by the members intent. A
+	 * bot in more than 200 guilds is not in that first page, so the roles of its
+	 * managed role are the fallback. `undefined` means the lookup failed, which is
+	 * not the same as a role with no permissions, so the setup screen stays quiet
+	 * instead of guessing.
+	 */
+	async botPermissions(guildId: string, botUserId: string | undefined): Promise<bigint | undefined> {
+		try {
+			const guild = (await this.rest.guilds()).find((entry) => entry.id === guildId);
+			if (guild?.permissions) return parsePermissions(guild.permissions);
+			if (!botUserId) return undefined;
+			const [roles, member] = await Promise.all([
+				this.rest.guildRoles(guildId),
+				this.rest.guildMember(guildId, botUserId),
+			]);
+			if (!member) return undefined;
+			return guildPermissions({
+				guildId,
+				userId: botUserId,
+				roles,
+				memberRoleIds: member.roles,
+			});
+		} catch {
+			return undefined;
+		}
 	}
 
 	/**
