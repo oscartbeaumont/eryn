@@ -6,9 +6,9 @@
  * shapes into the session's; nothing here talks to Discord or the session.
  */
 
-import { DEFAULT_THREAD_NAME } from "../discord/api";
+import { DEFAULT_THREAD_NAME } from "../discord/api.ts";
 import type { DiscordMessage } from "../discord/socket";
-import type { PromptAttachment, PromptUser } from "../session/models";
+import type { PromptAttachment, PromptUser } from "../session/models.ts";
 
 /** Discord permits 100 characters in a thread name. */
 const MAX_THREAD_NAME = 100;
@@ -100,17 +100,19 @@ export function isMention(message: DiscordMessage, botUserId: string | undefined
 }
 
 /**
- * A message's text with the bot's ping removed.
+ * A message's text with the bot's ping replaced by its name.
  *
  * A message that was only a ping stays empty: it should not become a one-word
- * request just because the ping is rendered as "Eryn".
+ * request just because the ping is rendered as "Eryn". The line structure is
+ * preserved because it is content: a fenced code block or a list has to reach
+ * the model as it was written.
  */
 export function stripMention(content: string, botUserId: string | undefined, roleId?: string): string {
 	const pattern = botUserId ? mentionPattern(botUserId) : undefined;
 	const replace = (replacement: string): string => {
 		let text = pattern ? content.replace(pattern, replacement) : content;
 		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, replacement);
-		return text.replace(/\s+/g, " ").trim();
+		return text.trim();
 	};
 	return replace("") ? replace("Eryn") : "";
 }

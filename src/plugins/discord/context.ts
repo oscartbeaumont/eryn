@@ -13,8 +13,8 @@
 
 import { Option, Schema } from "effect";
 
-import { selfClosing } from "../../discord/xml";
-import { DiscordContextSchema, type DiscordContext } from "../../session/models";
+import { selfClosing } from "../../discord/xml.ts";
+import { DiscordContextSchema, type DiscordContext } from "../../session/models.ts";
 
 /** Metadata key holding a conversation's Discord context on its OpenCode session. */
 export const DISCORD_METADATA_KEY = "discord";
@@ -48,8 +48,39 @@ export function describeDiscordContext(context: DiscordContext): string {
 		entries.push(["thread", context.thread.name ?? context.thread.id]);
 		entries.push(["threadId", context.thread.id]);
 	}
-	return selfClosing("discord", entries);
+	return `${DISCORD_MARKER}\n${selfClosing("discord", entries)}`;
 }
 
-/** The marker {@link describeDiscordContext} emits, for callers that must not repeat themselves. */
-export const DISCORD_MARKER = "<discord ";
+/**
+ * A per-session queue for read-modify-write cycles on the Discord metadata.
+ *
+ * The context lives in one metadata key, and the schedule hooks and the Discord
+ * tools both update it. Two parallel `schedule_create` calls would otherwise
+ * read the same context and the second write would drop the first schedule's
+ * id, leaving a scope that no longer covers an active schedule.
+ */
+const metadataQueues = new Map<string, Promise<void>>();
+
+export function withDiscordMetadataLock<T>(sessionID: string, task: () => Promise<T>): Promise<T> {
+	const previous = metadataQueues.get(sessionID) ?? Promise.resolve();
+	const next = previous.then(task, task);
+	const tail = next.then(
+		() => undefined,
+		() => undefined,
+	);
+	metadataQueues.set(sessionID, tail);
+	void tail.finally(() => {
+		if (metadataQueues.get(sessionID) === tail) metadataQueues.delete(sessionID);
+	});
+	return next;
+}
+
+/**
+ * The marker {@link describeDiscordContext} emits, for callers that must not
+ * repeat themselves.
+ *
+ * It has to be unique to this block: the instructions and skills Eryn ships
+ * mention `<discord ... />` in prose, and a bare tag prefix would make the
+ * prompt hook think the real context was already added and skip it.
+ */
+export const DISCORD_MARKER = "<!-- eryn:discord -->";

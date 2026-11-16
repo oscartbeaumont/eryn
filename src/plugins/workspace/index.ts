@@ -82,7 +82,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				if (text === undefined) return `Error: ${path} does not exist`;
 				const lines = text.split("\n");
 				const start = Math.max(0, (offset ?? 1) - 1);
-				const end = limit ? start + limit : lines.length;
+				const end = limit === undefined ? lines.length : start + Math.max(0, limit);
 				return lines
 					.slice(start, end)
 					.map((line, index) => `${start + index + 1}: ${line}`)
@@ -104,7 +104,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const { filePath, content } = rawInput as FileInput & { content: string };
 				const path = await resolve({ filePath }, call, "file");
 				await writeText(store, path, content);
-				return `Wrote ${path} (${content.length} bytes)`;
+				return `Wrote ${path} (${textToBytes(content).byteLength} bytes)`;
 			},
 		},
 

@@ -122,8 +122,13 @@ export class BotSession extends DurableObject<Env> {
 		const due = this.scheduleDueAt();
 		if (due !== null && due <= now + 1_000) {
 			// `runScheduleTick` leaves its own short follow-up alarm so the turn it
-			// admitted has time to start.
-			await this.runScheduleTick().catch((error) => log("session", `schedule tick failed: ${describeError(error)}`));
+			// admitted has time to start. If the tick itself fails there is no
+			// follow-up, and this alarm has already been consumed, so a schedule
+			// that is due would never be tried again without a human request.
+			await this.runScheduleTick().catch(async (error) => {
+				log("session", `schedule tick failed: ${describeError(error)}`);
+				await this.ctx.storage.setAlarm(Date.now() + BUSY_POLL_MS).catch(() => undefined);
+			});
 			this.lastActivityAt = Date.now();
 			return;
 		}

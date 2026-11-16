@@ -74,6 +74,10 @@ const TURN_TIMEOUT_MS = 900_000;
 const COMPACTION_TIMEOUT_MS = 120_000;
 /** How long a question waits for an answer before it is cancelled. */
 const FORM_TIMEOUT_MS = 300_000;
+/** First delay before replacing an event subscription that ended mid-turn. */
+const FEED_RETRY_MS = 1_000;
+/** A run can outlive a host that will never come back; keep the retries slow. */
+const MAX_FEED_RETRY_MS = 30_000;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -254,6 +258,8 @@ class GuildAgentImpl implements GuildAgentShape {
 	private readonly discarded = new Set<string>();
 	/** The model catalogue for the current host, fetched at most once per host. */
 	private modelCache: ModelOption[] | undefined;
+	/** Backoff for replacing an event subscription that ended mid-turn. */
+	private feedRetryMs = FEED_RETRY_MS;
 
 	/** In-memory turn state per thread; a thread's session id is persisted. */
 	private readonly runs = new Map<string, ThreadRun>();
@@ -416,6 +422,9 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	busy(): boolean {
 		if (this.adopting.size > 0) return true;
+		// A manual compaction is a live turn the run map does not track; closing
+		// the host under it would abandon the member's request.
+		if (this.compactions.size > 0) return true;
 		for (const run of this.runs.values()) if (run.turn !== undefined) return true;
 		return false;
 	}
@@ -433,6 +442,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.abort = undefined;
 		this.consuming = undefined;
 		this.consumingHost = undefined;
+		this.feedRetryMs = FEED_RETRY_MS;
 
 		const host = this.host;
 		this.host = undefined;
@@ -445,6 +455,8 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.appliedPolicies.clear();
 		this.contextByThread.clear();
 		this.requesterByThread.clear();
+		this.turnFloor.clear();
+		this.principalLocks.clear();
 		for (const pending of this.pendingApprovals.values()) clearTimeout(pending.timer);
 		this.pendingApprovals.clear();
 		for (const pending of this.pendingForms.values()) {
@@ -714,6 +726,56 @@ class GuildAgentImpl implements GuildAgentShape {
 		};
 	}
 
+	/**
+	 * Put a conversation's session in the state one turn expects.
+	 *
+	 * Both a prompt and a command start the same way: refresh the conversation
+	 * names, decide who the turn acts as, write that context and the policy, and
+	 * point the session at the guild's model. Keeping it in one place means the
+	 * two paths cannot drift, which matters because the attribution write is a
+	 * security boundary.
+	 */
+	private async prepareTurn(input: {
+		host: HostInterface;
+		threadId: string;
+		sessionID: string;
+		discord: DiscordContext | undefined;
+		authorId: string | undefined;
+		/** Whether a running execution was interrupted before this turn started. */
+		interrupted: boolean;
+		config: HostConfig;
+	}): Promise<DiscordContext | undefined> {
+		const { host, threadId, sessionID, authorId, interrupted, config } = input;
+		// A rename is not replayed to the agent, and the gateway's copy can
+		// predate it, so re-read the conversation rather than trusting it.
+		const refreshed = input.discord ? await this.refreshContext(input.discord) : undefined;
+		// Keep the conversation's stored context when the prompt carries none, but
+		// set or clear the speaker on it. A turn with no speaker (an older message
+		// watch, for example) must not borrow the previous speaker's Discord
+		// authority. A session with no context stays without one: this does not
+		// invent a conversation.
+		const base =
+			refreshed ??
+			this.contextByThread.get(threadId) ??
+			(await this.contextForSession(sessionID))?.context;
+		// The decision and the write share a lock. A schedule wake can be
+		// enqueued between them, and if it joins this turn its scope must not be
+		// overwritten by the speaker's context.
+		const discord = await this.withPrincipalLock(sessionID, async () => {
+			const context = await this.promptContext(host, sessionID, base, authorId, !interrupted);
+			await this.applyDiscord(host, threadId, sessionID, context);
+			return context;
+		});
+		await this.applyPolicy(host, threadId, sessionID, discord, config);
+		// Approvals during a scheduled turn must not name, or be approved by,
+		// whoever happened to speak last.
+		if (discord?.scheduleTurn === true) this.requesterByThread.delete(threadId);
+		else if (authorId) this.requesterByThread.set(threadId, authorId);
+		else this.requesterByThread.delete(threadId);
+		await this.applyModel(host, threadId, sessionID, config.model);
+		return discord;
+	}
+
 	async prompt(request: PromptRequest, config: HostConfig): Promise<void> {
 		// A prompt is a person talking to Eryn, including an answer to its own
 		// question. A schedule wake does not come through here.
@@ -741,39 +803,15 @@ class GuildAgentImpl implements GuildAgentShape {
 			request.threadId,
 			"prompt",
 			async () => {
-				// A rename is not replayed to the agent, and the gateway's copy can
-				// predate it, so re-read the conversation rather than trusting it.
-				// The speaker is recorded on the same context: the tools read it
-				// back to hold the turn to that person's Discord permissions.
-				const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
-				// Keep the conversation's stored context when the prompt carries
-				// none, but set or clear the speaker on it. A turn with no speaker
-				// (an older message watch, for example) must not borrow the previous
-				// speaker's Discord authority. A session with no context stays
-				// without one: this does not invent a conversation.
-				const fallback =
-					this.contextByThread.get(request.threadId) ??
-					(await this.contextForSession(sessionID))?.context;
-				const base = refreshed ?? fallback;
-				// The decision and the write share a lock. A schedule wake can be
-				// enqueued between them, and if it joins this turn its scope must
-				// not be overwritten by the speaker's context.
-				const discord = await this.withPrincipalLock(sessionID, async () => {
-					const context = await this.promptContext(
-						host,
-						sessionID,
-						base,
-						request.author?.id,
-						!interrupted,
-					);
-					await this.applyDiscord(host, request.threadId, sessionID, context);
-					return context;
+				const discord = await this.prepareTurn({
+					host,
+					threadId: request.threadId,
+					sessionID,
+					discord: request.discord,
+					authorId: request.author?.id,
+					interrupted,
+					config,
 				});
-				await this.applyPolicy(host, request.threadId, sessionID, discord, config);
-				if (discord?.scheduleTurn === true) this.requesterByThread.delete(request.threadId);
-				else if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
-				else this.requesterByThread.delete(request.threadId);
-				await this.applyModel(host, request.threadId, sessionID, config.model);
 
 				const attached = await fetchAttachmentFiles(request.attachments);
 				const message = renderUserMessage(
@@ -831,27 +869,15 @@ class GuildAgentImpl implements GuildAgentShape {
 				request.threadId,
 				`command ${request.command}`,
 				async () => {
-					const refreshed = request.discord ? await this.refreshContext(request.discord) : undefined;
-					const fallback =
-						this.contextByThread.get(request.threadId) ??
-						(await this.contextForSession(sessionID))?.context;
-					const base = refreshed ?? fallback;
-					const discord = await this.withPrincipalLock(sessionID, async () => {
-						const context = await this.promptContext(
-							host,
-							sessionID,
-							base,
-							request.author?.id,
-							!interrupted,
-						);
-						await this.applyDiscord(host, request.threadId, sessionID, context);
-						return context;
+					await this.prepareTurn({
+						host,
+						threadId: request.threadId,
+						sessionID,
+						discord: request.discord,
+						authorId: request.author?.id,
+						interrupted,
+						config,
 					});
-					await this.applyPolicy(host, request.threadId, sessionID, discord, config);
-					if (discord?.scheduleTurn === true) this.requesterByThread.delete(request.threadId);
-					else if (request.author?.id) this.requesterByThread.set(request.threadId, request.author.id);
-					else this.requesterByThread.delete(request.threadId);
-					await this.applyModel(host, request.threadId, sessionID, config.model);
 					await host.sessions.command({
 						sessionID,
 						name: request.command,
@@ -931,6 +957,9 @@ class GuildAgentImpl implements GuildAgentShape {
 			this.startConsuming(host);
 			const outcome = await new Promise<"ended" | "failed" | "timeout">((resolve) => {
 				const timer = setTimeout(() => {
+					// A retry may have replaced this entry while the old one was
+					// timing out; only the current compaction may write the answer.
+					if (this.compactions.get(sessionID)?.timer !== timer) return;
 					this.compactions.delete(sessionID);
 					resolve("timeout");
 				}, COMPACTION_TIMEOUT_MS);
@@ -945,10 +974,10 @@ class GuildAgentImpl implements GuildAgentShape {
 				// a step would rewrite the context the running turn is using.
 				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error) => {
 					log("session", `could not compact ${threadId}: ${describeError(error)}`);
-					if (this.compactions.delete(sessionID)) {
-						clearTimeout(timer);
-						resolve("failed");
-					}
+					if (this.compactions.get(sessionID)?.timer !== timer) return;
+					this.compactions.delete(sessionID);
+					clearTimeout(timer);
+					resolve("failed");
 				});
 			});
 			if (outcome === "ended") return { ok: true };
@@ -1015,18 +1044,14 @@ class GuildAgentImpl implements GuildAgentShape {
 		}
 		if (active) {
 			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const timeout = new Promise<boolean>((resolve) => {
-				timer = setTimeout(() => resolve(false), 10_000);
-			});
-			const idle = await Promise.race([
+			const idle = await within(
 				host.sessions.wait({ sessionID }).then(
 					() => true,
 					() => false,
 				),
-				timeout,
-			]);
-			if (timer) clearTimeout(timer);
+				10_000,
+				false,
+			);
 			if (!idle) throw new Error("A scheduled turn is still running in this conversation.");
 		}
 		// Settle the in-memory turn that was following the old execution before a
@@ -1034,14 +1059,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// timeout and interrupts whatever is running by then.
 		const previous = this.runs.get(threadId)?.turn;
 		if (previous && !previous.done) {
-			let settleTimer: ReturnType<typeof setTimeout> | undefined;
-			const settled = await Promise.race([
-				previous.completed.then(() => true),
-				new Promise<boolean>((resolve) => {
-					settleTimer = setTimeout(() => resolve(false), 1_000);
-				}),
-			]);
-			if (settleTimer) clearTimeout(settleTimer);
+			const settled = await within(previous.completed.then(() => true), 1_000, false);
 			if (!settled && !previous.done) {
 				previous.done = true;
 				previous.resolve();
@@ -1280,8 +1298,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		const name = input.name.trim().slice(0, 60);
 		if (!name) throw new Error("Give the profile a name.");
 		const existing = await this.store.getProfile(id);
-		if (!existing && (await this.store.profiles()).length >= 22) {
-			throw new Error("A server can have at most 22 custom profiles, so every profile fits in Discord's picker.");
+		// Three built-in profiles plus "Server default" take four slots in the
+		// picker, which Discord caps at 25 options.
+		if (!existing && (await this.store.profiles()).length >= 21) {
+			throw new Error("A server can have at most 21 custom profiles, so every profile fits in Discord's picker.");
 		}
 		const now = Date.now();
 		await this.store.putProfile({
@@ -1383,24 +1403,6 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.appliedPolicies.set(threadId, signature);
 	}
 
-	private async applyPolicyToThread(
-		host: HostInterface,
-		threadId: string,
-		sessionID: string,
-		discord: DiscordContext,
-		config: HostConfig,
-	): Promise<void> {
-		this.contextByThread.set(threadId, discord);
-		const state = await this.policyFor(discord.channel.id, discord.kind === "channel" ? undefined : threadId);
-		const signature = `${JSON.stringify(state.effective)}|${config.links.map((link) => link.name).join(",")}`;
-		if (this.appliedPolicies.get(threadId) === signature) return;
-		await host.sessions.update({
-			sessionID,
-			permissions: compilePermissions(state.effective, config.links),
-		});
-		this.appliedPolicies.set(threadId, signature);
-	}
-
 	/** Push a changed policy onto every session in its scope. */
 	private async reapplyScope(input: {
 		scope: "guild" | "channel" | "thread";
@@ -1426,7 +1428,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			if (!context) continue;
 			if (input.scope === "channel" && context.channel.id !== input.channelId) continue;
 			if (input.scope === "thread" && threadId !== input.threadId) continue;
-			await this.applyPolicyToThread(host, threadId, value, context, config).catch((error) =>
+			await this.applyPolicy(host, threadId, value, context, config).catch((error) =>
 				log("session", `could not update ${threadId}: ${describeError(error)}`),
 			);
 			if (input.scope === "guild") {
@@ -1470,14 +1472,13 @@ class GuildAgentImpl implements GuildAgentShape {
 				// The message was deleted; fall through and post a fresh card.
 			}
 		}
-		const channelId = scope === "thread" ? input.threadId ?? input.channelId : input.channelId;
 		const sent = await this.rest
-			.sendMessage(channelId, content, { components })
+			.sendMessage(id, content, { components })
 			.catch((error) => {
-				log("session", `could not post the policy card for ${channelId}: ${describeError(error)}`);
+				log("session", `could not post the policy card for ${id}: ${describeError(error)}`);
 				return undefined;
 			});
-		if (sent) await this.store.putPolicyCard(key, { channelId, messageId: sent.id });
+		if (sent) await this.store.putPolicyCard(key, { channelId: id, messageId: sent.id });
 	}
 
 	private policyCardText(state: PolicyState): string {
@@ -1727,6 +1728,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		const context = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
 		if (!context) return undefined;
 		const threadId = known ?? context.thread.id;
+		// A subagent inherits its parent's metadata. Its approvals and forms belong
+		// to the parent conversation, but binding the parent thread to the child's
+		// session would send the next human message into the subagent.
+		if (session?.parentID) return { threadId, context };
 		this.remember(threadId, sessionID);
 		this.contextByThread.set(threadId, context);
 		return { threadId, context };
@@ -1887,6 +1892,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		try {
 			return await this.withPrincipalLock(sessionID, async () => {
 				const session = await host.sessions.get({ sessionID });
+				// A subagent's execution inherits its parent's Discord metadata, so
+				// attributing it here would clear the parent conversation's speaker
+				// from a child that is not a conversation at all.
+				if (session.parentID) return false;
 				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 				if (!stored) return false;
 				const wake = await this.scheduleWake(sessionID);
@@ -2408,7 +2417,19 @@ class GuildAgentImpl implements GuildAgentShape {
 		} else {
 			found = await this.contextForSession(formSessionID);
 		}
-		if (!found) return;
+		if (!found) {
+			// A form nobody can be shown must be answered, not left pending: the
+			// tool that raised it would block the turn until the deadline.
+			const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+			await host?.sessions.form
+				.cancel({
+					sessionID: formSessionID,
+					formID: formId,
+					message: "Eryn could not tell which conversation asked.",
+				})
+				.catch(() => undefined);
+			return;
+		}
 
 		const metadata = form.metadata && typeof form.metadata === "object" ? (form.metadata as Record<string, unknown>) : undefined;
 		const isMcp = metadata?.kind === "mcp-elicitation";
@@ -2423,7 +2444,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		const requester = this.requesterByThread.get(found.threadId);
 		const base = {
-			formId: formId,
+			formId,
 			sessionID: formSessionID,
 			threadId: found.threadId,
 			channelId: found.context.channel.id,
@@ -2627,7 +2648,20 @@ class GuildAgentImpl implements GuildAgentShape {
 			return stopped;
 		}
 
-		if (!run?.turn || !this.host || !sessionID) return false;
+		if (!sessionID || !this.host) return false;
+		if (!run?.turn) {
+			// A scheduled turn can run with no in-memory run: this object may have
+			// been cold when it started. Stop the session directly rather than
+			// claiming there was nothing to stop, and release a compaction waiting
+			// on it.
+			const pending = this.compactions.get(sessionID);
+			if (pending) {
+				this.compactions.delete(sessionID);
+				clearTimeout(pending.timer);
+				pending.resolve("failed");
+			}
+			return await this.interruptSession(sessionID);
+		}
 		await (await this.host.promise).sessions.interrupt({ sessionID });
 		return true;
 	}
@@ -2734,13 +2768,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	private async wait(turn: Turn): Promise<boolean> {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<boolean>((resolve) => {
-			timer = setTimeout(() => resolve(false), this.turnTimeoutMs);
-		});
-		const result = await Promise.race([turn.completed.then(() => true), timeout]);
-		if (timer) clearTimeout(timer);
-		return result;
+		return await within(turn.completed.then(() => true), this.turnTimeoutMs, false);
 	}
 
 	private startTyping(channelId: string): () => void {
@@ -2773,6 +2801,14 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (sessionID !== undefined) this.threadBySession.delete(sessionID);
 		this.sessionByThread.delete(threadId);
 		this.turnFloor.delete(threadId);
+		// Everything below is a per-session cache. A thread that loses its session
+		// gets a new one, and a signature left from the old session would make the
+		// new one skip writing its model, context, or permission rules.
+		this.appliedModels.delete(threadId);
+		this.appliedContext.delete(threadId);
+		this.appliedPolicies.delete(threadId);
+		this.contextByThread.delete(threadId);
+		this.requesterByThread.delete(threadId);
 	}
 
 	private async ensureSession(
@@ -2813,7 +2849,8 @@ class GuildAgentImpl implements GuildAgentShape {
 	/**
 	 * Subscribe to the host's event stream, which is where the completion
 	 * signal comes from. The feed is volatile: a subscription that ends has to
-	 * be replaced, so `prompt` re-ensures it.
+	 * be replaced, so `prompt` re-ensures it and a stream that ends mid-turn is
+	 * retried here.
 	 */
 	private startConsuming(host: HostInterface): void {
 		if (this.consuming) return;
@@ -2822,6 +2859,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
 					await this.handleEvent(event);
+					this.feedRetryMs = FEED_RETRY_MS;
 				} catch (error) {
 					log("session", `event handling failed: ${describeError(error)}`);
 				}
@@ -2830,7 +2868,16 @@ class GuildAgentImpl implements GuildAgentShape {
 		const settled = loop
 			.catch((error) => log("session", `event stream stopped: ${describeError(error)}`))
 			.then(() => {
-				if (this.consuming === settled) this.consuming = undefined;
+				if (this.consuming !== settled) return;
+				this.consuming = undefined;
+				// A schedule turn has no request in front of it to re-ensure the
+				// feed, so replace a stream that ended while work is still running.
+				if (this.consumingHost !== host || !this.busy()) return;
+				const delay = this.feedRetryMs;
+				this.feedRetryMs = Math.min(this.feedRetryMs * 2, MAX_FEED_RETRY_MS);
+				setTimeout(() => {
+					if (this.consumingHost === host) this.startConsuming(host);
+				}, delay);
 			});
 		this.consuming = settled;
 	}
@@ -2883,7 +2930,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			// the turn. Adopt it so its reply still lands in the Discord
 			// conversation recorded on the Session.
 			if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
-				this.adopt(sessionID);
+				await this.adopt(sessionID);
 			}
 			return;
 		}
@@ -2906,71 +2953,103 @@ class GuildAgentImpl implements GuildAgentShape {
 	 * The conversation is not in memory after an eviction, so it comes from the
 	 * Discord context the Session carries in its metadata. The agent posts any
 	 * reply through a Discord tool; this only waits for the turn to settle.
+	 *
+	 * The setup is awaited by the event loop: until the conversation is known,
+	 * every event for this Session would be dropped, and a turn that fails
+	 * quickly would lose the failure that should end it. Only the setup is
+	 * awaited; the turn itself runs in the background.
 	 */
-	private adopt(sessionID: string): void {
+	private async adopt(sessionID: string): Promise<void> {
 		const host = this.consumingHost;
 		if (!host || this.adopting.has(sessionID) || this.discarded.has(sessionID)) return;
 		this.adopting.add(sessionID);
-		void (async () => {
-			try {
-				const session = await host.sessions.get({ sessionID });
-				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
-				// A scheduled turn starts from metadata with no message to carry a
-				// rename, so correct the names before following the turn.
-				const refreshed = stored ? await this.refreshContext(stored) : undefined;
-				// A turn this object did not start has no speaker of its own. Only
-				// a schedule wake message may claim its stored scope; anything else
-				// clears the speaker and refuses cross-channel actions.
-				const wake = stored ? await this.scheduleWake(sessionID) : undefined;
-				const scheduled = wake !== undefined;
-				const context = refreshed
-					? this.reconciled(
-							{
-								...refreshed,
-								authorId: undefined,
-								scheduleTurn: scheduled ? true : undefined,
-							},
-							wake?.scheduleId,
-						)
-					: undefined;
-				const threadId = context?.thread.id;
-				if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
-				if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
-					try {
-						await this.saveDiscordContext(host, sessionID, session.metadata, context);
-					} catch (error) {
-						// Without the attribution write the tools would read the
-						// previous speaker. Stop the turn instead of running it with
-						// authority that may not belong to it.
-						log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
-						await host.sessions.interrupt({ sessionID }).catch(() => undefined);
-						return;
-					}
+		try {
+			const session = await host.sessions.get({ sessionID });
+			// A subagent is not a conversation of its own: its events must not
+			// rebind the parent thread or take over the parent's turn.
+			if (session.parentID) return;
+			const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			// A scheduled turn starts from metadata with no message to carry a
+			// rename, so correct the names before following the turn.
+			const refreshed = stored ? await this.refreshContext(stored) : undefined;
+			// A turn this object did not start has no speaker of its own. Only
+			// a schedule wake message may claim its stored scope; anything else
+			// clears the speaker and refuses cross-channel actions.
+			const wake = stored ? await this.scheduleWake(sessionID) : undefined;
+			const scheduled = wake !== undefined;
+			const context = refreshed
+				? this.reconciled(
+						{
+							...refreshed,
+							authorId: undefined,
+							scheduleTurn: scheduled ? true : undefined,
+						},
+						wake?.scheduleId,
+					)
+				: undefined;
+			const threadId = context?.thread.id;
+			if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
+			if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
+				try {
+					await this.saveDiscordContext(host, sessionID, session.metadata, context);
+				} catch (error) {
+					// Without the attribution write the tools would read the
+					// previous speaker. Stop the turn instead of running it with
+					// authority that may not belong to it.
+					log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
+					await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+					return;
 				}
-				// This context was written outside the prompt path, so the next
-				// human prompt must not trust a matching signature.
-				this.appliedContext.delete(threadId);
-
-				this.remember(threadId, sessionID);
-				// Approvals during a scheduled turn must not name, or be approved
-				// by, whoever happened to speak last.
-				this.requesterByThread.delete(threadId);
-				if (context) {
-					this.contextByThread.set(threadId, context);
-					if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
-				}
-				await this.runTurn(
-					threadId,
-					`scheduled turn for ${sessionID}`,
-					async () => undefined,
-					() => host.sessions.interrupt({ sessionID }).catch(() => undefined),
-				);
-			} catch (error) {
-				log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
-			} finally {
-				this.adopting.delete(sessionID);
 			}
-		})();
+			// This context was written outside the prompt path, so the next
+			// human prompt must not trust a matching signature.
+			this.appliedContext.delete(threadId);
+
+			this.remember(threadId, sessionID);
+			// Approvals during a scheduled turn must not name, or be approved
+			// by, whoever happened to speak last.
+			this.requesterByThread.delete(threadId);
+			if (context) {
+				this.contextByThread.set(threadId, context);
+				if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
+			}
+			// `runTurn` creates the turn synchronously, so the event loop resumes
+			// with a mapping it can apply the events already queued for it to.
+			void this.runTurn(
+				threadId,
+				`scheduled turn for ${sessionID}`,
+				async () => {
+					// The start event that triggered adoption was consumed by this
+					// method, so record that the turn began. Without it a bare
+					// `session.idle` could never complete the turn.
+					const turn = this.runs.get(threadId)?.turn;
+					if (turn) applyTurnEvent(turn, "session.step.started", {});
+				},
+				() => host.sessions.interrupt({ sessionID }).catch(() => undefined),
+			).catch((error) => log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`));
+		} catch (error) {
+			log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
+		} finally {
+			this.adopting.delete(sessionID);
+		}
+	}
+}
+
+/**
+ * Await `promise`, but resolve `fallback` after `ms`.
+ *
+ * A turn waits on the host with a deadline in two places; the timer is always
+ * cleared, so a completed wait leaves nothing behind to fire later.
+ */
+async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(fallback), ms);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 

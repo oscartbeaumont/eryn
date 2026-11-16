@@ -314,6 +314,10 @@ class DiscordShard {
 	private connect(): void {
 		if (this.disposed || this.broken || this.reshard) return;
 		this.stopHeartbeat();
+		// The ACK counter belongs to one socket. Carrying it into a fresh
+		// connection would make the first scheduled beat look unacknowledged and
+		// reconnect a healthy shard forever.
+		this.awaitingAck = 0;
 
 		let socket: WebSocket;
 		try {
@@ -448,11 +452,15 @@ class DiscordShard {
 	private startHeartbeat(): void {
 		this.stopHeartbeat();
 		const beat = () => {
-			this.sendHeartbeat();
-			if (this.awaitingAck >= 2) {
+			// Discord expects each heartbeat to be acknowledged before the next
+			// one. Checking before sending is what makes that true: checking after
+			// would already count the beat just sent, whose ACK cannot have
+			// arrived, and would reconnect every healthy socket.
+			if (this.awaitingAck >= 1) {
 				this.reconnect("heartbeat was not acknowledged");
 				return;
 			}
+			this.sendHeartbeat();
 			this.heartbeat = setTimeout(beat, this.intervalMs);
 		};
 		// Discord expects the first heartbeat after a jittered fraction of the interval.

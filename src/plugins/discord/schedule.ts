@@ -23,7 +23,7 @@ import {
 	removeScheduleFromScope,
 	type ScopeChannelCapabilities,
 } from "../../session/schedule-scope";
-import { DISCORD_METADATA_KEY, readDiscordContext } from "./context";
+import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 type ScheduleTool = "create" | "delete";
 
@@ -48,16 +48,12 @@ function scheduleId(value: unknown): string | undefined {
 	return undefined;
 }
 
-async function readContext(
-	ctx: Plugin.Context,
-	sessionID: string,
-): Promise<{ metadata?: Record<string, unknown>; context: DiscordContext } | undefined> {
+async function readContext(ctx: Plugin.Context, sessionID: string): Promise<DiscordContext | undefined> {
 	const session = await ctx.session.get({ sessionID }).catch((error) => {
 		log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
 		return undefined;
 	});
-	const context = readDiscordContext(session?.metadata);
-	return session && context ? { metadata: session.metadata, context } : undefined;
+	return readDiscordContext(session?.metadata);
 }
 
 /**
@@ -79,22 +75,42 @@ async function conversationCapabilities(
 	return await authority.scopeCapabilities(authorId, info);
 }
 
+/** A write `writeScope` should make: `undefined` means nothing to change. */
+type ScopeUpdate = { readonly scope: ScheduleScope | undefined } | undefined;
+
+/**
+ * Apply a scope change to the freshest copy of the session's context.
+ *
+ * The read-modify-write runs under the shared metadata lock, so two parallel
+ * `schedule_create` calls cannot each write a scope that knows only about its
+ * own schedule and silently drop the other's id.
+ */
 async function writeScope(
 	ctx: Plugin.Context,
 	sessionID: string,
-	metadata: Record<string, unknown> | undefined,
-	context: DiscordContext,
-	scope: ScheduleScope | undefined,
+	update: (latest: DiscordContext) => ScopeUpdate,
 ): Promise<void> {
-	await ctx.session.update({
-		sessionID,
-		metadata: {
-			...metadata,
-			// Merge rather than replace: the Discord context is shared with the
-			// session object, and this update must not drop its author, policy
-			// inputs, or any other plugin's metadata.
-			[DISCORD_METADATA_KEY]: scope ? { ...context, scheduleScope: scope } : { ...context, scheduleScope: undefined },
-		} as unknown as SessionMetadata,
+	await withDiscordMetadataLock(sessionID, async () => {
+		const session = await ctx.session.get({ sessionID }).catch((error) => {
+			log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
+			return undefined;
+		});
+		const latest = readDiscordContext(session?.metadata);
+		if (!session || !latest) return;
+		const next = update(latest);
+		if (!next) return;
+		await ctx.session.update({
+			sessionID,
+			metadata: {
+				...session.metadata,
+				// Merge rather than replace: the Discord context is shared with the
+				// session object, and this update must not drop its author, policy
+				// inputs, or any other plugin's metadata.
+				[DISCORD_METADATA_KEY]: next.scope
+					? { ...latest, scheduleScope: next.scope }
+					: { ...latest, scheduleScope: undefined },
+			} as unknown as SessionMetadata,
+		});
 	});
 }
 
@@ -107,10 +123,10 @@ export async function registerScheduleScope(
 ): Promise<void> {
 	await ctx.tool.hook("execute.before", async (event) => {
 		if (scheduleTool(event.tool) !== "create") return;
-		const found = await readContext(ctx, event.sessionID);
-		const scope = found?.context.scheduleScope;
-		const authorId = found?.context.authorId;
-		if (!found || !authorId || !canCreateSchedule(scope, authorId)) {
+		const context = await readContext(ctx, event.sessionID);
+		const scope = context?.scheduleScope;
+		const authorId = context?.authorId;
+		if (!context || !authorId || !canCreateSchedule(scope, authorId)) {
 			throw new Error(
 				scope
 					? "Only the person who created this conversation's schedules can add another."
@@ -119,7 +135,7 @@ export async function registerScheduleScope(
 		}
 		// A schedule may not read or send where its creator cannot. Fail before
 		// the schedule exists rather than storing a scope it cannot justify.
-		const capabilities = await conversationCapabilities(rest, guildId, authority, found.context, authorId);
+		const capabilities = await conversationCapabilities(rest, guildId, authority, context, authorId);
 		if (!capabilities) {
 			throw new Error("Eryn could not verify your Discord access to this conversation.");
 		}
@@ -132,8 +148,8 @@ export async function registerScheduleScope(
 		if (event.status !== "completed") return;
 		const kind = scheduleTool(event.tool);
 		if (!kind) return;
-		const found = await readContext(ctx, event.sessionID);
-		if (!found) return;
+		const context = await readContext(ctx, event.sessionID);
+		if (!context) return;
 
 		if (kind === "create") {
 			const id = scheduleId(event.result);
@@ -144,40 +160,38 @@ export async function registerScheduleScope(
 				log("discord-plugin", `schedule_create for ${event.sessionID} returned no id`);
 				return;
 			}
-			const { metadata, context } = found;
-			if (!canCreateSchedule(context.scheduleScope, context.authorId)) return;
-			const now = Date.now();
 			const ownerId = context.authorId;
-			if (!ownerId) return;
+			if (!ownerId || !canCreateSchedule(context.scheduleScope, ownerId)) return;
+			const now = Date.now();
 			const capabilities = await conversationCapabilities(rest, guildId, authority, context, ownerId);
 			// Without at least one capability there is no justified scope. The
 			// schedule exists, but its turns fail closed as no-speaker turns.
 			if (!capabilities || (!capabilities.read && !capabilities.send)) return;
-			const existing = context.scheduleScope
-				? addChannelToScope(context.scheduleScope, context.thread.id, capabilities, now)
-				: defaultScheduleScope({
-						ownerId,
-						conversationId: context.thread.id,
-						scheduleId: id,
-						capabilities,
-						now,
-					});
-			const scope = addScheduleToScope(existing, id, now);
-			await writeScope(ctx, event.sessionID, metadata, context, scope).catch((error) =>
-				log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`),
-			);
+			await writeScope(ctx, event.sessionID, (latest) => {
+				const latestOwner = latest.authorId;
+				if (!latestOwner || !canCreateSchedule(latest.scheduleScope, latestOwner)) return undefined;
+				const existing = latest.scheduleScope
+					? addChannelToScope(latest.scheduleScope, latest.thread.id, capabilities, now)
+					: defaultScheduleScope({
+							ownerId: latestOwner,
+							conversationId: latest.thread.id,
+							scheduleId: id,
+							capabilities,
+							now,
+						});
+				return { scope: addScheduleToScope(existing, id, now) };
+			}).catch((error) => log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`));
 			onCreated?.(context.thread.id);
 			return;
 		}
 
-		const { metadata, context } = found;
-		const scope = context.scheduleScope;
-		if (!scope) return;
+		if (!context.scheduleScope) return;
 		const id = scheduleId(event.input) ?? scheduleId(event.result);
 		if (!id) return;
-		const next = removeScheduleFromScope(scope, id, Date.now());
-		await writeScope(ctx, event.sessionID, metadata, context, next.scheduleIds.length ? next : undefined).catch(
-			(error) => log("discord-plugin", `could not update a schedule scope: ${describeError(error)}`),
-		);
+		await writeScope(ctx, event.sessionID, (latest) => {
+			if (!latest.scheduleScope) return undefined;
+			const next = removeScheduleFromScope(latest.scheduleScope, id, Date.now());
+			return { scope: next.scheduleIds.length ? next : undefined };
+		}).catch((error) => log("discord-plugin", `could not update a schedule scope: ${describeError(error)}`));
 	});
 }

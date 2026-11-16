@@ -14,12 +14,14 @@ test("a short table becomes a box-drawn monospace block", () => {
 	assert.equal(
 		formatMessage(input).content,
 		[
+			"```",
 			"┌───────┬───────┐",
 			"│ Name  │ Score │",
 			"├───────┼───────┤",
 			"│ Ada   │     9 │",
 			"│ Grace │    10 │",
 			"└───────┴───────┘",
+			"```",
 		].join("\n"),
 	);
 });
@@ -108,7 +110,7 @@ test("a four-column table that fits a code block stays monospace", () => {
 	const input = ["| | A | B | C |", "| --- | --- | --- | --- |", "| One | 1 | 2 | 3 |"].join("\n");
 	const formatted = formatMessage(input);
 	assert.equal(formatted.embeds.length, 0);
-	assert.match(formatted.content, /^┌/);
+	assert.match(formatted.content, /^```\n┌/);
 });
 
 test("a table too large for one embed field falls back to labelled blocks", () => {
@@ -131,11 +133,13 @@ test("text around a table is preserved", () => {
 		[
 			"Here you go:",
 			"",
+			"```",
 			"┌───┬───┐",
 			"│ A │ B │",
 			"├───┼───┤",
 			"│ 1 │ 2 │",
 			"└───┴───┘",
+			"```",
 			"",
 			"Done.",
 		].join("\n"),

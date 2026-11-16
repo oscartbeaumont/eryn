@@ -42,7 +42,6 @@ const CLOSE_ID = "policy:close";
 const PROFILE_ID = "policy:profile";
 const GROUP_ID = "policy:group:";
 const EFFECT_ID = "policy:effect:";
-const BACK_ID = "policy:customise";
 /** The select value that means "drop the channel override". */
 const INHERIT = "default";
 
@@ -97,7 +96,7 @@ export async function policyMenu(request: InteractionRequest): Promise<void> {
 		return;
 	}
 	const state = await request.session.policy(stateRequest(target));
-	await answer.reply(renderMenu(state, target), menuRows(request, state));
+	await answer.reply(renderMenu(state, target), menuRows(state));
 }
 
 function customOf(state: PolicyState) {
@@ -125,7 +124,7 @@ function renderMenu(state: PolicyState, target: Target): string {
 	return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 }
 
-function menuRows(request: InteractionRequest, state: PolicyState) {
+function menuRows(state: PolicyState) {
 	const active = matchProfile(state.effective, customOf(state)) ?? state.effective.profile;
 	const inherits =
 		state.own?.profile === undefined && state.own?.preset === undefined;
@@ -136,7 +135,8 @@ function menuRows(request: InteractionRequest, state: PolicyState) {
 			description: "Clear this channel's override",
 			default: inherits,
 		},
-		...state.profiles.map((profile) => ({
+		// One slot is the "Server default" entry, and Discord caps a select at 25.
+		...state.profiles.slice(0, MAX_SELECT_OPTIONS - 1).map((profile) => ({
 			label: profile.name,
 			value: profile.id,
 			description: (PRESET_HINTS[profile.id as PolicyPreset] ?? "Custom profile").slice(0, 100),
@@ -177,7 +177,7 @@ async function applyProfile(request: InteractionRequest, profile: string): Promi
 		return;
 	}
 	const state = await request.session.policy(stateRequest(target));
-	await answer.update(renderMenu(state, target), menuRows(request, state));
+	await answer.update(renderMenu(state, target), menuRows(state));
 }
 
 async function customise(request: InteractionRequest): Promise<void> {
@@ -198,7 +198,7 @@ async function customise(request: InteractionRequest): Promise<void> {
 				placeholder: "Pick a group",
 				options: groupOptions(state),
 			}),
-			buttonRow([actionButton("Back", BACK_ID, 2), actionButton("Close", CLOSE_ID, 2)]),
+			buttonRow([actionButton("Back", POLICY_MENU_ID, 2), actionButton("Close", CLOSE_ID, 2)]),
 		],
 	);
 }
@@ -262,7 +262,7 @@ async function groupScreen(request: InteractionRequest, key: string): Promise<vo
 			]),
 			buttonRow([
 				actionButton("Follow profile", `${EFFECT_ID}${key}:inherit`, 2),
-				actionButton("Back", BACK_ID, 2),
+				actionButton("Back", CUSTOMISE_ID, 2),
 				actionButton("Close", CLOSE_ID, 2),
 			]),
 		],
@@ -314,7 +314,7 @@ async function applyEffect(
 		return;
 	}
 	const next = await request.session.policy(stateRequest(target));
-	await answer.update(renderMenu(next, target), menuRows(request, next));
+	await answer.update(renderMenu(next, target), menuRows(next));
 }
 
 async function reset(request: InteractionRequest): Promise<void> {
@@ -329,7 +329,7 @@ async function reset(request: InteractionRequest): Promise<void> {
 		return;
 	}
 	const state = await request.session.policy(stateRequest(target));
-	await answer.update(renderMenu(state, target), menuRows(request, state));
+	await answer.update(renderMenu(state, target), menuRows(state));
 }
 
 /** Every id this screen owns. Return `true` so the dispatcher stops. */

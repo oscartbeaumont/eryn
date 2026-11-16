@@ -131,7 +131,7 @@ async function setDefault(request: InteractionRequest, id: string): Promise<void
 			actionButton("New profile", NEW_ID, 1),
 			...(customProfiles(state).length ? [actionButton("Edit custom", MANAGE_ID, 2)] : []),
 			actionButton("Back", SETUP_MENU_ID, 2),
-			actionButton("Close", closeId(), 2),
+			actionButton("Close", SETUP_CLOSE_ID, 2),
 		]),
 	]);
 }
@@ -143,7 +143,7 @@ async function manage(request: InteractionRequest): Promise<void> {
 	const custom = customProfiles(state);
 	if (!custom.length) {
 		await answer.update("There are no custom profiles yet.", [
-			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", closeId(), 2)]),
+			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", SETUP_CLOSE_ID, 2)]),
 		]);
 		return;
 	}
@@ -157,12 +157,8 @@ async function manage(request: InteractionRequest): Promise<void> {
 				value: profile.id,
 			})),
 		}),
-		buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", closeId(), 2)]),
+		buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", SETUP_CLOSE_ID, 2)]),
 	]);
-}
-
-function closeId(): string {
-	return SETUP_CLOSE_ID;
 }
 
 async function detail(request: InteractionRequest, id: string): Promise<void> {
@@ -172,7 +168,7 @@ async function detail(request: InteractionRequest, id: string): Promise<void> {
 	const profile = state.profiles.find((candidate) => candidate.id === id);
 	if (!profile) {
 		await answer.update("That profile no longer exists.", [
-			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", closeId(), 2)]),
+			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", SETUP_CLOSE_ID, 2)]),
 		]);
 		return;
 	}
@@ -188,7 +184,7 @@ async function detail(request: InteractionRequest, id: string): Promise<void> {
 	const rows: DiscordActionRow[] = [];
 	if (profile.builtin) {
 		rows.push(
-			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", closeId(), 2)]),
+			buttonRow([actionButton("Back", PROFILES_SCREEN_ID, 2), actionButton("Close", SETUP_CLOSE_ID, 2)]),
 		);
 	} else {
 		rows.push(
@@ -202,7 +198,7 @@ async function detail(request: InteractionRequest, id: string): Promise<void> {
 				actionButton("Rename", `${RENAME_PREFIX}${profile.id}`, 2),
 				actionButton("Delete", `${DELETE_PREFIX}${profile.id}`, 4),
 				actionButton("Back", PROFILES_SCREEN_ID, 2),
-				actionButton("Close", closeId(), 2),
+				actionButton("Close", SETUP_CLOSE_ID, 2),
 			]),
 		);
 	}
@@ -259,7 +255,7 @@ async function groupScreen(request: InteractionRequest, id: string, key: string)
 			]),
 			buttonRow([
 				actionButton("Back", `${DETAIL_PREFIX}${id}`, 2),
-				actionButton("Close", closeId(), 2),
+				actionButton("Close", SETUP_CLOSE_ID, 2),
 			]),
 		],
 	);
@@ -408,8 +404,7 @@ export async function profileComponent(
 	if (customId === PROFILES_SCREEN_ID) return await claim(request, "update", () => profileScreen(request));
 	if (customId === MANAGE_ID) return await claim(request, "update", () => manage(request));
 	if (customId === NEW_ID) {
-		await responder(request).modal(newProfileModal(request)).catch(() => undefined);
-		return true;
+		return await claim(request, "reply", () => responder(request).modal(newProfileModal(request)));
 	}
 	if (customId === DEFAULT_SELECT_ID) {
 		const id = values[0];
@@ -441,8 +436,7 @@ export async function profileComponent(
 	if (customId.startsWith(RENAME_PREFIX) && !customId.endsWith(":modal")) {
 		const id = customId.slice(RENAME_PREFIX.length);
 		if (id) {
-			await responder(request).modal(renameModal(request, id)).catch(() => undefined);
-			return true;
+			return await claim(request, "reply", () => responder(request).modal(renameModal(request, id)));
 		}
 	}
 	if (customId.startsWith(DETAIL_PREFIX)) {

@@ -62,6 +62,8 @@ import {
 const LinkListSchema = Schema.Struct({ links: Schema.Array(PublicLinkSchema) });
 const ProviderListSchema = Schema.Struct({ integrations: Schema.Array(IntegrationOptionSchema) });
 const ModelListSchema = Schema.Struct({ models: Schema.Array(ModelOptionSchema) });
+const ProfilesResponseSchema = Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields });
+const PolicyStateResponseSchema = Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema });
 
 function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] {
 	return Option.getOrThrowWith(Schema.decodeUnknownOption(schema)(input), () =>
@@ -227,11 +229,7 @@ export class SessionClient {
 		threadId?: string;
 		policy: Policy;
 	}): Promise<PolicyState> {
-		const response = await this.call(
-			ROUTES.policySet,
-			Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema }),
-			input,
-		);
+		const response = await this.call(ROUTES.policySet, PolicyStateResponseSchema, input);
 		return response.state;
 	}
 
@@ -240,11 +238,7 @@ export class SessionClient {
 		channelId: string;
 		threadId?: string;
 	}): Promise<PolicyState> {
-		const response = await this.call(
-			ROUTES.policyClear,
-			Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema }),
-			input,
-		);
+		const response = await this.call(ROUTES.policyClear, PolicyStateResponseSchema, input);
 		return response.state;
 	}
 
@@ -258,27 +252,15 @@ export class SessionClient {
 		tools: Record<string, PolicyEffect>;
 		mcp: Record<string, PolicyEffect>;
 	}): Promise<ProfilesState> {
-		return await this.call(
-			ROUTES.profileSet,
-			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
-			input,
-		);
+		return await this.call(ROUTES.profileSet, ProfilesResponseSchema, input);
 	}
 
 	async removeProfile(id: string): Promise<ProfilesState> {
-		return await this.call(
-			ROUTES.profileRemove,
-			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
-			{ id },
-		);
+		return await this.call(ROUTES.profileRemove, ProfilesResponseSchema, { id });
 	}
 
 	async setDefaultProfile(id: string): Promise<ProfilesState> {
-		return await this.call(
-			ROUTES.profileDefault,
-			Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields }),
-			{ id },
-		);
+		return await this.call(ROUTES.profileDefault, ProfilesResponseSchema, { id });
 	}
 
 	replyApproval(input: {

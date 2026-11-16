@@ -303,12 +303,6 @@ export function isDefaultPolicy(
 	);
 }
 
-/** The name OpenCode gives an MCP tool from a server and tool name. */
-export function mcpToolName(server: string, tool: string): string {
-	const namespace = server.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return `${namespace}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-}
-
 /** The wildcard that covers every tool one MCP server exposes. */
 export function mcpActionPrefix(server: string): string {
 	return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}_*`;

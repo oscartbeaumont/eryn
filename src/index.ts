@@ -173,6 +173,15 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 /** Ed25519 as WebCrypto names it. */
 const ED25519 = { name: "Ed25519" } as const;
 
+/**
+ * How old a signed interaction may be.
+ *
+ * Discord signs the timestamp with the body, but a valid pair can be replayed:
+ * without an age check a captured request would keep working forever. Five
+ * minutes is Discord's own guidance and leaves room for clock skew.
+ */
+const MAX_SIGNATURE_AGE_MS = 5 * 60_000;
+
 /** Decode a hex string, or undefined when it is not one. */
 function hexBytes(value: string): Uint8Array | undefined {
 	if (!value) return undefined;
@@ -183,6 +192,9 @@ function hexBytes(value: string): Uint8Array | undefined {
 async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
 	const signatureBytes = hexBytes(signature);
 	if (!signatureBytes || !timestamp) return false;
+	// The header is seconds since the epoch, as a decimal string.
+	const seconds = Number(timestamp);
+	if (!Number.isFinite(seconds) || Math.abs(Date.now() - seconds * 1_000) > MAX_SIGNATURE_AGE_MS) return false;
 	const payload = new TextEncoder().encode(timestamp + body);
 	// The hosted application's key is a constant, so a normal interaction never
 	// costs a request. A self-hosted deployment runs its own application, and the

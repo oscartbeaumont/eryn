@@ -135,39 +135,54 @@ export function overwritesFor(
 	return layers;
 }
 
+/**
+ * Apply one overwrite list in Discord's order: `@everyone`, then every role at
+ * once, then the member.
+ *
+ * Role overwrites are unioned before they are applied, which is what Discord
+ * does. Applying them one by one would let a role with an allow re-grant a bit
+ * another of the member's roles denies; Discord unions the denies, so the deny
+ * wins regardless of which role carries it.
+ */
+function applyOverwrites(
+	permissions: bigint,
+	overwrites: readonly PermissionOverwriteLike[],
+	input: EffectivePermissionInput,
+): bigint {
+	for (const everyone of overwrites) {
+		if (everyone.type === 0 && everyone.id === input.guildId) {
+			permissions = applyOverwrite(permissions, everyone);
+		}
+	}
+
+	let allow = 0n;
+	let deny = 0n;
+	for (const overwrite of overwrites) {
+		if (overwrite.type !== 0 || overwrite.id === input.guildId) continue;
+		if (!input.memberRoleIds.includes(overwrite.id)) continue;
+		allow |= parsePermissions(overwrite.allow);
+		deny |= parsePermissions(overwrite.deny);
+	}
+	permissions = (permissions & ~deny) | (allow & ~deny);
+
+	for (const member of overwrites) {
+		if (member.type === 1 && member.id === input.userId) {
+			permissions = applyOverwrite(permissions, member);
+		}
+	}
+	return permissions;
+}
+
 /** The effective permissions of one member in one channel or thread. */
 export function effectivePermissions(input: EffectivePermissionInput): bigint {
 	let permissions = guildPermissions(input);
 	// An administrator is not subject to overwrites.
 	if (permissions === ALL_PERMISSIONS) return ALL_PERMISSIONS;
 
-	const positions = new Map(input.roles.map((role) => [role.id, role.position ?? 0]));
-	// Each list is applied in Discord's order: `@everyone`, then role
-	// overwrites from lowest to highest role, then the member overwrite. For a
-	// thread there are two lists, parent first, so the parent's deny survives a
-	// thread list that names only thread-specific bits.
+	// For a thread there are two lists, parent first, so the parent's deny
+	// survives a thread list that names only thread-specific bits.
 	for (const overwrites of overwritesFor(input.channel, input.parent)) {
-		for (const everyone of overwrites.filter(
-			(overwrite) => overwrite.type === 0 && overwrite.id === input.guildId,
-		)) {
-			permissions = applyOverwrite(permissions, everyone);
-		}
-
-		const roleOverwrites = overwrites
-			.filter(
-				(overwrite) =>
-					overwrite.type === 0 &&
-					overwrite.id !== input.guildId &&
-					input.memberRoleIds.includes(overwrite.id),
-			)
-			.sort((a, b) => (positions.get(a.id) ?? 0) - (positions.get(b.id) ?? 0));
-		for (const overwrite of roleOverwrites) permissions = applyOverwrite(permissions, overwrite);
-
-		for (const member of overwrites.filter(
-			(overwrite) => overwrite.type === 1 && overwrite.id === input.userId,
-		)) {
-			permissions = applyOverwrite(permissions, member);
-		}
+		permissions = applyOverwrites(permissions, overwrites, input);
 	}
 
 	// A private thread also requires being in it, or a thread/channel manager.

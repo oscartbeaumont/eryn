@@ -215,11 +215,9 @@ export async function modelComponent(
 		case SELECT_ID:
 			return await claim(request, "update", () => selectModel(request, values[0] ?? ""));
 		case SEARCH_ID:
-			await responder(request).modal(modelSearchModal(request));
-			return true;
+			return await claim(request, "reply", () => responder(request).modal(modelSearchModal(request)));
 		case MANUAL_ID:
-			await responder(request).modal(modelModal(request));
-			return true;
+			return await claim(request, "reply", () => responder(request).modal(modelModal(request)));
 	}
 	return false;
 }

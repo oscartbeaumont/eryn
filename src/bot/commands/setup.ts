@@ -13,7 +13,7 @@ import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
 import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
 import { claim, responder, closeRow, type InteractionRequest } from "./interaction";
 import { MODEL_SCREEN_ID } from "./models";
-import { PROFILES_SCREEN_ID, profileScreen } from "./profiles";
+import { PROFILES_SCREEN_ID } from "./profiles";
 import { PROVIDER_SCREEN_ID } from "./providers";
 
 export async function setupMenu(request: InteractionRequest): Promise<void> {

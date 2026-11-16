@@ -120,8 +120,7 @@ export async function mcpComponent(
 	}
 	switch (customId) {
 		case SCREEN_ADD_ID:
-			await responder(request).modal(mcpAddModal());
-			return true;
+			return await claim(request, "reply", () => responder(request).modal(mcpAddModal()));
 		case SCREEN_TEST_ID:
 			return await claim(request, "update", () => testAllLinks(request));
 		case SCREEN_REMOVE_ID:

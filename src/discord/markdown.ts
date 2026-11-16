@@ -185,12 +185,16 @@ function compactTable(header: string[], align: Alignment[], rows: string[][], wi
 		`│ ${cells.map((cell, column) => alignCell(cell, widths[column]!, align[column]!)).join(" │ ")} │`;
 	const rule = (left: string, middle: string, right: string) =>
 		`${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
+	// The layout depends on every column being the same width in a monospace
+	// font, so it has to be a code block; plain message text would not line up.
 	return [
+		"```",
 		rule("┌", "┬", "┐"),
 		line(header),
 		rule("├", "┼", "┤"),
 		...rows.map(line),
 		rule("└", "┴", "┘"),
+		"```",
 	].join("\n");
 }
 

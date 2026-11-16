@@ -24,13 +24,26 @@ export const POSTHOG_PROJECT_TOKEN = "phc_oQtUDRPaAeG4gutXrPA4R4eyWCY99mjWpMF8KZ
 export const POSTHOG_PROXY_PATH = "/ph_7Qm2";
 
 /**
- * View Audit Log (so the install message can find who added the bot), View
- * Channels, Send Messages, Read Message History, Manage Threads (so mentions in
- * threads Eryn did not create are delivered), Create Public Threads, and Send
- * Messages in Threads.
+ * The permissions the bot needs, which is everything its tools can use:
+ * View Audit Log (so the install message can find who added the bot), Add
+ * Reactions, View Channels, Send Messages, Manage Messages (editing, deleting,
+ * and pinning someone else's message when the speaker may), Embed Links and
+ * Attach Files (table embeds and uploaded workspace files), Read Message
+ * History, Manage Threads (so mentions in threads Eryn did not create are
+ * delivered), Create Public Threads, and Send Messages in Threads.
  */
 const BOT_PERMISSIONS =
-	(1n << 7n) | (1n << 10n) | (1n << 11n) | (1n << 16n) | (1n << 34n) | (1n << 35n) | (1n << 38n);
+	(1n << 7n) | // View Audit Log
+	(1n << 6n) | // Add Reactions
+	(1n << 10n) | // View Channels
+	(1n << 11n) | // Send Messages
+	(1n << 13n) | // Manage Messages
+	(1n << 14n) | // Embed Links
+	(1n << 15n) | // Attach Files
+	(1n << 16n) | // Read Message History
+	(1n << 34n) | // Manage Threads
+	(1n << 35n) | // Create Public Threads
+	(1n << 38n); // Send Messages in Threads
 
 /** The Discord authorization screen that installs the bot into a server. */
 export function installUrl(clientId: string): string {

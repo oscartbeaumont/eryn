@@ -70,9 +70,16 @@ export async function verify<T>(token: string | undefined, secret: string): Prom
 	if (!token) return undefined;
 	const [body, signature] = token.split(".");
 	if (!body || !signature) return undefined;
-	const valid = await crypto.subtle.verify("HMAC", await hmacKey(secret), fromBase64url(signature), encoder.encode(body));
-	if (!valid) return undefined;
+	// The token comes from a URL, so it can be any bytes a browser sends: a
+	// malformed one is an invalid token, not a thrown error.
 	try {
+		const valid = await crypto.subtle.verify(
+			"HMAC",
+			await hmacKey(secret),
+			fromBase64url(signature),
+			encoder.encode(body),
+		);
+		if (!valid) return undefined;
 		return JSON.parse(decoder.decode(fromBase64url(body))) as T;
 	} catch {
 		return undefined;

@@ -109,7 +109,7 @@ test("a deny wins when one overwrite allows and denies the same bit", () => {
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
-test("a higher role allow beats a lower role deny", () => {
+test("a role deny wins over another role's allow, as Discord unions them", () => {
 	const permissions = effectivePermissions({
 		...base,
 		roles: [role(GUILD, 0, 0n), role("lower", 1, 0n), role("higher", 5, 0n)],
@@ -120,7 +120,9 @@ test("a higher role allow beats a lower role deny", () => {
 			EVERYONE_VIEW,
 		]),
 	});
-	assert.equal(hasPermission(permissions, Permission.ViewChannel), true);
+	// Discord unions every role's allow and deny bits and applies them together,
+	// so the deny wins regardless of role position.
+	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
 test("a higher role deny beats a lower role allow", () => {

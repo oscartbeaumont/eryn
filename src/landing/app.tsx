@@ -22,7 +22,7 @@ const FEATURES = [
 	},
 	{
 		title: "Tools that do the work",
-		body: "We give the agent a virtual filesystem and cutback shell for basic uses. Connect external services via MCP.",
+		body: "We give the agent a virtual filesystem and a sandboxed shell for basic uses. Connect external services via MCP.",
 	},
 ];
 

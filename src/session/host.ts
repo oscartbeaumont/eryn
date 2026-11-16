@@ -75,8 +75,11 @@ export async function createHost(options: HostOptions): Promise<HostInterface> {
 	};
 	const startSchedules = async () => {
 		if (schedulesStarted) return;
+		const service = await scheduleService();
+		host.runtime.runFork(service.run);
+		// Only mark it started once the fiber exists: a failed lookup or fork must
+		// stay retryable, or the host answers "running" with no runner behind it.
 		schedulesStarted = true;
-		host.runtime.runFork((await scheduleService()).run);
 	};
 	const ensureSchedules = async () => {
 		if (schedulesStarted) return true;

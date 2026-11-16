@@ -50,7 +50,7 @@ import { base64ToBytes } from "../workspace/bytes";
 import { resolvePath } from "../workspace/paths.ts";
 import type { FileStore } from "../workspace/store";
 import { objectSchema, toolExecute, type ToolCall, type ToolSpec } from "../tool";
-import { DISCORD_METADATA_KEY, readDiscordContext } from "./context";
+import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
 	return {
@@ -170,7 +170,6 @@ export function discordTools(
 	/** A channel that can hold a subscribed conversation, which a thread cannot. */
 	const subscribableChannel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await channel(channelId);
-		if (found.guild_id !== guildId) throw new Error(`Channel ${channelId} is not in this server.`);
 		if (THREAD_TYPES.has(found.type)) {
 			throw new Error(`${channelId} is a thread. Use discord_join_thread and discord_leave_thread for threads.`);
 		}
@@ -219,7 +218,7 @@ export function discordTools(
 		required: bigint,
 		label: string,
 		options: { allowWithoutAuthor?: boolean } = {},
-	): Promise<void> => {
+	): Promise<DiscordContext> => {
 		const context = await sessionContext(sessionID);
 		// A schedule has a capability scope, not a person. The scope is the
 		// ceiling even when the last human had more access.
@@ -229,10 +228,10 @@ export function discordTools(
 					`This schedule's Discord access does not allow Eryn to ${label} in <#${channelId}>.`,
 				);
 			}
-			return;
+			return context;
 		}
 		if (!context.authorId) {
-			if (options.allowWithoutAuthor && isCurrentConversation(context, channelId)) return;
+			if (options.allowWithoutAuthor && isCurrentConversation(context, channelId)) return context;
 			throw new Error(
 				`This turn has no Discord user attached, so Eryn will not ${label} outside this conversation.`,
 			);
@@ -242,6 +241,7 @@ export function discordTools(
 				`Your Discord permissions do not allow Eryn to ${label} in <#${channelId}>.`,
 			);
 		}
+		return context;
 	};
 
 	/** Require Manage Server, which is what server configuration asks for. */
@@ -276,22 +276,25 @@ export function discordTools(
 		sessionID: string,
 		update: (scope: ScheduleScope, context: DiscordContext) => ScheduleScope | undefined,
 	): Promise<void> => {
-		if (!plugin) return;
-		const session = await plugin.session.get({ sessionID }).catch(() => undefined);
-		const context = readDiscordContext(session?.metadata);
-		if (!session || !context?.scheduleScope) return;
-		const next = update(context.scheduleScope, context);
-		if (next === context.scheduleScope) return;
-		await plugin.session.update({
-			sessionID,
-			metadata: {
-				...session.metadata,
-				// Merge, do not replace: the Discord context and other plugins'
-				// metadata share this session record.
-				[DISCORD_METADATA_KEY]: next
-					? { ...context, scheduleScope: next }
-					: { ...context, scheduleScope: undefined },
-			} as unknown as SessionMetadata,
+		const ctx = plugin;
+		if (!ctx) return;
+		await withDiscordMetadataLock(sessionID, async () => {
+			const session = await ctx.session.get({ sessionID }).catch(() => undefined);
+			const context = readDiscordContext(session?.metadata);
+			if (!session || !context?.scheduleScope) return;
+			const next = update(context.scheduleScope, context);
+			if (next === context.scheduleScope) return;
+			await ctx.session.update({
+				sessionID,
+				metadata: {
+					...session.metadata,
+					// Merge, do not replace: the Discord context and other plugins'
+					// metadata share this session record.
+					[DISCORD_METADATA_KEY]: next
+						? { ...context, scheduleScope: next }
+						: { ...context, scheduleScope: undefined },
+				} as unknown as SessionMetadata,
+			});
 		});
 	};
 
@@ -527,7 +530,7 @@ export function discordTools(
 					files?: string[];
 				};
 				const found = await channel(channelId);
-				await requireChannelPermission(
+				const context = await requireChannelPermission(
 					call.sessionID,
 					channelId,
 					Permission.ViewChannel |
@@ -551,8 +554,9 @@ export function discordTools(
 					...(uploads.length > 0 ? { files: uploads } : {}),
 				});
 				// A successful send is the usage signal: the turn either replied
-				// in its conversation or it did not. Content is not involved.
-				onMessageSent?.(channelId);
+				// in its conversation or it did not. Content is not involved, and
+				// the id is the conversation's even when the reply went elsewhere.
+				onMessageSent?.(context.thread.id);
 				return sent;
 			},
 		},

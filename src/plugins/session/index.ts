@@ -8,9 +8,9 @@
 
 import { Plugin } from "@opencode/plugin";
 
-const MARKER = "eryn:session";
+import { escapeXml } from "../../discord/xml";
 
-const escape = (value: string) => value.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
+const MARKER = "eryn:session";
 
 export function sessionPlugin(hostname: string) {
 	return Plugin.define({
@@ -22,7 +22,7 @@ export function sessionPlugin(hostname: string) {
 					const model = `${event.model.providerID}/${event.model.id}`;
 					event.system.push({
 						type: "text",
-						text: `<!-- ${MARKER} -->\n<session id="${escape(event.sessionID)}" hostname="${escape(hostname)}" model="${escape(model)}"/>`,
+						text: `<!-- ${MARKER} -->\n<session id="${escapeXml(event.sessionID)}" hostname="${escapeXml(hostname)}" model="${escapeXml(model)}"/>`,
 					});
 				});
 			}
