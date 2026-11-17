@@ -69,13 +69,18 @@ export type { HostConfig };
 
 /** The JSON metadata boundary: stored scope arrays are readonly for readers. */
 type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
+
 const TURN_TIMEOUT_MS = 900_000;
+
 /** How long a manual compaction may take before the command answers anyway. */
 const COMPACTION_TIMEOUT_MS = 120_000;
+
 /** How long a question waits for an answer before it is cancelled. */
 const FORM_TIMEOUT_MS = 300_000;
+
 /** First delay before replacing an event subscription that ended mid-turn. */
 const FEED_RETRY_MS = 1_000;
+
 /** A run can outlive a host that will never come back; keep the retries slow. */
 const MAX_FEED_RETRY_MS = 30_000;
 
@@ -338,15 +343,18 @@ class GuildAgentImpl implements GuildAgentShape {
 			(this.host.connections !== connections ||
 				this.host.mcp !== mcp ||
 				this.host.workspace !== config.workspace);
+
 		// A config change must not tear down a host that has another thread's turn
 		// streaming on it. The turn being started is allowed through.
 		const busy = [...this.runs].some(
 			([threadId, run]) => threadId !== excludeThreadId && run.turn !== undefined,
 		);
+
 		if (!this.host || (changed && !busy)) {
 			const previous = this.host?.promise;
 			this.abort?.abort();
 			this.abort = new AbortController();
+
 			const promise = buildHost(config, {
 				env: this.env,
 				storage: this.storage,
@@ -357,13 +365,16 @@ class GuildAgentImpl implements GuildAgentShape {
 				// real reply from a turn that ended without saying anything.
 				onMessageSent: (threadId) => {
 					const turn = this.runs.get(threadId)?.turn;
+
 					if (turn) turn.spoke += 1;
 				},
 				onScheduleCreated: (threadId) => {
 					const turn = this.runs.get(threadId)?.turn;
+
 					if (turn) turn.schedules += 1;
 				},
 			});
+
 			// A rejected build must not stay cached until the idle close: the next
 			// request should retry (a missing origin or a transient storage error
 			// is recoverable).
@@ -381,17 +392,22 @@ class GuildAgentImpl implements GuildAgentShape {
 				.catch((error) => log("session", `could not start the event stream: ${describeError(error)}`));
 			void previous?.then((host) => host.close()).catch(() => undefined);
 		}
+
 		const current = this.host;
 		const host = await current.promise;
+
 		// A host is only rebuilt for a changed config; a schedule can appear
 		// during a turn, so check the live host rather than rebuilding it.
 		if (this.host === current && schedulesOverride !== false && !current.schedules) {
 			const started = await host.ensureSchedules().catch((error) => {
 				log("session", `could not start the schedule runner: ${describeError(error)}`);
+
 				return false;
 			});
+
 			if (started) current.schedules = true;
 		}
+
 		return host;
 	}
 
@@ -399,6 +415,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async loadHostConfig(): Promise<HostConfig> {
 		await seedWorkspace(this.storage);
 		const settings = await this.store.settings();
+
 		return {
 			connections: await this.store.providers(),
 			model: settings.model,
@@ -422,10 +439,13 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	busy(): boolean {
 		if (this.adopting.size > 0) return true;
+
 		// A manual compaction is a live turn the run map does not track; closing
 		// the host under it would abandon the member's request.
 		if (this.compactions.size > 0) return true;
+
 		for (const run of this.runs.values()) if (run.turn !== undefined) return true;
+
 		return false;
 	}
 
@@ -457,12 +477,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.requesterByThread.clear();
 		this.turnFloor.clear();
 		this.principalLocks.clear();
+
 		for (const pending of this.pendingApprovals.values()) clearTimeout(pending.timer);
 		this.pendingApprovals.clear();
+
 		for (const pending of this.pendingForms.values()) {
 			clearTimeout(pending.timer);
 			this.settleForm(pending, "Cancelled because Eryn went idle.");
 		}
+
 		this.pendingForms.clear();
 		this.discarded.clear();
 
@@ -476,6 +499,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const host = await this.hostFor(config);
 		const listed = await host.integration.list({ location: { directory: LOCATION } });
 		const integrations: IntegrationOption[] = [];
+
 		for (const entry of Array.isArray(listed.data) ? listed.data : []) {
 			try {
 				integrations.push({
@@ -488,7 +512,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				log("session", `could not describe ${String((entry as { id?: unknown }).id)}: ${describeError(error)}`);
 			}
 		}
+
 		integrations.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
+
 		return integrations;
 	}
 
@@ -501,6 +527,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async models(config: HostConfig): Promise<ModelOption[]> {
 		const host = await this.hostFor(config);
+
 		// An empty catalogue is not an answer worth caching: a host built just
 		// after a credential is connected can snapshot the provider registry before
 		// it sees that credential, and caching that would make `/eryn setup model`
@@ -509,15 +536,18 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		const connected = await this.connectedProviders(host).catch(() => new Set<string>());
 		let listed = await host.model.list({ location: { directory: LOCATION } });
+
 		if (!listed.data.length) {
 			// Reloading the location re-reads credentials and providers; retry once.
 			await host.location.reload().catch(() => undefined);
 			listed = await host.model.list({ location: { directory: LOCATION } }).catch(() => listed);
 		}
+
 		if (!listed.data.length) {
 			// As a last resort ask for the host's default; a single model is still a
 			// catalogue the picker can offer.
 			const fallback = await host.model.default({ location: { directory: LOCATION } }).catch(() => undefined);
+
 			if (fallback?.data) listed = { ...listed, data: [fallback.data] };
 		}
 
@@ -537,6 +567,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					Number(b.enabled) - Number(a.enabled) ||
 					a.name.localeCompare(b.name),
 			);
+
 		return this.modelCache;
 	}
 
@@ -551,10 +582,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	async resolveModel(config: HostConfig): Promise<string> {
 		const provider = config.model.split("/")[0] ?? "";
 		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
+
 		const model = await resolveModelChoice(config.model, directlyConnected, () =>
 			this.models(config).catch(() => [] as ModelOption[]),
 		);
+
 		if (model !== config.model) log("session", `using ${model} instead of ${config.model}`);
+
 		return model;
 	}
 
@@ -572,18 +606,23 @@ class GuildAgentImpl implements GuildAgentShape {
 		const integrations = await host.integration
 			.list({ location: { directory: LOCATION } })
 			.catch(() => undefined);
+
 		const connected = new Set(
 			(integrations?.data ?? [])
 				.filter((entry) => entry.connections.length > 0)
 				.map((entry) => String(entry.id)),
 		);
+
 		const providers = await host.provider.list({ location: { directory: LOCATION } }).catch(() => undefined);
+
 		for (const provider of providers?.data ?? []) {
 			const suppliedBy = provider.integrationID;
+
 			if (provider.activation === "enabled" && suppliedBy && connected.has(String(suppliedBy))) {
 				connected.add(String(provider.id));
 			}
 		}
+
 		return connected;
 	}
 
@@ -604,6 +643,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const host = await this.hostFor(config);
 		const location = { directory: LOCATION };
 		const attempt = await host.integration.oauth.connect({ integrationID, methodID, answer, location });
+
 		// Offering the flow and then bouncing the browser to a port on its own
 		// machine is worse than saying no: the flow is cancelled, and the caller is
 		// told what to do instead. A device-code flow never sends the browser back
@@ -612,22 +652,27 @@ class GuildAgentImpl implements GuildAgentShape {
 			await host.integration.oauth
 				.cancel({ integrationID, attemptID: attempt.data.attemptID, location })
 				.catch(() => undefined);
+
 			const name = await host.integration
 				.get({ integrationID, location })
 				.then((found) => found.data?.name)
 				.catch(() => undefined);
+
 			return {
 				error: `${name ?? integrationID} signs in through a callback on your own machine, which this deployment cannot receive. Connect it with an API key instead.`,
 			};
 		}
+
 		return attempt.data;
 	}
 
 	async oauthStatus(config: HostConfig, integrationID: string, attemptID: string): Promise<OAuthStatus> {
 		const host = await this.hostFor(config);
 		const status = await host.integration.oauth.status({ integrationID, attemptID, location: { directory: LOCATION } });
+
 		// A finished sign-in adds a credential, which changes the catalogue.
 		if (status.data.status === "complete") this.modelCache = undefined;
+
 		return { status: status.data.status };
 	}
 
@@ -651,12 +696,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		const host = await this.hostFor(config);
 		const credentials = await host.credential.list();
 		let removed = 0;
+
 		for (const entry of credentials) {
 			if (String(entry.integrationID) !== integrationID) continue;
 			await host.credential.remove({ credentialID: entry.id });
 			removed += 1;
 		}
+
 		if (removed > 0) this.modelCache = undefined;
+
 		return removed;
 	}
 
@@ -666,14 +714,17 @@ class GuildAgentImpl implements GuildAgentShape {
 	private withPrincipalLock<T>(sessionID: string, task: () => Promise<T>): Promise<T> {
 		const previous = this.principalLocks.get(sessionID) ?? Promise.resolve();
 		const next = previous.then(task, task);
+
 		const tail = next.then(
 			() => undefined,
 			() => undefined,
 		);
+
 		this.principalLocks.set(sessionID, tail);
 		void tail.finally(() => {
 			if (this.principalLocks.get(sessionID) === tail) this.principalLocks.delete(sessionID);
 		});
+
 		return next;
 	}
 
@@ -702,6 +753,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// cleared since that snapshot was taken.
 		const scope = stored ? stored.scheduleScope : base.scheduleScope;
 		const pending = await this.scheduleWakePending(host, sessionID);
+
 		// A cold start can resume a suspended schedule execution asynchronously,
 		// and `sessions.active()` does not see it yet. An unfinished turn whose
 		// stored principal is a schedule is treated as still scheduled. When we
@@ -711,13 +763,16 @@ class GuildAgentImpl implements GuildAgentShape {
 			session !== undefined &&
 			session.time.busy !== undefined &&
 			(session.time.idle === undefined || session.time.busy > session.time.idle);
+
 		// An unfinished turn is the schedule's if it was marked as one, or if
 		// the message it was running is still the latest schedule wake. The
 		// latter also covers a crash before attribution could be written.
 		const unfinishedSchedule =
 			unsettled &&
 			(stored?.scheduleTurn === true || (await this.scheduleWake(sessionID)) !== undefined);
+
 		const keepSchedule = pending !== false || unfinishedSchedule;
+
 		return {
 			...base,
 			authorId: keepSchedule ? undefined : authorId,
@@ -749,6 +804,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// A rename is not replayed to the agent, and the gateway's copy can
 		// predate it, so re-read the conversation rather than trusting it.
 		const refreshed = input.discord ? await this.refreshContext(input.discord) : undefined;
+
 		// Keep the conversation's stored context when the prompt carries none, but
 		// set or clear the speaker on it. A turn with no speaker (an older message
 		// watch, for example) must not borrow the previous speaker's Discord
@@ -758,21 +814,26 @@ class GuildAgentImpl implements GuildAgentShape {
 			refreshed ??
 			this.contextByThread.get(threadId) ??
 			(await this.contextForSession(sessionID))?.context;
+
 		// The decision and the write share a lock. A schedule wake can be
 		// enqueued between them, and if it joins this turn its scope must not be
 		// overwritten by the speaker's context.
 		const discord = await this.withPrincipalLock(sessionID, async () => {
 			const context = await this.promptContext(host, sessionID, base, authorId, !interrupted);
 			await this.applyDiscord(host, threadId, sessionID, context);
+
 			return context;
 		});
+
 		await this.applyPolicy(host, threadId, sessionID, discord, config);
+
 		// Approvals during a scheduled turn must not name, or be approved by,
 		// whoever happened to speak last.
 		if (discord?.scheduleTurn === true) this.requesterByThread.delete(threadId);
 		else if (authorId) this.requesterByThread.set(threadId, authorId);
 		else this.requesterByThread.delete(threadId);
 		await this.applyModel(host, threadId, sessionID, config.model);
+
 		return discord;
 	}
 
@@ -787,6 +848,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// The completion signal arrives as an event, so a subscription that
 		// died since the last turn has to be replaced before this one starts.
 		this.startConsuming(host);
+
 		const sessionID = await this.ensureSession(
 			host,
 			request.threadId,
@@ -794,6 +856,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			channelProjectDirectory(request.discord?.channel.id),
 			config.model,
 		);
+
 		// A schedule may be running in this session. A prompt is delivered with
 		// `steer`, so without this the human message would join the schedule's
 		// execution and the schedule's later tool calls would read this
@@ -814,20 +877,24 @@ class GuildAgentImpl implements GuildAgentShape {
 				});
 
 				const attached = await fetchAttachmentFiles(request.attachments);
+
 				const message = renderUserMessage(
 					request.author,
 					request.mentions ?? [],
 					request.text.trim() || "(attached files)",
 				);
+
 				// The message carries the channel and (when there is one) the thread
 				// it came from. The agent posts its reply with a Discord tool, so
 				// these ids are what tell it where the reply belongs.
 				const conversation = discord ? renderConversation(discord) : undefined;
 				const body = [conversation, request.notice, message].filter(Boolean).join("\n\n");
+
 				const text =
 					attached.notes.length > 0
 						? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
 						: body;
+
 				await host.sessions.prompt({
 					sessionID,
 					text,
@@ -851,6 +918,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	async command(request: CommandRequest, config: HostConfig): Promise<CommandResponse> {
 		const host = await this.hostFor(config, request.threadId);
 		this.startConsuming(host);
+
 		const sessionID = await this.ensureSession(
 			host,
 			request.threadId,
@@ -858,12 +926,15 @@ class GuildAgentImpl implements GuildAgentShape {
 			channelProjectDirectory(request.discord?.channel.id),
 			config.model,
 		);
+
 		const interrupted = await this.stopRunningTurn(host, sessionID, request.threadId);
 		const before = await host.sessions.get({ sessionID }).catch(() => undefined);
 		const workspace = await readWorkspaceConfig(this.storage);
+
 		const defaultAgent =
 			before?.agent ??
 			(typeof workspace.config.default_agent === "string" ? workspace.config.default_agent : "build");
+
 		try {
 			return await this.runTurn(
 				request.threadId,
@@ -913,6 +984,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				log("session", `could not warm the command list: ${describeError(error)}`);
 			});
 			const listed = await host.command.list({ location: { directory } });
+
 			for (const command of listed.data) {
 				merged.set(command.name, {
 					name: command.name,
@@ -934,6 +1006,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					: {}),
 			});
 		}
+
 		return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 	}
 
@@ -948,13 +1021,17 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async compact(threadId: string, config: HostConfig): Promise<CompactResponse> {
 		const sessionID = await this.sessionFor(threadId);
+
 		if (!sessionID) return { ok: false, message: "There is no Eryn conversation here yet." };
+
 		if (this.compactions.has(sessionID)) {
 			return { ok: false, message: "A compaction is already running in this conversation." };
 		}
+
 		try {
 			const host = await this.hostFor(config, threadId);
 			this.startConsuming(host);
+
 			const outcome = await new Promise<"ended" | "failed" | "timeout">((resolve) => {
 				const timer = setTimeout(() => {
 					// A retry may have replaced this entry while the old one was
@@ -963,6 +1040,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					this.compactions.delete(sessionID);
 					resolve("timeout");
 				}, COMPACTION_TIMEOUT_MS);
+
 				this.compactions.set(sessionID, {
 					resolve: (result) => {
 						clearTimeout(timer);
@@ -974,19 +1052,24 @@ class GuildAgentImpl implements GuildAgentShape {
 				// a step would rewrite the context the running turn is using.
 				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error) => {
 					log("session", `could not compact ${threadId}: ${describeError(error)}`);
+
 					if (this.compactions.get(sessionID)?.timer !== timer) return;
 					this.compactions.delete(sessionID);
 					clearTimeout(timer);
 					resolve("failed");
 				});
 			});
+
 			if (outcome === "ended") return { ok: true };
+
 			if (outcome === "failed") {
 				return { ok: false, message: "Compaction failed; the conversation history is unchanged." };
 			}
+
 			return { ok: false, message: "Compaction is taking longer than expected. It may still finish." };
 		} catch (error) {
 			log("session", `could not compact ${threadId}: ${describeError(error)}`);
+
 			return { ok: false, message: "Eryn could not compact this conversation." };
 		}
 	}
@@ -1002,8 +1085,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (this.busy()) {
 			throw new Error("Eryn is still working in this server. Stop it and try again.");
 		}
+
 		const files = await resetWorkspace(this.storage);
 		await this.close();
+
 		return { files };
 	}
 
@@ -1011,6 +1096,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private settleCompaction(data: Record<string, unknown>, ended: boolean): void {
 		if (data.reason !== "manual" || typeof data.sessionID !== "string") return;
 		const pending = this.compactions.get(data.sessionID);
+
 		if (!pending) return;
 		this.compactions.delete(data.sessionID);
 		clearTimeout(pending.timer);
@@ -1034,6 +1120,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<boolean> {
 		let active = true;
 		let known = true;
+
 		try {
 			const running = await host.sessions.active();
 			active = running?.[sessionID] !== undefined;
@@ -1042,8 +1129,10 @@ class GuildAgentImpl implements GuildAgentShape {
 			// harmless; assume it is running and let the wait decide.
 			known = false;
 		}
+
 		if (active) {
 			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+
 			const idle = await within(
 				host.sessions.wait({ sessionID }).then(
 					() => true,
@@ -1052,22 +1141,28 @@ class GuildAgentImpl implements GuildAgentShape {
 				10_000,
 				false,
 			);
+
 			if (!idle) throw new Error("A scheduled turn is still running in this conversation.");
 		}
+
 		// Settle the in-memory turn that was following the old execution before a
 		// new turn replaces it. Otherwise its `runTurn` waits for the full turn
 		// timeout and interrupts whatever is running by then.
 		const previous = this.runs.get(threadId)?.turn;
+
 		if (previous && !previous.done) {
 			const settled = await within(previous.completed.then(() => true), 1_000, false);
+
 			if (!settled && !previous.done) {
 				previous.done = true;
 				previous.resolve();
 			}
 		}
+
 		// The execution is idle, but its final events may still be in the event
 		// loop. Drop them, or they can complete the human turn that starts next.
 		this.turnFloor.set(threadId, Date.now());
+
 		return known && active;
 	}
 
@@ -1091,14 +1186,17 @@ class GuildAgentImpl implements GuildAgentShape {
 		let timedOut = false;
 
 		let stopTyping: () => void = () => undefined;
+
 		try {
 			stopTyping = this.startTyping(threadId);
 			await start();
+
 			if (!(await this.wait(turn))) {
 				await onTimeout();
 				timedOut = true;
 				failure = "The turn timed out before it finished.";
 			}
+
 			if (turn.error) {
 				failure = turn.error;
 				log("session", `${label} failed: ${turn.error}`);
@@ -1110,6 +1208,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			stopTyping();
 			await this.cancelPendingForThread(threadId);
 			this.endTurn(threadId, turn);
+
 			if (turn.gone) await this.discardThread(threadId);
 		}
 
@@ -1117,6 +1216,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// has been released.
 		if (failure && !turn.gone) await this.postFailure(threadId, failure);
 		await this.recordTurn(turn, failure ? (timedOut ? "timeout" : "failed") : "ok", startedAt, failure);
+
 		return failure ? { ok: false, message: failure } : { ok: true };
 	}
 
@@ -1136,13 +1236,16 @@ class GuildAgentImpl implements GuildAgentShape {
 		const model = this.currentConfig?.model;
 		const provider = model?.split("/")[0];
 		const duration = Date.now() - startedAt;
+
 		const base = {
 			outcome,
 			duration_ms: duration,
 			...(provider ? { provider } : {}),
 			...(model ? { model } : {}),
 		};
+
 		const events: Promise<void>[] = [this.analytics.capture("turn_finished", base)];
+
 		if (outcome !== "ok") {
 			events.push(
 				this.analytics.capture("turn_failed", {
@@ -1151,6 +1254,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				}),
 			);
 		}
+
 		if (outcome === "ok" && turn.spoke > 0) {
 			events.push(
 				this.analytics.capture("reply_sent", {
@@ -1161,9 +1265,11 @@ class GuildAgentImpl implements GuildAgentShape {
 				}),
 			);
 		}
+
 		if (turn.schedules > 0) {
 			events.push(this.analytics.capture("schedule_created", { count: turn.schedules }));
 		}
+
 		await Promise.all(events);
 	}
 
@@ -1180,6 +1286,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const turn = createTurn(threadId);
 		run.turn = turn;
 		this.runs.set(threadId, run);
+
 		return turn;
 	}
 
@@ -1187,6 +1294,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private endTurn(threadId: string, turn: Turn): void {
 		turn.done = true;
 		const run = this.runs.get(threadId);
+
 		if (run?.turn !== turn) return;
 		run.turn = undefined;
 		this.runs.delete(threadId);
@@ -1205,7 +1313,9 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<void> {
 		if (this.appliedModels.get(threadId) === model) return;
 		const ref = parseModelRef(model);
+
 		if (!ref) return;
+
 		try {
 			await host.sessions.switchModel({ sessionID, model: ref });
 			this.appliedModels.set(threadId, model);
@@ -1227,7 +1337,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		if (!discord) return;
 		this.contextByThread.set(threadId, discord);
 		const signature = JSON.stringify(discord);
+
 		if (this.appliedContext.get(threadId) === signature) return;
+
 		try {
 			const session = await host.sessions.get({ sessionID });
 			await this.saveDiscordContext(host, sessionID, session.metadata, discord);
@@ -1241,7 +1353,9 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private scopeKey(scope: "guild" | "channel" | "thread", channelId: string, threadId?: string): string {
 		if (scope === "guild") return KEYS.policyGuild;
+
 		if (scope === "thread") return KEYS.policyThread + (threadId ?? channelId);
+
 		return KEYS.policyChannel + channelId;
 	}
 
@@ -1251,6 +1365,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private async profilesState(custom: readonly PolicyProfile[]): Promise<ProfilesState> {
 		const guild = await this.patchFor("guild", "");
+
 		return {
 			profiles: profileList(custom),
 			defaultProfile: guild?.profile ?? "standard",
@@ -1264,6 +1379,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const thread = threadId ? await this.patchFor("thread", channelId, threadId) : undefined;
 		const effective = resolvePolicy([guild, channel, thread], custom);
 		const links = await this.store.links();
+
 		return {
 			scope: threadId ? "thread" : "channel",
 			channelId,
@@ -1291,18 +1407,23 @@ class GuildAgentImpl implements GuildAgentShape {
 		mcp: Record<string, PolicyEffect>;
 	}): Promise<ProfilesState> {
 		const id = input.id.trim();
+
 		if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(id)) {
 			throw new Error("A profile id must be a short lowercase slug.");
 		}
+
 		if (isBuiltinProfile(id)) throw new Error(`"${id}" is a built-in profile and cannot be replaced.`);
 		const name = input.name.trim().slice(0, 60);
+
 		if (!name) throw new Error("Give the profile a name.");
 		const existing = await this.store.getProfile(id);
+
 		// Three built-in profiles plus "Server default" take four slots in the
 		// picker, which Discord caps at 25 options.
 		if (!existing && (await this.store.profiles()).length >= 21) {
 			throw new Error("A server can have at most 21 custom profiles, so every profile fits in Discord's picker.");
 		}
+
 		const now = Date.now();
 		await this.store.putProfile({
 			id,
@@ -1313,6 +1434,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			updatedAt: now,
 		});
 		await this.reapplyScope({ scope: "guild", channelId: "" });
+
 		return await this.profiles();
 	}
 
@@ -1322,28 +1444,34 @@ class GuildAgentImpl implements GuildAgentShape {
 		// A server default that named the profile has nothing left to point at;
 		// clear it so Standard applies instead of a stale id.
 		const guild = await this.patchFor("guild", "");
+
 		if (guild?.profile === id) {
 			const { profile: _profile, ...rest } = guild;
 			await this.store.putPolicy(KEYS.policyGuild, { ...rest, updatedAt: Date.now() });
 		}
+
 		await this.reapplyScope({ scope: "guild", channelId: "" });
+
 		return await this.profiles();
 	}
 
 	async setDefaultProfile(id: string): Promise<ProfilesState> {
 		const custom = await this.store.profiles();
+
 		if (!profileList(custom).some((profile) => profile.id === id)) {
 			throw new Error("That profile does not exist.");
 		}
+
 		const guild = await this.patchFor("guild", "");
 		// Keep any server-wide group overrides the admin made; only the selected
 		// profile changes.
 		await this.store.putPolicy(KEYS.policyGuild, {
-			...(guild ?? {}),
+			...guild,
 			profile: id,
 			updatedAt: Date.now(),
 		});
 		await this.reapplyScope({ scope: "guild", channelId: "" });
+
 		return await this.profiles();
 	}
 
@@ -1359,6 +1487,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		});
 		await this.reapplyScope(input);
 		await this.syncCard(input);
+
 		return await this.policyFor(input.channelId, input.threadId);
 	}
 
@@ -1370,6 +1499,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		await this.store.removePolicy(this.scopeKey(input.scope, input.channelId, input.threadId));
 		await this.reapplyScope(input);
 		await this.syncCard(input);
+
 		return await this.policyFor(input.channelId, input.threadId);
 	}
 
@@ -1391,10 +1521,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		// back to what the session already knows; if there is nothing, fail the
 		// turn rather than run it under the host's allow-all base.
 		const context = discord ?? this.contextByThread.get(threadId) ?? (await this.contextForSession(sessionID))?.context;
+
 		if (!context) throw new Error("This conversation has no Discord context, so its policy could not be applied.");
 		this.contextByThread.set(threadId, context);
 		const state = await this.policyFor(context.channel.id, context.kind === "channel" ? undefined : threadId);
 		const signature = `${JSON.stringify(state.effective)}|${config.links.map((link) => link.name).join(",")}`;
+
 		if (this.appliedPolicies.get(threadId) === signature) return;
 		const permissions = compilePermissions(state.effective, config.links);
 		// Do not swallow this: a restrictive policy that failed to apply must not
@@ -1410,27 +1542,37 @@ class GuildAgentImpl implements GuildAgentShape {
 		threadId?: string;
 	}): Promise<void> {
 		let config = this.currentConfig;
+
 		if (!config) config = await this.loadHostConfig();
+
 		if (config.connections.length === 0) return;
 		let host: HostInterface | undefined;
+
 		try {
 			host = await this.hostFor(config, undefined, false);
 		} catch (error) {
 			log("session", `could not build a host to apply the policy: ${describeError(error)}`);
+
 			return;
 		}
+
 		const entries = await this.storage.list({ prefix: KEYS.session });
+
 		for (const [key, value] of entries) {
 			if (typeof value !== "string") continue;
 			const threadId = key.slice(KEYS.session.length);
 			const session = await host.sessions.get({ sessionID: value }).catch(() => undefined);
 			const context = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+
 			if (!context) continue;
+
 			if (input.scope === "channel" && context.channel.id !== input.channelId) continue;
+
 			if (input.scope === "thread" && threadId !== input.threadId) continue;
 			await this.applyPolicy(host, threadId, value, context, config).catch((error) =>
 				log("session", `could not update ${threadId}: ${describeError(error)}`),
 			);
+
 			if (input.scope === "guild") {
 				await this.syncCard({
 					scope: context.kind === "channel" ? "channel" : "thread",
@@ -1455,39 +1597,48 @@ class GuildAgentImpl implements GuildAgentShape {
 		const state = await this.policyFor(input.channelId, input.threadId);
 		const custom = state.profiles.filter((profile) => !profile.builtin);
 		const existing = await this.store.policyCard(key);
+
 		if (isDefaultPolicy(state.effective, custom, state.defaultProfile)) {
 			if (!existing) return;
 			await this.rest.deleteMessage(existing.channelId, existing.messageId).catch(() => undefined);
 			await this.store.removePolicyCard(key);
+
 			return;
 		}
+
 		const content = this.policyCardText(state);
 		const components = [buttonRow([actionButton("Change", "policy:menu", 2)])];
 
 		if (existing) {
 			try {
 				await this.rest.editMessage(existing.channelId, existing.messageId, content, { components });
+
 				return;
 			} catch {
 				// The message was deleted; fall through and post a fresh card.
 			}
 		}
+
 		const sent = await this.rest
 			.sendMessage(id, content, { components })
 			.catch((error) => {
 				log("session", `could not post the policy card for ${id}: ${describeError(error)}`);
+
 				return undefined;
 			});
+
 		if (sent) await this.store.putPolicyCard(key, { channelId: id, messageId: sent.id });
 	}
 
 	private policyCardText(state: PolicyState): string {
 		const custom = state.profiles.filter((profile) => !profile.builtin);
+
 		const text = [
 			`🔒 **Permissions here: ${policyTitle(state.effective, custom)}**`,
 			summaryLines(state.effective, state.mcpServers).join(" · "),
 			"`/eryn policy` to change this.",
 		].join("\n");
+
 		return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 	}
 
@@ -1501,29 +1652,37 @@ class GuildAgentImpl implements GuildAgentShape {
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
 		const pending = this.pendingApprovals.get(input.requestId);
+
 		if (!pending || pending.threadId !== input.threadId) {
 			return { ok: false, message: "That request is no longer waiting." };
 		}
+
 		// The person who asked can approve their own call once; everyone else
 		// needs Manage Server. Changing the policy is always a manager action.
 		const trusted = input.manager === true || (pending.requesterId !== undefined && input.userId === pending.requesterId);
+
 		if (input.decision === "once" && !trusted) {
 			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can approve this." };
 		}
+
 		if (input.decision !== "once" && input.manager !== true) {
 			return { ok: false, message: "Only someone with Manage Server can change this conversation's policy." };
 		}
+
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
 		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
 
 		if (input.decision !== "once") {
 			try {
 				const effect: PolicyEffect = input.decision === "always" ? "allow" : "block";
+
 				const key = this.scopeKey(
 					pending.kind === "thread" ? "thread" : "channel",
 					pending.channelId,
 					pending.threadId,
 				);
+
 				const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect));
 				await this.store.putPolicy(key, patch);
 				await this.reapplyScope({
@@ -1552,6 +1711,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			this.pendingApprovals.delete(pending.requestId);
 			clearTimeout(pending.timer);
 			this.settleApproval(pending, `Could not answer: ${describeError(error)}`);
+
 			return { ok: false, message: "That request is no longer waiting." };
 		}
 
@@ -1563,7 +1723,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				? `🚫 Blocked${input.userId ? ` by <@${input.userId}>` : ""}.`
 				: `✅ Approved${input.userId ? ` by <@${input.userId}>` : ""}${input.decision === "always" ? " for this conversation" : " once"}.`,
 		);
+
 		if (input.decision === "block") this.cancelPendingForSession(pending.sessionID, "another request was blocked");
+
 		return { ok: true };
 	}
 
@@ -1586,8 +1748,10 @@ class GuildAgentImpl implements GuildAgentShape {
 	/** A request settled somewhere else, such as an interrupt or a timeout. */
 	private onPermissionReplied(data: Record<string, unknown>): void {
 		const requestID = typeof data.requestID === "string" ? data.requestID : undefined;
+
 		if (!requestID) return;
 		const pending = this.pendingApprovals.get(requestID);
+
 		if (!pending) return;
 		clearTimeout(pending.timer);
 		this.pendingApprovals.delete(requestID);
@@ -1596,8 +1760,10 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private onFormSettled(data: Record<string, unknown>, status: "replied" | "cancelled"): void {
 		const formID = typeof data.id === "string" ? data.id : undefined;
+
 		if (!formID) return;
 		const pending = this.pendingForms.get(formID);
+
 		if (!pending) return;
 		clearTimeout(pending.timer);
 		this.pendingForms.delete(formID);
@@ -1612,6 +1778,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			void this.replyPermission(pending, "reject", "The turn ended before anyone answered.");
 			this.settleApproval(pending, "Cancelled because the turn ended.");
 		}
+
 		// A question whose turn has ended can never receive its answer, and a
 		// blocked tool must not wait out the full timeout.
 		for (const pending of [...this.pendingForms.values()]) {
@@ -1626,6 +1793,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		message?: string,
 	): Promise<void> {
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
 		if (!host) return;
 		await host.permission
 			.reply({
@@ -1641,21 +1809,28 @@ class GuildAgentImpl implements GuildAgentShape {
 		const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
 		const requestId = typeof data.id === "string" ? data.id : undefined;
 		const action = typeof data.action === "string" ? data.action : undefined;
+
 		if (!sessionID || !requestId || !action) return;
+
 		if (this.pendingApprovals.has(requestId)) return;
 
 		const found = await this.contextForSession(sessionID);
+
 		if (!found) {
 			await this.replyPermission({ sessionID, requestId }, "reject", "There is no conversation to ask in.");
+
 			return;
 		}
+
 		const state = await this.policyFor(found.context.channel.id, found.context.kind === "channel" ? undefined : found.threadId);
+
 		if ((state.effective.elicitation ?? "discord") === "off") {
 			await this.replyPermission(
 				{ sessionID, requestId },
 				"reject",
 				"Approvals are turned off in this conversation, so this action was not run.",
 			);
+
 			return;
 		}
 
@@ -1663,6 +1838,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const metadata = data.metadata && typeof data.metadata === "object" ? (data.metadata as Record<string, unknown>) : undefined;
 		const detail = describeApproval(action, resources, metadata, typeof data.message === "string" ? data.message : undefined);
 		const requester = this.requesterByThread.get(found.threadId);
+
 		const content = [
 			"🔐 **Eryn needs approval**",
 			detail,
@@ -1684,10 +1860,13 @@ class GuildAgentImpl implements GuildAgentShape {
 			})
 			.catch((error) => {
 				log("session", `could not post an approval card: ${describeError(error)}`);
+
 				return undefined;
 			});
+
 		if (!sent) {
 			await this.replyPermission({ sessionID, requestId }, "reject", "Eryn could not ask for approval here.");
+
 			return;
 		}
 
@@ -1703,11 +1882,13 @@ class GuildAgentImpl implements GuildAgentShape {
 			messageId: sent.id,
 			timer: setTimeout(() => void this.timeoutApproval(requestId), 90_000),
 		};
+
 		this.pendingApprovals.set(requestId, pending);
 	}
 
 	private async timeoutApproval(requestId: string): Promise<void> {
 		const pending = this.pendingApprovals.get(requestId);
+
 		if (!pending) return;
 		this.pendingApprovals.delete(requestId);
 		await this.replyPermission(pending, "reject", "Nobody approved this in time.");
@@ -1718,22 +1899,29 @@ class GuildAgentImpl implements GuildAgentShape {
 		sessionID: string,
 	): Promise<{ threadId: string; context: DiscordContext } | undefined> {
 		const known = this.threadBySession.get(sessionID);
+
 		if (known) {
 			const context = this.contextByThread.get(known);
+
 			if (context) return { threadId: known, context };
 		}
+
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
 		if (!host) return undefined;
 		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
 		const context = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+
 		if (!context) return undefined;
 		const threadId = known ?? context.thread.id;
+
 		// A subagent inherits its parent's metadata. Its approvals and forms belong
 		// to the parent conversation, but binding the parent thread to the child's
 		// session would send the next human message into the subagent.
 		if (session?.parentID) return { threadId, context };
 		this.remember(threadId, sessionID);
 		this.contextByThread.set(threadId, context);
+
 		return { threadId, context };
 	}
 
@@ -1751,31 +1939,39 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async scheduleWake(sessionID: string): Promise<{ scheduleId: string } | undefined> {
 		const host = this.consumingHost;
+
 		if (!host) return undefined;
 		let latestId: string | undefined;
+
 		try {
 			const page = await host.message.list({ sessionID, order: "desc", limit: 5, type: "user" });
 			const latest = page.data[0];
 			latestId = latest?.id;
 			const fromMetadata = scheduleIdOf(latest?.metadata);
+
 			if (fromMetadata) return { scheduleId: fromMetadata };
 		} catch (error) {
 			log("session", `could not read messages for ${sessionID}: ${describeError(error)}`);
 		}
+
 		// `execution.started` can be published before the wake message is
 		// projected into the message store. The inbox item is admitted first
 		// and carries the same metadata, so it closes that window.
 		try {
 			const inbox = await host.sessions.inbox.list({ sessionID });
+
 			for (const item of inbox) {
 				if (item.type !== "user") continue;
 				const fromInbox = scheduleIdOf(item.payload.metadata);
+
 				if (fromInbox) return { scheduleId: fromInbox };
 			}
 		} catch (error) {
 			log("session", `could not read the inbox for ${sessionID}: ${describeError(error)}`);
 		}
+
 		if (!latestId) return undefined;
+
 		// The metadata is the direct signal; the row's `last_message_id` is the
 		// same message id, so this remains exact if the list endpoint ever omits
 		// metadata or the inbox has already drained.
@@ -1787,7 +1983,9 @@ class GuildAgentImpl implements GuildAgentShape {
 					sessionID,
 				)
 				.toArray() as { id?: unknown; last_message_id?: unknown }[];
+
 			const row = rows.find((entry) => entry.last_message_id === latestId);
+
 			return typeof row?.id === "string" ? { scheduleId: row.id } : undefined;
 		} catch {
 			// The table only exists once a session has had schedules enabled.
@@ -1809,11 +2007,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	): Promise<boolean | undefined> {
 		try {
 			const inbox = await host.sessions.inbox.list({ sessionID });
+
 			return inbox.some(
 				(item) => item.type === "user" && scheduleIdOf(item.payload.metadata) !== undefined,
 			);
 		} catch (error) {
 			log("session", `could not read the inbox for ${sessionID}: ${describeError(error)}`);
+
 			return undefined;
 		}
 	}
@@ -1827,7 +2027,9 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private reconciled(stored: DiscordContext, scheduleId: string | undefined): DiscordContext {
 		const scope = stored.scheduleScope;
+
 		if (!scheduleId || !scope || scope.scheduleIds.includes(scheduleId)) return stored;
+
 		return { ...stored, scheduleScope: addScheduleToScope(scope, scheduleId) };
 	}
 
@@ -1843,29 +2045,39 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async onScheduleSteered(data: Record<string, unknown>): Promise<void> {
 		const sessionID = data.sessionID;
+
 		const item = data.item as
 			| { type?: unknown; payload?: { metadata?: unknown } }
 			| undefined;
+
 		if (typeof sessionID !== "string" || item?.type !== "user") return;
 		const scheduleId = scheduleIdOf(item.payload?.metadata);
+
 		if (!scheduleId) return;
 		const threadId = this.threadBySession.get(sessionID);
 		const turn = threadId ? this.runs.get(threadId)?.turn : undefined;
+
 		// An idle wake is handled by the normal start attribution; only a wake
 		// that is joining an active turn needs to change that turn's principal.
 		if (!turn || turn.done) return;
 		const host = this.consumingHost;
+
 		if (!host) return;
+
 		try {
 			await this.withPrincipalLock(sessionID, async () => {
 				const session = await host.sessions.get({ sessionID });
 				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+
 				if (!stored) return;
+
 				if (stored.scheduleTurn === true && stored.authorId === undefined) return;
+
 				const context = this.reconciled(
 					{ ...stored, authorId: undefined, scheduleTurn: true },
 					scheduleId,
 				);
+
 				await this.saveDiscordContext(host, sessionID, session.metadata, context);
 				this.contextByThread.set(stored.thread.id, context);
 				this.requesterByThread.delete(stored.thread.id);
@@ -1888,19 +2100,25 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async attributeScheduleTurn(sessionID: string): Promise<boolean> {
 		const host = this.consumingHost;
+
 		if (!host) return false;
+
 		try {
 			return await this.withPrincipalLock(sessionID, async () => {
 				const session = await host.sessions.get({ sessionID });
+
 				// A subagent's execution inherits its parent's Discord metadata, so
 				// attributing it here would clear the parent conversation's speaker
 				// from a child that is not a conversation at all.
 				if (session.parentID) return false;
 				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+
 				if (!stored) return false;
 				const wake = await this.scheduleWake(sessionID);
 				const scheduled = wake !== undefined;
+
 				if (!scheduled && stored.authorId === undefined && stored.scheduleTurn === undefined) return false;
+
 				const context = this.reconciled(
 					{
 						...stored,
@@ -1909,16 +2127,19 @@ class GuildAgentImpl implements GuildAgentShape {
 					},
 					wake?.scheduleId,
 				);
+
 				// Attribution wrote (or may have written) outside the prompt path,
 				// so the prompt path's signature is stale: the next human prompt
 				// must write its own speaker even when the names are unchanged.
 				this.appliedContext.delete(stored.thread.id);
+
 				// Later steps of an already-attributed turn reach the same answer,
 				// so skip the metadata write without skipping reconciliation.
 				if (JSON.stringify(context) === JSON.stringify(stored)) return scheduled;
 				await this.saveDiscordContext(host, sessionID, session.metadata, context);
 				this.contextByThread.set(stored.thread.id, context);
 				this.requesterByThread.delete(stored.thread.id);
+
 				return scheduled;
 			});
 		} catch (error) {
@@ -1926,6 +2147,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			// Do not let the turn continue with whatever speaker was stored: if
 			// this is a schedule, that speaker may be a human with more access.
 			await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+
 			return false;
 		}
 	}
@@ -1940,23 +2162,31 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async canInteract(threadId: string, userId: string): Promise<InteractResponse> {
 		const sessionID = await this.sessionFor(threadId);
+
 		if (!sessionID) return { ok: true };
+
 		try {
 			let host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
 			if (!host) {
 				const config = await this.loadHostConfig();
+
 				if (config.connections.length === 0) return { ok: true };
 				host = await this.hostFor(config, undefined, false);
 			}
+
 			const session = await host.sessions.get({ sessionID });
 			const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
 			const scope = context?.scheduleScope;
+
 			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
 
 			const actual: Record<string, ChannelCapabilities | undefined> = {};
 			const missing: string[] = [];
+
 			for (const channelId of Object.keys(scope.channels)) {
 				let info: DiscordChannelRef | undefined;
+
 				try {
 					info = await this.rest.channel(channelId);
 				} catch (error) {
@@ -1971,12 +2201,15 @@ class GuildAgentImpl implements GuildAgentShape {
 						missing.push(channelId);
 						continue;
 					}
+
 					return { ok: false, message: "Eryn could not verify your access to this conversation." };
 				}
+
 				if (!info) {
 					missing.push(channelId);
 					continue;
 				}
+
 				actual[channelId] = await this.authority.scopeCapabilities(userId, info);
 			}
 
@@ -1984,30 +2217,38 @@ class GuildAgentImpl implements GuildAgentShape {
 			// cannot be read, the conversation is over as far as Discord is
 			// concerned, and everyone should get the denial instead.
 			const conversationIds = new Set([context.thread.id, context.channel.id]);
+
 			if (missing.some((channelId) => conversationIds.has(channelId))) {
 				return { ok: false, message: "Eryn could not verify your access to this conversation." };
 			}
 
 			let effective: typeof scope | undefined = scope;
+
 			if (missing.length > 0) {
 				// Re-read under the write lock so a concurrent scope expansion or
 				// a deleted last schedule is not overwritten by this prune.
 				effective = await this.withPrincipalLock(sessionID, async () => {
 					const fresh = await host.sessions.get({ sessionID }).catch(() => undefined);
+
 					if (!fresh) return undefined;
+
 					const freshContext = readDiscordContext(
 						fresh.metadata as Record<string, unknown> | undefined,
 					);
+
 					// The last schedule was deleted while this check ran. Do not
 					// write the old scope back; there is nothing left to enforce.
 					if (!freshContext?.scheduleScope) return undefined;
 					const channels = { ...freshContext.scheduleScope.channels };
+
 					for (const channelId of missing) delete channels[channelId];
+
 					const pruned = {
 						...freshContext.scheduleScope,
 						channels,
 						updatedAt: Date.now(),
 					};
+
 					await this.saveDiscordContext(host, sessionID, fresh.metadata, {
 						...freshContext,
 						scheduleScope: pruned,
@@ -2018,18 +2259,22 @@ class GuildAgentImpl implements GuildAgentShape {
 						),
 					);
 					this.appliedContext.delete(threadId);
+
 					return pruned;
 				});
+
 				if (!effective) return { ok: true };
 			}
 
 			if (scopeCoveredBy(effective, actual)) return { ok: true };
+
 			return {
 				ok: false,
 				message: "Only people who can access every channel this schedule uses can talk to Eryn here.",
 			};
 		} catch (error) {
 			log("session", `could not check access to ${threadId}: ${describeError(error)}`);
+
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };
 		}
 	}
@@ -2041,7 +2286,9 @@ class GuildAgentImpl implements GuildAgentShape {
 		auth: { userId?: string; manager?: boolean } = {},
 	): Promise<FormView | undefined> {
 		const pending = this.pendingForms.get(formId);
+
 		if (!pending || !this.mayAnswer(pending, auth.userId, auth.manager)) return undefined;
+
 		return {
 			id: pending.formId,
 			title: pending.title,
@@ -2066,11 +2313,15 @@ class GuildAgentImpl implements GuildAgentShape {
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
 		const pending = this.pendingForms.get(input.formId);
+
 		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+
 		if (!this.mayAnswer(pending, input.userId, input.manager)) {
 			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can cancel this." };
 		}
+
 		await this.cancelPendingForm(pending, "cancelled in Discord.");
+
 		return { ok: true };
 	}
 
@@ -2089,15 +2340,21 @@ class GuildAgentImpl implements GuildAgentShape {
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
 		const pending = this.pendingForms.get(input.formId);
+
 		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+
 		if (!this.mayAnswer(pending, input.userId, input.manager)) {
 			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can answer this." };
 		}
+
 		const field = pending.fields[input.field];
+
 		if (!field) return { ok: false, message: "That question is not part of this form." };
+
 		if (field.type === "external") {
 			return { ok: false, message: "That question is answered outside Discord." };
 		}
+
 		if (formExpectsText(field)) {
 			return { ok: false, message: "Reply in the conversation with your answer." };
 		}
@@ -2106,16 +2363,19 @@ class GuildAgentImpl implements GuildAgentShape {
 			if (input.option !== 0 && input.option !== 1) {
 				return { ok: false, message: "That answer is not part of this question." };
 			}
+
 			pending.answers[input.field] = input.option === 0;
 		} else if (field.type === "multiselect" || field.options?.length) {
 			const options = field.options ?? [];
 			const indices = input.values?.map(Number) ?? (input.option !== undefined ? [input.option] : []);
+
 			if (
 				indices.length === 0 ||
 				indices.some((index) => !Number.isInteger(index) || options[index] === undefined)
 			) {
 				return { ok: false, message: "That option is not part of this question." };
 			}
+
 			const values = [...new Set(indices.map((index) => options[index]!.value))];
 			pending.answers[input.field] =
 				field.type === "multiselect" ? values : values[0]!;
@@ -2139,23 +2399,30 @@ class GuildAgentImpl implements GuildAgentShape {
 		text: string;
 	}): Promise<{ consumed: boolean; message?: string }> {
 		const pending = [...this.pendingForms.values()].find((form) => form.threadId === input.threadId);
+
 		if (!pending || !this.mayAnswer(pending, input.userId, false)) return { consumed: false };
+
 		const index = pending.fields.findIndex(
 			(field, fieldIndex) => formExpectsText(field) && pending.answers[fieldIndex] === undefined,
 		);
+
 		if (index < 0) return { consumed: false };
 		const text = input.text.trim();
+
 		if (!text) return { consumed: false };
 
 		const field = pending.fields[index]!;
+
 		if (
 			(field.type === "number" || field.type === "integer") &&
 			!Number.isFinite(Number(text))
 		) {
 			return { consumed: true, message: `**${field.title}** must be a number.` };
 		}
+
 		pending.answers[index] = text;
 		const result = await this.advanceForm(pending);
+
 		return { consumed: true, ...(result.message ? { message: result.message } : {}) };
 	}
 
@@ -2168,20 +2435,25 @@ class GuildAgentImpl implements GuildAgentShape {
 		manager?: boolean;
 	}): Promise<{ ok: boolean; message?: string }> {
 		const pending = this.pendingForms.get(input.formId);
+
 		if (!pending) return { ok: false, message: "That form is no longer waiting." };
+
 		if (!this.mayAnswer(pending, input.userId, input.manager)) {
 			return { ok: false, message: "Only the person who asked, or someone with Manage Server, can answer this." };
 		}
 
 		for (const [index, field] of pending.fields.entries()) {
 			const raw = input.values[`f${index}`]?.trim() ?? "";
+
 			if (!raw || field.type === "external") continue;
+
 			if (field.type === "boolean") {
 				if (/^(yes|true|1|y)$/i.test(raw)) pending.answers[index] = true;
 				else if (/^(no|false|0|n)$/i.test(raw)) pending.answers[index] = false;
 				else return { ok: false, message: `**${field.title}** must be yes or no.` };
 			} else if (field.type === "number" || field.type === "integer") {
 				const value = Number(raw);
+
 				if (!Number.isFinite(value)) return { ok: false, message: `**${field.title}** must be a number.` };
 				pending.answers[index] = raw;
 			} else if (field.type === "multiselect") {
@@ -2191,12 +2463,14 @@ class GuildAgentImpl implements GuildAgentShape {
 					(candidate) =>
 						candidate.value === raw || candidate.label.toLowerCase() === raw.toLowerCase(),
 				);
+
 				if (!option) {
 					return {
 						ok: false,
 						message: `**${field.title}** must be one of: ${field.options.map((candidate) => candidate.label).join(", ")}.`,
 					};
 				}
+
 				pending.answers[index] = option.value;
 			} else {
 				pending.answers[index] = raw;
@@ -2209,20 +2483,25 @@ class GuildAgentImpl implements GuildAgentShape {
 	/** The answers are complete: send them and settle the message. */
 	private async submitForm(pending: PendingForm): Promise<{ ok: boolean; message?: string }> {
 		const answer: Record<string, string | number | boolean | readonly string[]> = {};
+
 		for (const [index, field] of pending.fields.entries()) {
 			const value = pending.answers[index];
+
 			if (field.type === "external") {
 				answer[field.key] = true;
 				continue;
 			}
+
 			if (value === undefined) {
 				if (field.required) return { ok: false, message: `**${field.title}** is required.` };
 				continue;
 			}
+
 			if (field.type === "boolean") {
 				answer[field.key] = value === true;
 			} else if (field.type === "number" || field.type === "integer") {
 				const number = typeof value === "string" ? Number(value) : Number.NaN;
+
 				if (!Number.isFinite(number)) return { ok: false, message: `**${field.title}** must be a number.` };
 				answer[field.key] = field.type === "integer" ? Math.trunc(number) : number;
 			} else if (field.type === "multiselect") {
@@ -2235,15 +2514,19 @@ class GuildAgentImpl implements GuildAgentShape {
 		// An MCP form is the only kind of pending answer; the agent's own
 		// questions are plain messages answered in a later turn.
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
 		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
+
 		try {
 			await host.sessions.form.reply({ sessionID: pending.sessionID, formID: pending.formId, answer });
 		} catch (error) {
 			return { ok: false, message: `That form could not be answered: ${describeError(error)}` };
 		}
+
 		this.pendingForms.delete(pending.formId);
 		clearTimeout(pending.timer);
 		this.settleForm(pending, "✅ Answered.");
+
 		return { ok: true };
 	}
 
@@ -2251,6 +2534,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async refreshForm(pending: PendingForm): Promise<void> {
 		const content = this.formContent(pending, false);
 		pending.content = content;
+
 		if (!pending.messageId) return;
 		await this.rest
 			.editMessage(pending.threadId, pending.messageId, content, { components: this.formComponents(pending) })
@@ -2260,10 +2544,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	/** Auto-submit only when nothing is left, otherwise let the user click Send. */
 	private async advanceForm(pending: PendingForm): Promise<{ ok: boolean; message?: string }> {
 		this.armFormTimer(pending);
+
 		if (this.formReady(pending) && !this.formOptionalLeft(pending)) {
 			return await this.submitForm(pending);
 		}
+
 		await this.refreshForm(pending);
+
 		return { ok: true };
 	}
 
@@ -2288,6 +2575,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		const external = pending.fields.some((field) => field.type === "external");
 		const heading = pending.fields.length === 0 ? "✅" : external ? "🔗" : "📝";
 		const lines = [`${heading} **${pending.title}**`];
+
 		if (pending.message) lines.push(pending.message);
 
 		for (const [index, field] of pending.fields.entries()) {
@@ -2295,17 +2583,22 @@ class GuildAgentImpl implements GuildAgentShape {
 			const optional = field.required ? "" : " _(optional)_";
 			const prefix = pending.fields.length === 1 ? "" : `${index + 1}. `;
 			const heading = `**${prefix}${field.title}**${optional}`;
+
 			if (answer !== undefined) {
 				const label = formAnswerLabel(field, answer);
 				lines.push(`${heading} — **${label.length > 300 ? `${label.slice(0, 299)}…` : label}**`);
 				continue;
 			}
+
 			if (final) {
 				lines.push(`${heading} — _not answered_`);
 				continue;
 			}
+
 			lines.push(heading);
+
 			if (field.description) lines.push(field.description);
+
 			if (field.type === "external" && field.url) {
 				lines.push(field.url);
 			} else if (formExpectsText(field)) {
@@ -2316,11 +2609,13 @@ class GuildAgentImpl implements GuildAgentShape {
 				lines.push("_Choose an option below._");
 			}
 		}
+
 		if (!final && pending.fields.length > 1) {
 			lines.push("_Answer each question here; it is sent when every required answer is in._");
 		}
 
 		const content = lines.join("\n");
+
 		return content.length > 2_000 ? `${content.slice(0, 1_990)}…` : content;
 	}
 
@@ -2333,14 +2628,19 @@ class GuildAgentImpl implements GuildAgentShape {
 	private formComponents(pending: PendingForm): DiscordActionRow[] {
 		const rows: DiscordActionRow[] = [];
 		let overflow = false;
+
 		for (const [index, field] of pending.fields.entries()) {
 			if (pending.answers[index] !== undefined || formExpectsText(field)) continue;
+
 			if ((field.options?.length ?? 0) > 25) overflow = true;
+
 			if (rows.length >= 4) {
 				overflow = true;
 				continue;
 			}
+
 			const row = formFieldRow(pending, index, field);
+
 			if (row) rows.push(row);
 			else overflow = true;
 		}
@@ -2348,15 +2648,19 @@ class GuildAgentImpl implements GuildAgentShape {
 		const controls: DiscordButton[] = [
 			actionButton("Cancel", `form:cancel:${pending.formId}`, 2),
 		];
+
 		if (pending.fields.some((field, index) => pending.answers[index] === undefined && formNeedsTextEntry(field))) {
 			controls.push(actionButton("Type answer", `form:open:${pending.formId}`, 1));
 		} else if (overflow) {
 			controls.push(actionButton("Open form", `form:open:${pending.formId}`, 1));
 		}
+
 		if (this.formReady(pending) && this.formOptionalLeft(pending)) {
 			controls.push(actionButton("Send", `form:submit:${pending.formId}`, 3));
 		}
+
 		rows.push(buttonRow(controls));
+
 		return rows;
 	}
 
@@ -2393,14 +2697,18 @@ class GuildAgentImpl implements GuildAgentShape {
 					fields?: unknown;
 			  }
 			| undefined;
+
 		if (!form || typeof form.id !== "string" || typeof form.sessionID !== "string") return;
 		const formId = form.id;
 		const formSessionID = form.sessionID;
+
 		if (this.pendingForms.has(formId)) return;
 
 		let found: { threadId: string; context: DiscordContext } | undefined;
+
 		if (formSessionID === "global") {
 			const active = [...this.runs].filter(([, run]) => run.turn && !run.turn.done);
+
 			if (active.length !== 1) {
 				// OpenCode attributes MCP forms to a global owner, not the session
 				// that called the tool. With more than one live turn there is no
@@ -2409,14 +2717,18 @@ class GuildAgentImpl implements GuildAgentShape {
 				await host?.sessions.form
 					.cancel({ sessionID: "global", formID: formId, message: "Eryn could not tell which conversation asked." })
 					.catch(() => undefined);
+
 				return;
 			}
+
 			const threadId = active[0]?.[0];
 			const context = threadId ? this.contextByThread.get(threadId) : undefined;
+
 			if (threadId && context) found = { threadId, context };
 		} else {
 			found = await this.contextForSession(formSessionID);
 		}
+
 		if (!found) {
 			// A form nobody can be shown must be answered, not left pending: the
 			// tool that raised it would block the turn until the deadline.
@@ -2428,6 +2740,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					message: "Eryn could not tell which conversation asked.",
 				})
 				.catch(() => undefined);
+
 			return;
 		}
 
@@ -2438,11 +2751,13 @@ class GuildAgentImpl implements GuildAgentShape {
 		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
 		const fields = Array.isArray(form.fields) ? form.fields.map(formField).filter(Boolean) as FormField[] : [];
 		const message = typeof metadata?.message === "string" ? metadata.message : undefined;
+
 		const title = typeof form.title === "string" && form.title.trim()
 			? form.title.trim()
 			: `${server} needs some information`;
 
 		const requester = this.requesterByThread.get(found.threadId);
+
 		const base = {
 			formId,
 			sessionID: formSessionID,
@@ -2463,25 +2778,32 @@ class GuildAgentImpl implements GuildAgentShape {
 				content: `**${server} asked for input**`,
 				timer: setTimeout(() => undefined, 0),
 			};
+
 			await this.cancelPendingForm(pending, "approvals are turned off in this conversation.");
+
 			return;
 		}
+
 		if (fields.length > 5) {
 			const pending: PendingForm = {
 				...base,
 				content: `**${server} asked for input**`,
 				timer: setTimeout(() => undefined, 0),
 			};
+
 			await this.cancelPendingForm(pending, "the form has more fields than Discord can show.");
+
 			return;
 		}
 
 		const external = fields.find((field) => field.type === "external");
+
 		if (fields.length === 0 || external) {
 			const content =
 				fields.length === 0
 					? [`✅ **${server} is ready to continue**`, message].filter(Boolean).join("\n")
 					: [`🔗 **${server} needs you to open a link**`, message, external?.url ?? ""].filter(Boolean).join("\n");
+
 			const components = [
 				buttonRow(
 					fields.length === 0
@@ -2494,23 +2816,29 @@ class GuildAgentImpl implements GuildAgentShape {
 							],
 				),
 			];
+
 			const sent = await this.rest
 				.sendMessage(found.threadId, content, { components })
 				.catch((error) => {
 					log("session", `could not post an MCP form card: ${describeError(error)}`);
+
 					return undefined;
 				});
+
 			if (!sent) {
 				const pending: PendingForm = { ...base, content, timer: setTimeout(() => undefined, 0) };
 				await this.cancelPendingForm(pending, "Eryn could not ask here.");
+
 				return;
 			}
+
 			this.pendingForms.set(formId, {
 				...base,
 				content,
 				messageId: sent.id,
 				timer: setTimeout(() => void this.expireForm(formId), FORM_TIMEOUT_MS),
 			});
+
 			return;
 		}
 
@@ -2521,17 +2849,23 @@ class GuildAgentImpl implements GuildAgentShape {
 			content: "",
 			timer: setTimeout(() => undefined, 0),
 		};
+
 		pending.content = this.formContent(pending, false);
+
 		const sent = await this.rest
 			.sendMessage(found.threadId, pending.content, { components: this.formComponents(pending) })
 			.catch((error) => {
 				log("session", `could not post an MCP form: ${describeError(error)}`);
+
 				return undefined;
 			});
+
 		if (!sent) {
 			await this.cancelPendingForm(pending, "Eryn could not ask here.");
+
 			return;
 		}
+
 		pending.messageId = sent.id;
 		this.pendingForms.set(formId, pending);
 		this.armFormTimer(pending);
@@ -2539,6 +2873,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private async expireForm(formId: string): Promise<void> {
 		const pending = this.pendingForms.get(formId);
+
 		if (!pending) return;
 		await this.cancelPendingForm(pending, "nobody answered in time.");
 	}
@@ -2570,17 +2905,22 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	async updateContext(config: HostConfig, threadId: string, discord: DiscordContext): Promise<void> {
 		const sessionID = await this.sessionFor(threadId);
+
 		if (!sessionID) return;
 		const host = await this.hostFor(config);
+
 		const session = await host.sessions.get({ sessionID }).catch((error) => {
 			log("session", `could not read ${sessionID} to record a rename: ${describeError(error)}`);
+
 			return undefined;
 		});
+
 		if (!session) return;
 		// A rename event carries no speaker or scope. Keep what the stored
 		// context already has so a rename between two messages neither erases
 		// who may act nor drops the schedules' capability scope.
 		const existing = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+
 		const merged: DiscordContext = {
 			...discord,
 			...(!discord.authorId && existing?.authorId ? { authorId: existing.authorId } : {}),
@@ -2589,6 +2929,7 @@ class GuildAgentImpl implements GuildAgentShape {
 				: {}),
 			...(!discord.scheduleScope && existing?.scheduleScope ? { scheduleScope: existing.scheduleScope } : {}),
 		};
+
 		await this.saveDiscordContext(host, sessionID, session.metadata, merged);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
 		// value cannot make the next prompt skip a needed write.
@@ -2605,20 +2946,25 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async refreshContext(context: DiscordContext): Promise<DiscordContext> {
 		const conversation = await this.rest.channel(context.thread.id).catch(() => undefined);
+
 		if (!conversation) return context;
 
 		const thread = conversation.name
 			? { id: conversation.id, name: conversation.name }
 			: context.thread;
+
 		let channel = context.channel;
+
 		if (conversation.parent_id) {
 			const parent = await this.rest.channel(conversation.parent_id).catch(() => undefined);
+
 			if (parent?.name) channel = { id: parent.id, name: parent.name };
 		} else if (conversation.name) {
 			// A subscribed channel is its own conversation, so there is no parent
 			// whose name would be the room the agent is in.
 			channel = { id: conversation.id, name: conversation.name };
 		}
+
 		return { ...context, channel, thread };
 	}
 
@@ -2638,31 +2984,39 @@ class GuildAgentImpl implements GuildAgentShape {
 			// wake this guild to run a turn for it. Delete them before anything
 			// else, in case the current turn takes a while to settle.
 			if (sessionID) await this.clearSchedules(sessionID, config);
+
 			if (run?.turn) run.turn.gone = true;
 			// Stop inference now. A scheduled turn can be running without an
 			// in-memory run for it, so this cannot depend on `run.turn`.
 			const stopped = await this.interruptSession(sessionID);
+
 			// A tracked turn discards the thread once it has settled; with no turn
 			// there is nothing left to wait for, so clean up immediately.
 			if (!run?.turn) await this.discardThread(threadId, config);
+
 			return stopped;
 		}
 
 		if (!sessionID || !this.host) return false;
+
 		if (!run?.turn) {
 			// A scheduled turn can run with no in-memory run: this object may have
 			// been cold when it started. Stop the session directly rather than
 			// claiming there was nothing to stop, and release a compaction waiting
 			// on it.
 			const pending = this.compactions.get(sessionID);
+
 			if (pending) {
 				this.compactions.delete(sessionID);
 				clearTimeout(pending.timer);
 				pending.resolve("failed");
 			}
+
 			return await this.interruptSession(sessionID);
 		}
+
 		await (await this.host.promise).sessions.interrupt({ sessionID });
+
 		return true;
 	}
 
@@ -2675,11 +3029,14 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async interruptSession(sessionID: string | undefined): Promise<boolean> {
 		if (!sessionID || !this.host) return false;
+
 		try {
 			const result = await (await this.host.promise).sessions.interrupt({ sessionID });
+
 			return result.interrupted;
 		} catch (error) {
 			log("session", `could not interrupt ${sessionID}: ${describeError(error)}`);
+
 			return false;
 		}
 	}
@@ -2695,7 +3052,9 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async clearSchedules(sessionID: string, config?: HostConfig): Promise<void> {
 		const host = await this.cleanupHost(config);
+
 		if (!host) return;
+
 		try {
 			const schedules = await host.experimental.schedule.list({ sessionID });
 			await Promise.all(
@@ -2719,9 +3078,11 @@ class GuildAgentImpl implements GuildAgentShape {
 	private async cleanupHost(config?: HostConfig): Promise<HostInterface | undefined> {
 		try {
 			if (this.host) return await this.host.promise;
+
 			return config ? await this.hostFor(config, undefined, false) : undefined;
 		} catch (error) {
 			log("session", `could not build a host for cleanup: ${describeError(error)}`);
+
 			return undefined;
 		}
 	}
@@ -2741,6 +3102,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		this.appliedModels.delete(threadId);
 		this.appliedContext.delete(threadId);
 		await this.storage.delete(KEYS.session + threadId).catch(() => undefined);
+
 		if (!sessionID) return;
 		this.discarded.add(sessionID);
 		// The turn that just settled may have created a schedule after the first
@@ -2759,7 +3121,9 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async removeSession(sessionID: string, config?: HostConfig): Promise<void> {
 		const host = await this.cleanupHost(config);
+
 		if (!host) return;
+
 		try {
 			await host.sessions.remove({ sessionID });
 		} catch (error) {
@@ -2775,8 +3139,10 @@ class GuildAgentImpl implements GuildAgentShape {
 		const ping = () => {
 			void this.rest.triggerTyping(channelId).catch(() => undefined);
 		};
+
 		ping();
 		const timer = setInterval(ping, 8_000);
+
 		return () => clearInterval(timer);
 	}
 
@@ -2784,10 +3150,13 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private async sessionFor(threadId: string): Promise<string | undefined> {
 		const cached = this.sessionByThread.get(threadId);
+
 		if (cached) return cached;
 		const stored = await this.storage.get<unknown>(KEYS.session + threadId);
+
 		if (typeof stored !== "string") return undefined;
 		this.remember(threadId, stored);
+
 		return stored;
 	}
 
@@ -2798,6 +3167,7 @@ class GuildAgentImpl implements GuildAgentShape {
 
 	private forget(threadId: string): void {
 		const sessionID = this.sessionByThread.get(threadId);
+
 		if (sessionID !== undefined) this.threadBySession.delete(sessionID);
 		this.sessionByThread.delete(threadId);
 		this.turnFloor.delete(threadId);
@@ -2819,9 +3189,11 @@ class GuildAgentImpl implements GuildAgentShape {
 		model: string,
 	): Promise<string> {
 		const existing = await this.sessionFor(threadId);
+
 		if (existing) {
 			try {
 				await host.sessions.get({ sessionID: existing });
+
 				return existing;
 			} catch {
 				this.forget(threadId);
@@ -2833,14 +3205,17 @@ class GuildAgentImpl implements GuildAgentShape {
 		// The model is set on the session itself rather than in the host config,
 		// so the user-editable config is not shadowed by Eryn's guild choice.
 		const ref = parseModelRef(model);
+
 		const session = await host.sessions.create({
 			title,
 			location: { directory },
 			...(ref ? { model: ref } : {}),
 		});
+
 		if (ref) this.appliedModels.set(threadId, model);
 		this.remember(threadId, session.id);
 		await this.storage.put(KEYS.session + threadId, session.id);
+
 		return session.id;
 	}
 
@@ -2855,6 +3230,7 @@ class GuildAgentImpl implements GuildAgentShape {
 	private startConsuming(host: HostInterface): void {
 		if (this.consuming) return;
 		this.consumingHost = host;
+
 		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: this.abort?.signal })) {
 				try {
@@ -2865,11 +3241,13 @@ class GuildAgentImpl implements GuildAgentShape {
 				}
 			}
 		})();
+
 		const settled = loop
 			.catch((error) => log("session", `event stream stopped: ${describeError(error)}`))
 			.then(() => {
 				if (this.consuming !== settled) return;
 				this.consuming = undefined;
+
 				// A schedule turn has no request in front of it to re-ensure the
 				// feed, so replace a stream that ended while work is still running.
 				if (this.consumingHost !== host || !this.busy()) return;
@@ -2879,52 +3257,72 @@ class GuildAgentImpl implements GuildAgentShape {
 					if (this.consumingHost === host) this.startConsuming(host);
 				}, delay);
 			});
+
 		this.consuming = settled;
 	}
 
 	private async handleEvent(event: unknown): Promise<void> {
 		const shape = event as { type?: unknown; created?: unknown; data?: unknown };
+
 		if (typeof shape.type !== "string" || !shape.data || typeof shape.data !== "object") return;
 		const data = shape.data as Record<string, unknown>;
+
 		if (shape.type === "form.created") {
 			void this.onFormCreated(data).catch((error) =>
 				log("session", `could not show an MCP form: ${describeError(error)}`),
 			);
+
 			return;
 		}
+
 		if (shape.type === "permission.replied") {
 			this.onPermissionReplied(data);
+
 			return;
 		}
+
 		if (shape.type === "form.replied" || shape.type === "form.cancelled") {
 			this.onFormSettled(data, shape.type === "form.replied" ? "replied" : "cancelled");
+
 			return;
 		}
+
 		if (shape.type === "session.inbox.enqueued") {
 			await this.onScheduleSteered(data);
+
 			return;
 		}
+
 		const sessionID = data.sessionID;
+
 		if (typeof sessionID !== "string") return;
+
 		if (shape.type === "session.compaction.ended" || shape.type === "session.compaction.failed") {
 			this.settleCompaction(data, shape.type === "session.compaction.ended");
+
 			return;
 		}
+
 		if (shape.type === "permission.asked") {
 			void this.onPermissionAsked(data).catch((error) =>
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
+
 			return;
 		}
+
 		// A start event with no turn of ours is either a schedule firing or a
 		// prompt this object did not see. Attribute or clear the speaker before
 		// adopting, so the tools never read the previous speaker's access.
 		if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
 			const mapped = this.threadBySession.get(sessionID);
 			const active = mapped ? this.runs.get(mapped)?.turn : undefined;
+
 			if (!active) await this.attributeScheduleTurn(sessionID);
 		}
+
 		const threadId = this.threadBySession.get(sessionID);
+
 		if (!threadId) {
 			// A schedule fires the Session directly, with no thread prompt to own
 			// the turn. Adopt it so its reply still lands in the Discord
@@ -2932,15 +3330,19 @@ class GuildAgentImpl implements GuildAgentShape {
 			if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
 				await this.adopt(sessionID);
 			}
+
 			return;
 		}
 
 		const turn = this.runs.get(threadId)?.turn;
+
 		if (!turn || turn.done) return;
 		// Ignore events from an execution that was interrupted just before this
 		// turn: its late `execution.interrupted` must not complete the new turn.
 		const floor = this.turnFloor.get(threadId);
+
 		if (floor !== undefined && typeof shape.created === "number" && shape.created < floor) return;
+
 		// Ignore events that predate this turn, such as the previous one going idle.
 		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
 
@@ -2961,10 +3363,13 @@ class GuildAgentImpl implements GuildAgentShape {
 	 */
 	private async adopt(sessionID: string): Promise<void> {
 		const host = this.consumingHost;
+
 		if (!host || this.adopting.has(sessionID) || this.discarded.has(sessionID)) return;
 		this.adopting.add(sessionID);
+
 		try {
 			const session = await host.sessions.get({ sessionID });
+
 			// A subagent is not a conversation of its own: its events must not
 			// rebind the parent thread or take over the parent's turn.
 			if (session.parentID) return;
@@ -2977,6 +3382,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			// clears the speaker and refuses cross-channel actions.
 			const wake = stored ? await this.scheduleWake(sessionID) : undefined;
 			const scheduled = wake !== undefined;
+
 			const context = refreshed
 				? this.reconciled(
 						{
@@ -2987,8 +3393,11 @@ class GuildAgentImpl implements GuildAgentShape {
 						wake?.scheduleId,
 					)
 				: undefined;
+
 			const threadId = context?.thread.id;
+
 			if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
+
 			if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
 				try {
 					await this.saveDiscordContext(host, sessionID, session.metadata, context);
@@ -2998,9 +3407,11 @@ class GuildAgentImpl implements GuildAgentShape {
 					// authority that may not belong to it.
 					log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
 					await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+
 					return;
 				}
 			}
+
 			// This context was written outside the prompt path, so the next
 			// human prompt must not trust a matching signature.
 			this.appliedContext.delete(threadId);
@@ -3009,10 +3420,13 @@ class GuildAgentImpl implements GuildAgentShape {
 			// Approvals during a scheduled turn must not name, or be approved
 			// by, whoever happened to speak last.
 			this.requesterByThread.delete(threadId);
+
 			if (context) {
 				this.contextByThread.set(threadId, context);
+
 				if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
 			}
+
 			// `runTurn` creates the turn synchronously, so the event loop resumes
 			// with a mapping it can apply the events already queued for it to.
 			void this.runTurn(
@@ -3023,6 +3437,7 @@ class GuildAgentImpl implements GuildAgentShape {
 					// method, so record that the turn began. Without it a bare
 					// `session.idle` could never complete the turn.
 					const turn = this.runs.get(threadId)?.turn;
+
 					if (turn) applyTurnEvent(turn, "session.step.started", {});
 				},
 				() => host.sessions.interrupt({ sessionID }).catch(() => undefined),
@@ -3043,9 +3458,11 @@ class GuildAgentImpl implements GuildAgentShape {
  */
 async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+
 	const timeout = new Promise<T>((resolve) => {
 		timer = setTimeout(() => resolve(fallback), ms);
 	});
+
 	try {
 		return await Promise.race([promise, timeout]);
 	} finally {
@@ -3062,8 +3479,10 @@ async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<
 function scheduleIdOf(metadata: unknown): string | undefined {
 	if (!metadata || typeof metadata !== "object") return undefined;
 	const schedule = (metadata as { schedule?: unknown }).schedule;
+
 	if (!schedule || typeof schedule !== "object") return undefined;
 	const id = (schedule as { id?: unknown }).id;
+
 	return typeof id === "string" ? id : undefined;
 }
 
@@ -3079,12 +3498,14 @@ function describeApproval(
 	const command = typeof input?.command === "string" ? input.command : undefined;
 	const path = typeof input?.filePath === "string" ? input.filePath : first;
 	let detail: string;
+
 	if (action === "discord.cross-channel" && typeof metadata?.targetChannelId === "string") {
 		detail = `Act in another Discord channel: <#${metadata.targetChannelId}>`;
 	} else if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
 	else if ((action === "edit" || action === "write" || action === "read") && path) detail = `${action === "read" ? "Read" : "Change"} \`${path}\``;
 	else if (message) detail = message;
 	else detail = `Use **${action}**${first ? ` on \`${first}\`` : ""}`;
+
 	return detail.length > 400 ? `${detail.slice(0, 399)}…` : detail;
 }
 
@@ -3113,8 +3534,11 @@ function formFieldRow(
 			actionButton("No", `form:pick:${index}:1:${pending.formId}`, 2),
 		]);
 	}
+
 	const options = field.options ?? [];
+
 	if (options.length === 0) return undefined;
+
 	// A handful of options is easier as buttons; a longer list needs a select.
 	if (field.type !== "multiselect" && options.length <= 5) {
 		return buttonRow(
@@ -3123,7 +3547,9 @@ function formFieldRow(
 			),
 		);
 	}
+
 	const shown = options.slice(0, 25);
+
 	return selectRow({
 		type: 3,
 		custom_id: `form:select:${index}:${pending.formId}`,
@@ -3148,10 +3574,13 @@ function formFieldRow(
 function formAnswerLabel(field: FormField, answer: FormAnswer): string {
 	if (field.type === "boolean") return answer === true ? "Yes" : "No";
 	const values = Array.isArray(answer) ? answer : [String(answer)];
+
 	const labels = values.map((value) => {
 		const option = field.options?.find((candidate) => candidate.value === value);
+
 		return option?.label ?? value;
 	});
+
 	return labels.join(", ");
 }
 
@@ -3159,16 +3588,22 @@ function formAnswerLabel(field: FormField, answer: FormAnswer): string {
 function formField(raw: unknown): FormField | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const field = raw as Record<string, unknown>;
+
 	if (typeof field.key !== "string") return undefined;
+
 	// A hidden field is not a question; the server supplies its answer or its
 	// `when` condition excludes it, so showing it would be a lie.
 	if (field.hidden === true) return undefined;
+
 	const options = Array.isArray(field.options)
 		? field.options.flatMap((option) => {
 				if (typeof option === "string") return [{ value: option, label: option }];
+
 				if (!option || typeof option !== "object") return [];
 				const candidate = option as { value?: unknown; label?: unknown; description?: unknown };
+
 				if (typeof candidate.value !== "string") return [];
+
 				return [
 					{
 						value: candidate.value,
@@ -3178,6 +3613,7 @@ function formField(raw: unknown): FormField | undefined {
 				];
 			})
 		: undefined;
+
 	return {
 		key: field.key,
 		title: typeof field.title === "string" ? field.title : field.key,

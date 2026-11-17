@@ -36,6 +36,7 @@ const HostMethodSchema = Schema.Union([
 	Schema.Struct({ type: Schema.Literal("command"), id: Schema.String, label: Schema.String }),
 	Schema.Struct({ type: Schema.Literal("external"), id: Schema.String, label: Schema.String }),
 ]);
+
 type HostMethod = typeof HostMethodSchema.Type;
 
 /** The field kinds a Discord modal can render, or `undefined` for the rest. */
@@ -54,7 +55,9 @@ function renderableType(type: string): ProviderField["type"] | undefined {
 /** Project one form field, or `undefined` when a modal cannot render its kind. */
 function describeField(field: HostProviderField): ProviderField | undefined {
 	const type = renderableType(field.type);
+
 	if (!type) return undefined;
+
 	const common = {
 		key: field.key,
 		...(field.title ? { title: field.title } : {}),
@@ -62,9 +65,11 @@ function describeField(field: HostProviderField): ProviderField | undefined {
 		...(field.required ? { required: true } : {}),
 		...(field.when ? { when: field.when } : {}),
 	};
+
 	if (type !== "string") {
 		return { ...common, type, ...(field.default === undefined ? {} : { default: field.default }) };
 	}
+
 	return {
 		...common,
 		type,
@@ -88,6 +93,7 @@ function describeMethod(method: HostMethod): IntegrationMethodOption | undefined
 		case "oauth": {
 			const form = method.form ?? [];
 			const fields = form.map(describeField);
+
 			return {
 				type: "oauth",
 				id: method.id,
@@ -96,6 +102,7 @@ function describeMethod(method: HostMethod): IntegrationMethodOption | undefined
 				fields: fields.filter((field): field is ProviderField => field !== undefined),
 			};
 		}
+
 		case "env":
 			return {
 				type: "env",
@@ -112,9 +119,11 @@ function describeMethod(method: HostMethod): IntegrationMethodOption | undefined
 /** The integration's methods, skipping any the host described in a shape we cannot read. */
 export function describeMethods(methods: unknown): IntegrationMethodOption[] {
 	if (!Array.isArray(methods)) return [];
+
 	return methods.flatMap((value) => {
 		const parsed = Option.getOrUndefined(Schema.decodeUnknownOption(HostMethodSchema)(value));
 		const described = parsed ? describeMethod(parsed) : undefined;
+
 		return described ? [described] : [];
 	});
 }
@@ -130,8 +139,10 @@ export function describeMethods(methods: unknown): IntegrationMethodOption[] {
 export function needsLocalCallback(url: string): boolean {
 	try {
 		const redirect = new URL(url).searchParams.get("redirect_uri");
+
 		if (!redirect) return false;
 		const host = new URL(redirect).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+
 		return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
 	} catch {
 		return false;
@@ -141,7 +152,9 @@ export function needsLocalCallback(url: string): boolean {
 /** Split a stored `provider/model` reference for the session API. */
 export function parseModelRef(model: string): { providerID: string; id: string } | undefined {
 	const at = model.indexOf("/");
+
 	if (at <= 0 || at === model.length - 1) return undefined;
+
 	return { providerID: model.slice(0, at), id: model.slice(at + 1) };
 }
 
@@ -171,20 +184,25 @@ export async function resolveModelChoice(
 	loadModels: () => Promise<readonly ModelOption[]>,
 ): Promise<string> {
 	const free = /-free$/i.test(current);
+
 	if (directlyConnected && !free) return current;
 	const models = await loadModels();
+
 	// An integration can supply providers beyond its own id, such as OpenCode
 	// Console supplying OpenCode Go.
 	if (!free && models.some((entry) => entry.id === current && entry.connected)) return current;
 
 	const candidates = models.filter((entry) => entry.connected && entry.enabled);
+
 	const preferred = PREFERRED_MODELS.map((name) => candidates.find((entry) => entry.id.endsWith(`/${name}`))).find(
 		(entry) => entry !== undefined,
 	);
+
 	const fallback =
 		preferred ??
 		candidates.find((entry) => !/-free$/i.test(entry.id)) ??
 		candidates[0] ??
 		models.find((entry) => entry.connected);
+
 	return fallback?.id ?? current;
 }

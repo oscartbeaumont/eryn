@@ -56,24 +56,42 @@ export function parseElicitation(value: string | null | undefined): ElicitationM
 export function supportsElicitationParam(url: string): boolean {
 	try {
 		const parsed = new URL(url);
+
 		if (parsed.searchParams.has(ELICITATION_PARAM)) return true;
+
 		return parsed.hostname === "executor.sh" || parsed.hostname.endsWith(".executor.sh");
 	} catch {
 		return false;
 	}
 }
 
+/**
+ * Apply a mode to a link's URL, but only for a server that understands it.
+ *
+ * Writing the parameter into a URL that never asked for it risks breaking a
+ * server with a strict OAuth resource URI, so an unknown server keeps the mode
+ * in the link record alone.
+ */
+export function applyElicitation(url: string, mode: ElicitationMode): string {
+	return supportsElicitationParam(url) ? withElicitation(url, mode) : url;
+}
+
 /** Apply the server-facing mode to a URL; `off` removes an existing one. */
 export function withElicitation(url: string, mode: ElicitationMode | undefined): string {
 	try {
 		const parsed = new URL(url);
+
 		if (mode === "off") {
 			parsed.searchParams.delete(ELICITATION_PARAM);
+
 			return parsed.toString();
 		}
+
 		const value = elicitationParam(mode);
+
 		if (!value) return url;
 		parsed.searchParams.set(ELICITATION_PARAM, value);
+
 		return parsed.toString();
 	} catch {
 		return url;

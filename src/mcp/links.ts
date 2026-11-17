@@ -35,6 +35,7 @@ export interface LinkStore {
 
 /** Refresh a token this long before it expires, so a turn never starts on a dead one. */
 const REFRESH_SKEW_MS = 60_000;
+
 const DEFAULT_TOKEN_TTL_SECONDS = 3_600;
 
 /** When a token pair obtained now should be considered expired. */
@@ -71,8 +72,10 @@ export async function beginAuthorization(
 	input: BeginAuthorizationInput,
 ): Promise<{ attemptId: string; url: string; startUrl: string }> {
 	const secret = sessionSecret(input.env);
+
 	if (!secret) throw new Error("This deployment has no session secret, so a sign-in cannot be completed.");
 	const origin = await resolveOrigin(input.env);
+
 	if (!origin) {
 		throw new Error(
 			"This deployment does not know its public URL yet. Open its site once, then start the sign-in again.",
@@ -84,6 +87,7 @@ export async function beginAuthorization(
 	const scope = input.scope ?? requestedScope(discovery);
 	const attemptId = randomToken(16);
 	const state = await sign({ guildId: input.guildId, attemptId }, secret);
+
 	const started = await initiate({
 		discovery,
 		redirectUri,
@@ -135,24 +139,31 @@ export async function finishAuthorization(
 ): Promise<FinishAuthorizationResult> {
 	if (pending.status === "complete" && pending.linkId) {
 		const link = await store.getLink(pending.linkId);
+
 		return { status: "complete", ...(link ? { link } : {}) };
 	}
+
 	if ((pending.status === "pending" || pending.status === "failed") && Date.now() - pending.createdAt > AUTH_TTL_MS) {
 		return await fail(store, pending, "That sign-in expired. Start it again from `/eryn setup` under MCP servers.");
 	}
+
 	if (input.error) {
 		return await fail(store, pending, "The sign-in was cancelled or refused.");
 	}
+
 	if (!input.code) {
 		return await fail(store, pending, "The sign-in did not return a code.");
 	}
+
 	// The name was free when the sign-in started; it may not be now.
 	const existing = await store.links();
+
 	if (existing.some((link) => link.name === pending.name)) {
 		return await fail(store, pending, `A server named "${pending.name}" is already linked.`);
 	}
 
 	let tokens: McpTokens;
+
 	try {
 		tokens = await exchangeCode({
 			tokenEndpoint: pending.tokenEndpoint,
@@ -165,10 +176,12 @@ export async function finishAuthorization(
 		});
 	} catch (error) {
 		log("session", `MCP sign-in for ${pending.url} failed: ${describeError(error)}`);
+
 		return await fail(store, pending, describeError(error));
 	}
 
 	const probe = await probeServer({ url: pending.url, token: tokens.accessToken });
+
 	if (!probe.ok) {
 		return await fail(
 			store,
@@ -178,6 +191,7 @@ export async function finishAuthorization(
 	}
 
 	const scope = tokens.scope ?? pending.scope;
+
 	const link: McpLink = {
 		id: crypto.randomUUID(),
 		name: pending.name,
@@ -195,12 +209,14 @@ export async function finishAuthorization(
 		},
 		createdAt: Date.now(),
 	};
+
 	await store.putLink(link);
 	await store.putAuthAttempt({
 		...pending,
 		status: "complete",
 		linkId: link.id,
 	});
+
 	return { status: "complete", link, tools: probe.tools };
 }
 
@@ -211,6 +227,7 @@ async function fail(
 	message: string,
 ): Promise<FinishAuthorizationResult> {
 	await store.putAuthAttempt({ ...pending, status: "failed", message });
+
 	return { status: "failed", message };
 }
 
@@ -226,16 +243,21 @@ const refreshes = new Map<string, Promise<McpLink>>();
  */
 export async function refreshLink(store: LinkStore, link: McpLink): Promise<McpLink> {
 	const running = refreshes.get(link.id);
+
 	if (running) return await running;
 	const refresh = refreshLinkOnce(store, link).finally(() => refreshes.delete(link.id));
 	refreshes.set(link.id, refresh);
+
 	return await refresh;
 }
 
 async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink> {
 	const oauth = link.oauth;
+
 	if (!oauth || !oauth.refreshToken) return link;
+
 	if (oauth.expiresAt - Date.now() > REFRESH_SKEW_MS) return link;
+
 	try {
 		const tokens = await refreshTokens({
 			tokenEndpoint: oauth.tokenEndpoint,
@@ -244,6 +266,7 @@ async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink
 			refreshToken: oauth.refreshToken,
 			...(oauth.resource ? { resource: oauth.resource } : {}),
 		});
+
 		const next: McpLink = {
 			...link,
 			token: tokens.accessToken,
@@ -254,13 +277,16 @@ async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink
 				...(tokens.scope ? { scope: tokens.scope } : {}),
 			},
 		};
+
 		// The admin may have removed the link while the token endpoint was busy.
 		// Writing the refreshed record back would resurrect it.
 		if (!(await store.getLink(link.id))) return link;
 		await store.putLink(next);
+
 		return next;
 	} catch (error) {
 		log("session", `could not refresh the token for ${link.name}: ${describeError(error)}`);
+
 		return link;
 	}
 }
@@ -279,6 +305,7 @@ export async function testLink(link: McpLink): Promise<ProbeResult> {
 async function pruneAttempts(store: LinkStore): Promise<void> {
 	const attempts = await store.authAttempts().catch(() => []);
 	const cutoff = Date.now() - AUTH_TTL_MS;
+
 	for (const attempt of attempts) {
 		if (attempt.createdAt < cutoff) await store.removeAuthAttempt(attempt.attemptId).catch(() => undefined);
 	}

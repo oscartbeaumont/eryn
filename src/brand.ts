@@ -21,7 +21,9 @@ export async function brandAsset(request: Request, env: Env): Promise<Response> 
 	const response = await env.ASSETS.fetch(request);
 	const headers = new Headers(response.headers);
 	headers.set("x-content-type-options", "nosniff");
+
 	if (response.ok) headers.set("cache-control", "public, max-age=31536000, immutable");
+
 	return new Response(response.body, {
 		status: response.status,
 		statusText: response.statusText,

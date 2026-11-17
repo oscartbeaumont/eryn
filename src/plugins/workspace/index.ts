@@ -26,6 +26,7 @@ const OVERRIDDEN = ["read", "write", "edit", "patch", "bash", "list", "glob", "g
 
 async function readText(store: FileStore, path: string): Promise<string | undefined> {
 	const file = await store.get(path);
+
 	return file ? bytesToText(base64ToBytes(file.b)) : undefined;
 }
 
@@ -36,7 +37,9 @@ async function writeText(store: FileStore, path: string, text: string, mtime = D
 
 /** The arguments a tool takes, matching its schema. */
 type FileInput = { filePath: string };
+
 type ReadInput = FileInput & { offset?: number; limit?: number };
+
 type EditInput = FileInput & { oldString: string; newString: string; replaceAll?: boolean };
 
 export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: ReadonlyMap<string, string>) {
@@ -79,10 +82,12 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const { filePath, offset, limit } = rawInput as ReadInput;
 				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
+
 				if (text === undefined) return `Error: ${path} does not exist`;
 				const lines = text.split("\n");
 				const start = Math.max(0, (offset ?? 1) - 1);
 				const end = limit === undefined ? lines.length : start + Math.max(0, limit);
+
 				return lines
 					.slice(start, end)
 					.map((line, index) => `${start + index + 1}: ${line}`)
@@ -104,6 +109,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const { filePath, content } = rawInput as FileInput & { content: string };
 				const path = await resolve({ filePath }, call, "file");
 				await writeText(store, path, content);
+
 				return `Wrote ${path} (${textToBytes(content).byteLength} bytes)`;
 			},
 		},
@@ -124,14 +130,19 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const { filePath, oldString, newString, replaceAll } = rawInput as EditInput;
 				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
+
 				if (text === undefined) return `Error: ${path} does not exist`;
 				const count = text.split(oldString).length - 1;
+
 				if (count === 0) return `Error: oldString not found in ${path}`;
+
 				if (count > 1 && !replaceAll) {
 					return `Error: oldString appears ${count} times in ${path}; pass replaceAll`;
 				}
+
 				const next = replaceAll ? text.replaceAll(oldString, newString) : text.replace(oldString, newString);
 				await writeText(store, path, next);
+
 				return `Edited ${path}`;
 			},
 		},
@@ -146,6 +157,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const { path: directory } = rawInput as { path?: string };
 				const prefix = await resolve({ path: directory }, call, "dir");
 				const files = (await store.list(prefix)).map((entry) => entry.path);
+
 				return files.length ? files.sort().join("\n") : `(empty: ${prefix})`;
 			},
 		},
@@ -167,6 +179,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				const result = await runShell(store, command, workingDirectory, WORKSPACE_ROOT);
 				const body = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
 				const suffix = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
+
 				return `${body || "(no output)"}${suffix}`;
 			},
 		},
@@ -177,6 +190,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 		async setup(ctx) {
 			await ctx.tool.transform((editor) => {
 				for (const name of OVERRIDDEN) editor.remove(name);
+
 				for (const spec of tools) {
 					editor.add({
 						name: spec.name,

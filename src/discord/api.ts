@@ -163,8 +163,10 @@ const AuditLogSchema = Schema.Struct({
 function retryDelay(body: unknown): number {
 	if (body && typeof body === "object" && "retry_after" in body) {
 		const value = (body as { retry_after?: unknown }).retry_after;
+
 		if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.min(value, 60) * 1_000 + 250;
 	}
+
 	return 1_000;
 }
 
@@ -186,6 +188,7 @@ interface Attempt {
 const retryRateLimits = Schedule.fromStep(
 	Effect.succeed((_now: number, attempt: Attempt) => {
 		if (attempt.response.status !== 429) return Cause.done(attempt);
+
 		return Effect.succeed([
 			attempt,
 			Duration.millis(attempt.retryAfter ?? 1_000),
@@ -224,9 +227,11 @@ export interface InteractionMessageOptions {
 function permissionOverwrites(value: unknown): readonly PermissionOverwrite[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const parsed: PermissionOverwrite[] = [];
+
 	for (const entry of value) {
 		if (!entry || typeof entry !== "object") continue;
 		const overwrite = entry as Record<string, unknown>;
+
 		if (typeof overwrite.id !== "string" || typeof overwrite.type !== "number") continue;
 		parsed.push({
 			id: overwrite.id,
@@ -235,14 +240,17 @@ function permissionOverwrites(value: unknown): readonly PermissionOverwrite[] | 
 			deny: typeof overwrite.deny === "string" ? overwrite.deny : "0",
 		});
 	}
+
 	return parsed;
 }
 
 function channelRef(value: unknown): DiscordChannelRef | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const result = value as Record<string, unknown>;
+
 	if (typeof result.id !== "string" || typeof result.type !== "number") return undefined;
 	const overwrites = permissionOverwrites(result.permission_overwrites);
+
 	return {
 		id: result.id,
 		type: result.type,
@@ -261,6 +269,7 @@ function channelRef(value: unknown): DiscordChannelRef | undefined {
 /** Decode a list of channels, dropping entries that are not one. */
 function channelRefs(value: unknown): DiscordChannelRef[] {
 	if (!Array.isArray(value)) return [];
+
 	return value.map(channelRef).filter((ref): ref is DiscordChannelRef => ref !== undefined);
 }
 
@@ -272,6 +281,7 @@ function messagePath(channelId: string, messageId: string): string {
 /** The id a create-style response must carry. */
 function idOf(result: { id?: unknown } | undefined, failure: string): string {
 	if (!result || typeof result.id !== "string") throw new DiscordError(failure);
+
 	return result.id;
 }
 
@@ -289,21 +299,29 @@ export function discordRest(token: string) {
 		// A multipart request must set its own boundary, so its Content-Type is
 		// left to fetch rather than overwritten with JSON.
 		const multipart = body instanceof FormData;
+
 		if (body !== undefined && !multipart) headers.set("Content-Type", "application/json");
 		const encoded = multipart || body === undefined ? body : JSON.stringify(body);
+
 		const fetchOnce = Effect.promise(async (): Promise<Attempt> => {
 			const response = await fetch(`${API}${path}`, { method, headers, body: encoded as BodyInit | undefined });
+
 			const retryAfter =
 				response.status === 429 ? retryDelay(await response.json().catch(() => undefined)) : undefined;
+
 			return { response, ...(retryAfter === undefined ? {} : { retryAfter }) };
 		});
 
 		const { response } = await Effect.runPromise(Effect.repeat(fetchOnce, retryRateLimits));
+
 		if (response.status === 404 && method === "GET") return undefined;
+
 		if (response.status === 204) return undefined;
+
 		if (!response.ok) {
 			throw new DiscordError(`Discord returned HTTP ${response.status} for ${method} ${path}`, response.status);
 		}
+
 		return (await response.json()) as T;
 	}
 
@@ -320,6 +338,7 @@ export function discordRest(token: string) {
 		/** The bot's own user, which also serves as the application id. */
 		async me(): Promise<DiscordUser> {
 			const result = await request<{ id?: unknown; username?: unknown }>("GET", "/users/@me");
+
 			return {
 				id: idOf(result, "Discord did not return a bot user"),
 				...(typeof result?.username === "string" ? { username: result.username } : {}),
@@ -339,6 +358,7 @@ export function discordRest(token: string) {
 		/** Active threads in a guild, which Discord lists separately from channels. */
 		async activeThreads(guildId: string): Promise<DiscordChannelRef[]> {
 			const result = await request<{ threads?: unknown[] }>("GET", `/guilds/${guildId}/threads/active`);
+
 			return channelRefs(result?.threads);
 		},
 
@@ -353,8 +373,10 @@ export function discordRest(token: string) {
 			options: { limit?: number; before?: string } = {},
 		): Promise<DiscordMessageView[]> {
 			const query = new URLSearchParams({ limit: String(Math.min(Math.max(options.limit ?? 20, 1), 100)) });
+
 			if (options.before) query.set("before", options.before);
 			const result = await request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
+
 			return Array.isArray(result) ? result : [];
 		},
 
@@ -374,12 +396,16 @@ export function discordRest(token: string) {
 				// Suppress every ping unless a caller names the users to notify.
 				allowed_mentions: { parse: [], users: options.users ?? [] },
 			};
+
 			if (options.replyTo) body.message_reference = { message_id: options.replyTo, fail_if_not_exists: false };
+
 			if (options.components?.length) body.components = options.components;
+
 			if (options.embeds?.length) body.embeds = options.embeds;
 			const path = `/channels/${channelId}/messages`;
 
 			const files = options.files ?? [];
+
 			if (files.length === 0) {
 				return await create(path, body, "Discord did not accept the message");
 			}
@@ -393,6 +419,7 @@ export function discordRest(token: string) {
 			files.forEach((file, index) => {
 				form.append(`files[${index}]`, new Blob([file.data]), file.filename);
 			});
+
 			return await create(path, form, "Discord did not accept the message");
 		},
 
@@ -417,6 +444,7 @@ export function discordRest(token: string) {
 
 		async createThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> {
 			const path = `${messagePath(channelId, messageId)}/threads`;
+
 			return await create(path, { name, auto_archive_duration: 1_440 }, "Discord did not create the thread");
 		},
 
@@ -471,6 +499,7 @@ export function discordRest(token: string) {
 		/** The guild's roles, used to find the bot's managed role. */
 		async guildRoles(guildId: string): Promise<DiscordRole[]> {
 			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
+
 			return Array.isArray(result) ? result : [];
 		},
 
@@ -482,14 +511,18 @@ export function discordRest(token: string) {
 		 */
 		async guildMember(guildId: string, userId: string): Promise<{ roles: string[] } | undefined> {
 			const result = await request<{ roles?: unknown }>("GET", `/guilds/${guildId}/members/${userId}`);
+
 			if (!result || !Array.isArray(result.roles)) return undefined;
+
 			return { roles: result.roles.filter((role): role is string => typeof role === "string") };
 		},
 
 		/** A guild's owner, which the permission resolver needs to grant everything. */
 		async guildInfo(guildId: string): Promise<{ ownerId?: string } | undefined> {
 			const result = await request<{ owner_id?: unknown }>("GET", `/guilds/${guildId}`);
+
 			if (!result) return undefined;
+
 			return typeof result.owner_id === "string" ? { ownerId: result.owner_id } : {};
 		},
 
@@ -506,6 +539,7 @@ export function discordRest(token: string) {
 		async isThreadMember(threadId: string, userId: string): Promise<boolean | undefined> {
 			try {
 				const result = await request<unknown>("GET", `/channels/${threadId}/thread-members/${userId}`);
+
 				return result !== undefined;
 			} catch {
 				return undefined;
@@ -517,7 +551,9 @@ export function discordRest(token: string) {
 			const result = await request<
 				{ id?: unknown; name?: unknown; permissions?: unknown }[]
 			>("GET", "/users/@me/guilds");
+
 			if (!Array.isArray(result)) return [];
+
 			return result
 				.filter(
 					(guild): guild is { id: string; name: string; permissions?: unknown } =>
@@ -539,6 +575,7 @@ export function discordRest(token: string) {
 				"GET",
 				`/guilds/${guildId}/audit-logs?action_type=${AUDIT_BOT_ADD}&limit=1`,
 			);
+
 			return Option.getOrUndefined(Schema.decodeUnknownOption(AuditLogSchema)(result))?.audit_log_entries?.[0];
 		},
 
@@ -642,15 +679,18 @@ export function discordRest(token: string) {
 		/** Discord's recommended gateway shard count for this bot. */
 		async gatewayShards(): Promise<number> {
 			const result = await request<{ shards?: unknown }>("GET", "/gateway/bot");
+
 			if (typeof result?.shards === "number" && Number.isFinite(result.shards) && result.shards >= 1) {
 				return Math.floor(result.shards);
 			}
+
 			throw new DiscordError("Discord did not return a shard count");
 		},
 
 		/** Where Discord currently posts interactions, from the application object. */
 		async interactionsEndpoint(): Promise<string | undefined> {
 			const result = await request<{ interactions_endpoint_url?: unknown }>("GET", "/applications/@me");
+
 			return typeof result?.interactions_endpoint_url === "string"
 				? result.interactions_endpoint_url
 				: undefined;

@@ -88,6 +88,7 @@ export const PRESET_HINTS: Record<PolicyPreset, string> = {
 
 /** The profiles the pickers offer. The legacy presets resolve but are hidden. */
 export const LISTED_PROFILES = ["standard", "full", "none"] as const;
+
 export type ListedProfile = (typeof LISTED_PROFILES)[number];
 
 /**
@@ -220,17 +221,22 @@ export function profileDefinition(
 	if (isBuiltinProfile(id)) {
 		return { tools: { ...PRESETS[id as PolicyPreset] }, mcp: { [MCP_ALL]: PRESET_MCP[id as PolicyPreset] } };
 	}
+
 	const found = custom.find((profile) => profile.id === id);
+
 	return found ? { tools: { ...found.tools }, mcp: { ...found.mcp } } : undefined;
 }
 
 /** A custom profile's tools completed from Standard, so every group has a value. */
 export function completeTools(tools: Record<string, PolicyEffect> = {}): Record<string, PolicyEffect> {
 	const complete: Record<string, PolicyEffect> = { ...PRESETS.standard };
+
 	for (const group of POLICY_GROUPS) {
 		const effect = tools[group];
+
 		if (effect) complete[group] = effect;
 	}
+
 	return complete;
 }
 
@@ -258,8 +264,10 @@ export function resolvePolicy(
 	for (const layer of layers) {
 		if (!layer) continue;
 		const selected = layer.profile ?? layer.preset;
+
 		if (selected) {
 			const definition = profileDefinition(selected, custom);
+
 			if (definition) {
 				profile = selected;
 				tools = { ...definition.tools };
@@ -273,8 +281,11 @@ export function resolvePolicy(
 				mcp = { [MCP_ALL]: PRESET_MCP[DEFAULT_PROFILE] };
 			}
 		}
+
 		if (layer.tools) tools = { ...tools, ...layer.tools };
+
 		if (layer.mcp) mcp = { ...mcp, ...layer.mcp };
+
 		if (layer.elicitation) elicitation = layer.elicitation;
 	}
 
@@ -291,11 +302,14 @@ export function isDefaultPolicy(
 	const tools = resolved.tools ?? {};
 	const mcp = resolved.mcp ?? {};
 	const baseline = profileDefinition(defaultProfile, custom) ?? profileDefinition(DEFAULT_PROFILE, custom)!;
+
 	// An exact tool or per-server override is not visible in the group values,
 	// but it still changes behaviour, so it is never "default".
 	if (Object.keys(tools).some((key) => !(key in GROUP_TOOLS))) return false;
+
 	if (Object.keys(mcp).some((key) => key !== MCP_ALL)) return false;
 	const matchesStandard = POLICY_GROUPS.every((group) => tools[group] === baseline.tools[group]);
+
 	return (
 		matchesStandard &&
 		(mcp[MCP_ALL] ?? "allow") === (baseline.mcp[MCP_ALL] ?? "allow") &&
@@ -332,8 +346,10 @@ export function compilePermissions(policy: Policy, links: readonly McpLink[]): P
 		if (effect === "allow") {
 			// An exact allow must still be written when it overrides a group deny.
 			if (explicitAllow) rules.push({ action, resource: "*", effect: "allow" });
+
 			return;
 		}
+
 		rules.push({ action, resource: "*", effect: effect === "block" ? "deny" : "ask" });
 	};
 
@@ -343,7 +359,9 @@ export function compilePermissions(policy: Policy, links: readonly McpLink[]): P
 
 	const mcp = policy.mcp ?? {};
 	const all = mcp[MCP_ALL] ?? "allow";
+
 	for (const link of links) add(mcpActionPrefix(link.name), mcp[link.name] ?? all);
+
 	for (const [server, effect] of Object.entries(mcp)) {
 		if (server === MCP_ALL) continue;
 		add(mcpActionPrefix(server), effect);
@@ -363,16 +381,22 @@ export function matchProfile(
 ): string | undefined {
 	const tools = policy.tools ?? {};
 	const mcp = policy.mcp ?? {};
+
 	// An exact tool or per-server override is a custom policy even when the
 	// visible group values happen to line up with a profile.
 	if (Object.keys(tools).some((key) => !(key in GROUP_TOOLS))) return undefined;
+
 	if (Object.keys(mcp).some((key) => key !== MCP_ALL)) return undefined;
 	const mcpAll = mcp[MCP_ALL] ?? "allow";
+
 	for (const profile of profileList(custom)) {
 		if (!POLICY_GROUPS.every((group) => tools[group] === profile.tools[group])) continue;
+
 		if (mcpAll !== (profile.mcp[MCP_ALL] ?? "allow")) continue;
+
 		return profile.id;
 	}
+
 	return undefined;
 }
 
@@ -384,9 +408,12 @@ export function policyTitle(policy: Policy, custom: readonly PolicyProfile[] = [
 		policy.profile === "chat" || policy.profile === "read-only" || policy.profile === "locked"
 			? policy.profile
 			: undefined;
+
 	const id = matchProfile(policy, custom) ?? legacy;
+
 	if (!id) return "Custom";
 	const found = profileList(custom).find((profile) => profile.id === id);
+
 	return found?.name ?? PRESET_LABELS[id as PolicyPreset] ?? id;
 }
 
@@ -400,6 +427,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	const workspace = tools.workspace ?? "allow";
 	const edit = tools.edit ?? "allow";
 	const shell = tools.shell ?? "allow";
+
 	const discord = [
 		tools["discord-reply"],
 		tools["discord-thread"],
@@ -418,6 +446,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					: edit === "ask"
 						? "read, ask before write"
 						: "read and write";
+
 	const discordSummary = discord.some((effect) => effect === "ask")
 		? "ask before use"
 		: discord.every((effect) => effect === "allow")
@@ -429,6 +458,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					: discord[0] === "allow"
 						? "replies only"
 						: "limited";
+
 	const discordLine =
 		tools["cross-channel"] === "block"
 			? `${discordSummary} (cross-channel blocked)`
@@ -437,6 +467,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	const mcp = policy.mcp ?? {};
 	const all = mcp[MCP_ALL] ?? "allow";
 	const blocked = servers.filter((server) => (mcp[server] ?? all) === "block");
+
 	const mcpLine =
 		all === "block"
 			? blocked.length === servers.length || servers.length === 0
@@ -449,6 +480,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 					: "allowed";
 
 	const exact = Object.entries(tools).filter(([key]) => !(key in GROUP_TOOLS));
+
 	const lines = [
 		`Workspace: **${workspaceLine}**`,
 		`Shell: **${effectLabel(shell)}**`,
@@ -457,9 +489,11 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 		`Discord: **${discordLine}**`,
 		`MCP: **${mcpLine}**`,
 	];
+
 	if (exact.length) {
 		lines.push(`Custom: ${exact.map(([key, effect]) => `${key} **${effectLabel(effect)}**`).join(", ")}`);
 	}
+
 	return lines;
 }
 
@@ -477,8 +511,8 @@ export function overrideFor(action: string, effect: PolicyEffect): { tools: Reco
 /** Merge one approval decision into the patch stored at a scope. */
 export function withOverride(patch: Policy | undefined, override: ReturnType<typeof overrideFor>): Policy {
 	return {
-		...(patch ?? {}),
-		...(override.tools ? { tools: { ...(patch?.tools ?? {}), ...override.tools } } : {}),
+		...patch,
+		...(override.tools ? { tools: { ...patch?.tools, ...override.tools } } : {}),
 		updatedAt: Date.now(),
 	};
 }

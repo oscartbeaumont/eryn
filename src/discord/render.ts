@@ -29,6 +29,7 @@ function account(
 ): RenderUser | undefined {
 	if (!user) return undefined;
 	const username = user.username?.trim();
+
 	return {
 		name: user.global_name?.trim() || username || user.id || "unknown",
 		...(username ? { username } : {}),
@@ -40,18 +41,25 @@ function account(
 /** A self-closing account reference. */
 export function renderUser(user: RenderUser): string {
 	const entries: [string, string][] = [["name", user.name]];
+
 	if (user.username) entries.push(["username", user.username]);
+
 	if (user.id) entries.push(["id", user.id]);
+
 	if (user.bot) entries.push(["bot", "true"]);
+
 	return selfClosing("user", entries);
 }
 
 /** A self-closing channel reference. */
 export function renderChannel(channel: DiscordChannelRef): string {
 	const entries: [string, string][] = [["id", channel.id]];
+
 	if (channel.name) entries.push(["name", channel.name]);
 	entries.push(["type", String(channel.type)]);
+
 	if (channel.parent_id) entries.push(["parentId", channel.parent_id]);
+
 	return selfClosing("channel", entries);
 }
 
@@ -68,8 +76,11 @@ export function renderThreadCreated(
 		["messageId", messageId],
 		["threadId", thread.id],
 	];
+
 	if (thread.name) entries.push(["name", thread.name]);
+
 	if (thread.parent_id) entries.push(["channelId", thread.parent_id]);
+
 	return [
 		selfClosing("discord-event", entries),
 		"Automated notice: a thread was created on the message you subscribed to. Eryn has joined it and is now subscribed, so its messages will reach you automatically.",
@@ -94,8 +105,10 @@ export function renderChannelRenamed(notice: {
 		[notice.kind === "thread" ? "threadId" : "channelId", notice.id],
 		["name", notice.name],
 	];
+
 	if (notice.previousName) entries.push(["previousName", notice.previousName]);
 	const what = notice.kind === "thread" ? "thread" : "channel";
+
 	return [
 		selfClosing("discord-event", entries),
 		`Automated notice: this ${what} was renamed${notice.previousName ? ` from "${notice.previousName}"` : ""}. Its id is unchanged, so keep using it.`,
@@ -115,13 +128,17 @@ export function renderConversation(context: {
 	kind?: "thread" | "channel";
 }): string {
 	const channel: [string, string][] = [["id", context.channel.id]];
+
 	if (context.channel.name) channel.push(["name", context.channel.name]);
 	const blocks = [selfClosing("channel", channel)];
+
 	if ((context.kind ?? "thread") === "thread" && context.thread) {
 		const thread: [string, string][] = [["id", context.thread.id]];
+
 		if (context.thread.name) thread.push(["name", context.thread.name]);
 		blocks.push(selfClosing("thread", thread));
 	}
+
 	return blocks.join("\n");
 }
 
@@ -163,15 +180,18 @@ export function renderFailure(error: string): string {
 	const reported = error.trim() || "Unknown error.";
 	const shown = reported.length > MAX_FAILURE_TEXT ? `${reported.slice(0, MAX_FAILURE_TEXT - 1)}…` : reported;
 	const hint = FAILURE_HINTS.find(([pattern]) => pattern.test(reported))?.[1] ?? "";
+
 	const quoted = shown
 		.split("\n")
 		.map((line) => `> ${line}`)
 		.join("\n");
+
 	return `⚠️ **Eryn could not finish that turn.**\n${quoted}${hint ? `\n\n${hint}` : ""}`;
 }
 
 function replaceBotMentions(text: string, botUserId: string | undefined): string {
 	if (!botUserId) return text;
+
 	return text.replaceAll(`<@${botUserId}>`, "Eryn").replaceAll(`<@!${botUserId}>`, "Eryn");
 }
 
@@ -187,16 +207,21 @@ export function renderUserMessage(
 	botUserId?: string,
 ): string {
 	const blocks: string[] = [];
+
 	if (author) blocks.push(renderUser(author));
 	const seen = new Set<string>();
+
 	const references = mentions.filter((user) => {
 		if (!user.id || user.id === author?.id || user.id === botUserId || seen.has(user.id)) return false;
 		seen.add(user.id);
+
 		return true;
 	});
+
 	if (references.length > 0) {
 		blocks.push(`<mentions>\n${references.map((user) => `  ${renderUser(user)}`).join("\n")}\n</mentions>`);
 	}
+
 	return blocks.length > 0 ? `${blocks.join("\n")}\n\n${text}` : text;
 }
 
@@ -205,26 +230,35 @@ export function renderMessage(message: DiscordMessageView, botUserId?: string): 
 	const author = account(message.author);
 	const mentions = (message.mentions ?? []).map(account).filter((user): user is RenderUser => user !== undefined);
 	const attachments = message.attachments ?? [];
+
 	const text =
 		replaceBotMentions(message.content?.trim() ?? "", botUserId) ||
 		(attachments.length > 0 ? "(attached files)" : "(no text)");
 
 	const header: [string, string][] = [["id", message.id]];
+
 	if (message.timestamp) header.push(["timestamp", message.timestamp]);
+
 	if (message.edited_timestamp) header.push(["edited", "true"]);
 
 	const files =
 		attachments.length > 0
 			? `\n<attachments>\n${attachments.map(renderAttachment).join("\n")}\n</attachments>`
 			: "";
+
 	return `${openingTag("message", header)}\n${renderUserMessage(author, mentions, text, botUserId)}${files}\n</message>`;
 }
 
 function renderAttachment(file: Attachment): string {
 	const entries: [string, string][] = [];
+
 	if (file.filename) entries.push(["name", file.filename]);
+
 	if (file.url) entries.push(["url", file.url]);
+
 	if (file.content_type) entries.push(["contentType", file.content_type]);
+
 	if (typeof file.size === "number") entries.push(["size", String(file.size)]);
+
 	return `  ${selfClosing("attachment", entries)}`;
 }

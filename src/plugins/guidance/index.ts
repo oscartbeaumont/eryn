@@ -19,7 +19,9 @@ const MARKER = "eryn:mcp-guidance";
 
 export function mcpGuidancePlugin(servers: readonly string[]) {
 	const names = servers.filter(Boolean);
+
 	if (names.length === 0) return undefined;
+
 	const guidance = [
 		MARKER,
 		"Linked MCP servers may group their app tools by namespace.",

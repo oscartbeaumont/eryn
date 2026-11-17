@@ -48,19 +48,30 @@ import { DiscordLookups } from "./lookups";
 import { attachmentsOf, authorInfo, isBotMessage, isMention, isReplyTo, isStopText, mentionInfo, stripMention, threadName } from "./message";
 
 const WAKE_PATH = "/wake";
+
 const INTERACTION_PATH = "/interaction";
+
 const SUBSCRIPTION_PATH = "/subscription";
+
 const MESSAGE_WATCH_PATH = "/message-watch";
+
 const THREAD_PREFIX = "thread:";
+
 const CHANNEL_PREFIX = "channel:";
+
 const WATCH_PREFIX = "watch:";
+
 const RENAME_PREFIX = "rename:";
+
 /** One guild the bot is in, so a restart knows where to refresh its commands. */
 const GUILD_PREFIX = "guild:";
+
 /** The origin this deployment serves on, which is what proves it is not `cf dev`. */
 const COMMAND_ORIGIN_KEY = "commands:origin";
+
 /** How many guilds one command sync writes to at a time. */
 const COMMAND_SYNC_CONCURRENCY = 5;
+
 /**
  * How often the keepalive alarm runs.
  *
@@ -133,6 +144,7 @@ async function decodeBody<S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 ): Promise<S["Type"] | undefined> {
 	const body = await request.json().catch(() => undefined);
+
 	return Option.getOrUndefined(Schema.decodeUnknownOption(schema)(body));
 }
 
@@ -238,15 +250,19 @@ export class BotGateway extends DurableObject<Env> {
 				// A message or interaction is still being handled. Restarting now
 				// would drop it, so check again once it has finished.
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+
 				return;
 			}
+
 			// Retry this alarm on the replacement instance: it starts with no
 			// timers, and re-running the keepalive is what reconnects the socket
 			// straight after a deploy. Cancelling it (retryAlarm: false) leaves a
 			// silent object that only an external poke can revive.
 			this.ctx.abort("deploy changed", { retryAlarm: true });
+
 			return;
 		}
+
 		await this.keepAlive();
 		await this.ensureCommands();
 	}
@@ -269,39 +285,55 @@ export class BotGateway extends DurableObject<Env> {
 		// The Worker says which origin it is serving. It is how this object tells
 		// a deployment from `cf dev`, which runs the same application and token.
 		const served = request.headers.get(ORIGIN_HEADER);
+
 		if (served && served !== this.servedOrigin) await this.rememberOrigin(served);
+
 		if (pathname === INTERACTION_PATH) {
 			await this.ensureCurrentVersion(request);
+
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
 			const body = await request.json().catch(() => undefined);
+
 			if (!Schema.is(InteractionBodySchema)(body)) return badRequest();
 			// The Worker already answered Discord with a 202, so this handler still
 			// acknowledges through the interaction callback endpoint. The payload is
 			// passed on untouched; only the ids the bot needs are checked here.
 			await this.onInteraction(body as DiscordInteraction);
 			await this.ensureCommands();
+
 			return json({ ok: true });
 		}
+
 		if (pathname === SUBSCRIPTION_PATH) {
 			await this.ensureCurrentVersion(request);
+
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
 			const body = await decodeBody(request, SubscriptionBodySchema);
+
 			if (!body) return badRequest();
 			const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
+
 			if (body.subscribed) await this.ctx.storage.put(key, true);
 			else await this.ctx.storage.delete(key);
+
 			return json({ ok: true });
 		}
+
 		if (pathname === MESSAGE_WATCH_PATH) {
 			await this.ensureCurrentVersion(request);
+
 			if (request.method !== "POST") return json({ error: "not found" }, 404);
 			const body = await decodeBody(request, MessageWatchBodySchema);
+
 			if (!body) return badRequest();
 			const key = WATCH_PREFIX + body.messageId;
+
 			if (!body.subscribed) {
 				await this.ctx.storage.delete(key);
+
 				return json({ ok: true });
 			}
+
 			const watch: MessageWatch = {
 				guildId: body.guildId,
 				channelId: body.channelId,
@@ -310,9 +342,12 @@ export class BotGateway extends DurableObject<Env> {
 				...(body.notifyTitle !== undefined ? { notifyTitle: body.notifyTitle } : {}),
 				...(body.notifyDiscord !== undefined ? { notifyDiscord: body.notifyDiscord } : {}),
 			};
+
 			await this.ctx.storage.put(key, watch);
+
 			return json({ ok: true });
 		}
+
 		if (pathname === WAKE_PATH) {
 			// `keepAlive` also arms the alarm, so the first wake starts the cycle
 			// that reconnects the socket before Cloudflare's 15 minute cap.
@@ -324,6 +359,7 @@ export class BotGateway extends DurableObject<Env> {
 			// to do it, because no interaction is waiting on the result.
 			await this.ensureCommands();
 			const deploy = await this.ctx.storage.get<string>("deploy:version");
+
 			return json({
 				ok: true,
 				connected: this.gateway?.open ?? false,
@@ -332,7 +368,9 @@ export class BotGateway extends DurableObject<Env> {
 				restart: this.restartPending,
 			});
 		}
+
 		await this.ensureCurrentVersion(request);
+
 		return json({ error: "not found" }, 404);
 	}
 
@@ -343,6 +381,7 @@ export class BotGateway extends DurableObject<Env> {
 			this.initialization = undefined;
 			log(`initialization failed, will retry on the next wake: ${describeError(error)}`);
 		});
+
 		return this.initialization;
 	}
 
@@ -365,22 +404,30 @@ export class BotGateway extends DurableObject<Env> {
 	private async connectGateway(): Promise<void> {
 		if (this.gateway) {
 			this.gateway.ensure();
+
 			return;
 		}
+
 		const stored = await this.ctx.storage.get<number>("gateway:shards").catch(() => undefined);
+
 		const recommended = await this.rest.gatewayShards().catch((error) => {
 			log(`could not read the recommended shard count: ${describeError(error)}`);
+
 			return undefined;
 		});
+
 		// Never guess: connecting with too few shards makes Discord refuse the
 		// session, and it is worse at scale than retrying the read a moment later.
 		const shards = recommended ?? stored;
+
 		if (shards === undefined) throw new Error("Discord's shard count is not known yet");
+
 		if (recommended !== undefined && recommended !== stored) {
 			await this.ctx.storage.put("gateway:shards", recommended).catch((error) => {
 				log(`could not remember the shard count: ${describeError(error)}`);
 			});
 		}
+
 		if (shards > 1) log(`opening ${shards} gateway shards`);
 		this.gateway = new DiscordSocket(this.token, log, this.socketHandlers, shards);
 		this.gateway.ensure();
@@ -401,15 +448,20 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async syncInteractionsEndpoint(): Promise<void> {
 		const origin = await resolveOrigin(this.env);
+
 		// A deployment with no configured origin learns it from a request instead;
 		// this object never sees one, so there is nothing to do here.
 		if (!origin) return;
 		const url = `${origin}${INTERACTIONS_PATH}`;
+
 		const current = await this.rest.interactionsEndpoint().catch((error) => {
 			log(`could not read the interactions endpoint: ${describeError(error)}`);
+
 			return undefined;
 		});
+
 		if (current === url) return;
+
 		try {
 			await this.rest.setInteractionsEndpoint(url);
 			log(`interactions are now delivered to ${url}`);
@@ -435,17 +487,21 @@ export class BotGateway extends DurableObject<Env> {
 			.finally(() => {
 				this.commands = undefined;
 			});
+
 		return this.commands;
 	}
 
 	private async registerCommands(): Promise<void> {
 		const applicationId = this.botUserId;
+
 		if (!applicationId) return;
 		const origin = this.servedOrigin ?? (await this.ctx.storage.get<string>(COMMAND_ORIGIN_KEY));
+
 		// Nothing has said where this object is served, so it cannot tell a
 		// deployment from a development server. Waiting costs nothing; guessing
 		// costs every client a stale copy of the command.
 		if (!origin) return;
+
 		if (isLocalOrigin(origin)) {
 			// A development server may still register commands for an application
 			// nothing else serves: a separate dev app has no interactions endpoint
@@ -455,9 +511,11 @@ export class BotGateway extends DurableObject<Env> {
 			} catch (error) {
 				// Unsure whether this is the shared application: leave it alone.
 				log(`could not tell whether this is the shared application: ${describeError(error)}`);
+
 				return;
 			}
 		}
+
 		// A pass that could not reach Discord is retried on the next wake; only a
 		// complete one counts as done. A failed read never turns into a write.
 		this.commandsSynced =
@@ -472,6 +530,7 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async rememberOrigin(origin: string): Promise<void> {
 		this.servedOrigin = origin;
+
 		if (isLocalOrigin(origin)) return;
 		await this.ctx.storage.put(COMMAND_ORIGIN_KEY, origin).catch(() => undefined);
 	}
@@ -488,14 +547,19 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async syncCommands(applicationId: string): Promise<boolean> {
 		const desired = [erynCommand()];
+
 		const registered = await this.rest.listCommands(applicationId).catch((error) => {
 			log(`could not read the global commands, leaving them alone: ${describeError(error)}`);
+
 			return undefined;
 		});
+
 		if (!registered) return false;
+
 		if (sameCommands(registered, desired)) return true;
 		await this.rest.overwriteCommands(applicationId, desired);
 		log("updated the global commands");
+
 		return true;
 	}
 
@@ -514,25 +578,31 @@ export class BotGateway extends DurableObject<Env> {
 		// a single request. The client retries a rate-limited call itself, so a
 		// small window is enough to keep the pass quick without tripping 429s.
 		let complete = true;
+
 		for (let index = 0; index < ids.length; index += COMMAND_SYNC_CONCURRENCY) {
 			const results = await Promise.all(
 				ids
 					.slice(index, index + COMMAND_SYNC_CONCURRENCY)
 					.map((id) => this.syncGuild(id, applicationId)),
 			);
+
 			if (results.includes(false)) complete = false;
 		}
+
 		return complete;
 	}
 
 	/** Make one guild's copy of the commands match this build. False means retry later. */
 	private async syncGuild(guildId: string, applicationId: string): Promise<boolean> {
 		const desired = [erynCommand()];
+
 		try {
 			const registered = await this.rest.listGuildCommands(applicationId, guildId);
+
 			if (!registered || sameCommands(registered, desired)) return true;
 			await this.rest.overwriteGuildCommands(applicationId, guildId, desired);
 			log(`registered the commands in guild ${guildId}`);
+
 			return true;
 		} catch (error) {
 			// Gone from the guild, or its install is: forget it rather than asking
@@ -540,15 +610,19 @@ export class BotGateway extends DurableObject<Env> {
 			if (error instanceof DiscordError && (error.status === 403 || error.status === 404)) {
 				log(`forgetting guild ${guildId}: Discord answered ${error.status}`);
 				await this.ctx.storage.delete(GUILD_PREFIX + guildId).catch(() => undefined);
+
 				return true;
 			}
+
 			log(`could not sync the commands in guild ${guildId}: ${describeError(error)}`);
+
 			return false;
 		}
 	}
 
 	private async keepAlive(): Promise<void> {
 		if (!this.token || this.gateway?.fatallyClosed) return;
+
 		if (this.gateway?.reshardRequired) {
 			// Discord rejected this layout (too few shards, or an invalid index).
 			// Rebuild in place from its current recommendation rather than retrying
@@ -559,6 +633,7 @@ export class BotGateway extends DurableObject<Env> {
 			await this.ctx.storage.delete("gateway:shards").catch(() => undefined);
 			await this.connectGateway().catch((error) => log(`could not rebuild the gateway: ${describeError(error)}`));
 		}
+
 		// A pending restart owns the alarm; replacing it with the keepalive would
 		// postpone the restart for a whole cycle. A closed gateway gets a short
 		// retry so a failed first connect does not wait for the long interval.
@@ -566,8 +641,11 @@ export class BotGateway extends DurableObject<Env> {
 			const delay = this.gateway?.open ? this.keepAliveMs : Math.min(this.keepAliveMs, 10_000);
 			await this.ctx.storage.setAlarm(Date.now() + delay);
 		}
+
 		await this.ensure();
+
 		if (!this.gateway) return;
+
 		if (!this.gateway.open) this.gateway.ensure();
 		else if (this.gateway.stale) {
 			log("recycling the gateway connections before Cloudflare evicts this object");
@@ -591,9 +669,11 @@ export class BotGateway extends DurableObject<Env> {
 		// the commands there. A guild this instance has not seen before also needs
 		// its copy now, because the registration pass has already run.
 		const key = GUILD_PREFIX + guild.id;
+
 		if ((await this.ctx.storage.get<boolean>(key)) === true) return;
 		await this.ctx.storage.put(key, true);
 		const applicationId = this.botUserId;
+
 		if (!applicationId || !this.commandsSynced) return;
 		await this.syncGuild(guild.id, applicationId);
 	}
@@ -606,7 +686,9 @@ export class BotGateway extends DurableObject<Env> {
 	private async onMessage(message: DiscordMessage): Promise<void> {
 		if (!this.botUserId) return;
 		const guildId = message.guild_id;
+
 		if (guildId === undefined) return;
+
 		if (isBotMessage(message, this.botUserId)) return;
 
 		// Reserve this conversation's next position before the first await. The
@@ -614,8 +696,10 @@ export class BotGateway extends DurableObject<Env> {
 		// this a later message can reach the model first. A message that turns out
 		// not to be a turn releases the reservation in the finally.
 		const ticket = this.conversations.begin(message.channel_id);
+
 		try {
 			const channel = await this.lookups.channel(message.channel_id);
+
 			if (!channel) return;
 
 			// A message inside a thread goes to that thread's session. A thread
@@ -624,6 +708,7 @@ export class BotGateway extends DurableObject<Env> {
 			// later messages there are follow-ups.
 			if (THREAD_TYPES.has(channel.type) || (await this.ownsChannel(channel.id))) {
 				await this.handleConversation(guildId, channel, message, ticket);
+
 				return;
 			}
 
@@ -645,17 +730,22 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async onThreadCreate(thread: DiscordChannel): Promise<void> {
 		const guildId = thread.guild_id;
+
 		if (guildId === undefined) return;
 		// Keep the creation payload, so a rename that follows has a name to
 		// compare against.
 		this.lookups.remember(thread);
 		const watch = await this.ctx.storage.get<MessageWatch>(WATCH_PREFIX + thread.id);
+
 		if (!watch || watch.guildId !== guildId) return;
+
 		// A thread made from a message can only live in that message's channel.
 		if (thread.parent_id !== undefined && thread.parent_id !== watch.channelId) {
 			log(`watched message ${watch.messageId} grew a thread in ${thread.parent_id}, not ${watch.channelId}`);
+
 			return;
 		}
+
 		// A duplicate event, or a thread this bot already owns, has been handled
 		// before; only a fresh thread needs a notice.
 		if (await this.ownsThread(thread.id)) return;
@@ -666,6 +756,7 @@ export class BotGateway extends DurableObject<Env> {
 		await this.ctx.storage.put(THREAD_PREFIX + thread.id, true);
 
 		const notifyThreadId = watch.notifyThreadId;
+
 		if (!notifyThreadId) return;
 		const text = renderThreadCreated(thread, watch.messageId);
 		await this.withLock(notifyThreadId, async () => {
@@ -688,11 +779,15 @@ export class BotGateway extends DurableObject<Env> {
 		// An answer button starts the next turn; it is not part of the setup
 		// flows, so it is handled here where the gateway can start a prompt.
 		const customId = interaction.data?.custom_id;
+
 		if (interaction.type === 3 && customId?.startsWith("ask:")) {
 			await this.answerAsk(interaction, customId);
+
 			return;
 		}
+
 		const botUserId = this.botUserId ?? (await applicationId(this.env));
+
 		const ctx: CommandContext = {
 			env: this.env,
 			log,
@@ -706,6 +801,7 @@ export class BotGateway extends DurableObject<Env> {
 			botPermissions: (guildId) => this.lookups.botPermissions(guildId, botUserId),
 			rest: this.rest,
 		};
+
 		await handleInteraction(ctx, interaction);
 	}
 
@@ -719,21 +815,27 @@ export class BotGateway extends DurableObject<Env> {
 	private async answerAsk(interaction: DiscordInteraction, customId: string): Promise<void> {
 		const guildId = interaction.guild_id;
 		const channelId = interaction.channel_id;
+
 		if (!guildId || !channelId) return;
 		const [prefix, kind, askedId] = customId.split(":");
+
 		if (prefix !== "ask" || (kind !== "b" && kind !== "s") || !askedId) return;
 
 		const user = interaction.member?.user ?? interaction.user;
 		const userId = user?.id;
+
 		if (!userId) return;
+
 		if (userId !== askedId && !canManage(interaction)) {
 			await this.rest
 				.interactionReply(interaction.id, interaction.token, "Only the person who was asked can answer this.")
 				.catch(() => undefined);
+
 			return;
 		}
 
 		const answer = await this.askAnswer(interaction, customId, kind === "s");
+
 		if (!answer) {
 			await this.rest
 				.interactionReply(
@@ -742,14 +844,18 @@ export class BotGateway extends DurableObject<Env> {
 					"That answer could not be read. Reply in the conversation instead.",
 				)
 				.catch(() => undefined);
+
 			return;
 		}
+
 		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return;
 
 		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
 			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
+
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };
 		});
+
 		if (!allowed.ok) {
 			await this.rest
 				.interactionReply(
@@ -758,14 +864,17 @@ export class BotGateway extends DurableObject<Env> {
 					allowed.message ?? "Only people who can access this conversation can answer here.",
 				)
 				.catch(() => undefined);
+
 			return;
 		}
 
 		const context = await this.conversationContext(guildId, channelId);
+
 		if (!context) {
 			await this.rest
 				.interactionReply(interaction.id, interaction.token, "I could not read this conversation. Try again.")
 				.catch(() => undefined);
+
 			return;
 		}
 
@@ -775,6 +884,7 @@ export class BotGateway extends DurableObject<Env> {
 				"",
 			)
 			.trim();
+
 		const content = question ? `${question}\n\n**Answer:** ${answer}` : `**Answer:** ${answer}`;
 		await this.rest
 			.interactionUpdate(interaction.id, interaction.token, truncate(content), { components: [] })
@@ -788,6 +898,7 @@ export class BotGateway extends DurableObject<Env> {
 			...(user ? { author: user } : {}),
 			...(interaction.member?.nick ? { member: { nick: interaction.member.nick } } : {}),
 		};
+
 		this.track(
 			() => this.forward(guildId, channelId, threadName(answer), answer, message, context),
 			"could not start a turn from a question answer",
@@ -807,21 +918,28 @@ export class BotGateway extends DurableObject<Env> {
 						?.components
 				: undefined) ??
 			[];
+
 		const components = rows.flatMap((row) => row.components ?? []);
+
 		if (select) {
 			const component = components.find(
 				(candidate) => candidate.type === 3 && candidate.custom_id === customId,
 			);
+
 			if (!component || component.type !== 3) return undefined;
 			const values = interaction.data?.values ?? [];
+
 			const labels = values.map(
 				(value) => component.options[Number(value)]?.label ?? value,
 			);
+
 			return labels.filter(Boolean).join(", ") || undefined;
 		}
+
 		const component = components.find(
 			(candidate) => candidate.type === 2 && candidate.custom_id === customId,
 		);
+
 		return component && component.type === 2 ? component.label : undefined;
 	}
 
@@ -831,11 +949,15 @@ export class BotGateway extends DurableObject<Env> {
 		channelId: string,
 	): Promise<DiscordContext | undefined> {
 		const ref = await this.lookups.channel(channelId);
+
 		if (!ref) return undefined;
+
 		if (THREAD_TYPES.has(ref.type)) {
 			const parent = ref.parent_id ? await this.lookups.channel(ref.parent_id) : undefined;
+
 			return await this.lookups.context(guildId, parent, { id: ref.id, name: ref.name });
 		}
+
 		return await this.lookups.context(guildId, ref, { id: ref.id, name: ref.name }, "channel");
 	}
 
@@ -853,9 +975,11 @@ export class BotGateway extends DurableObject<Env> {
 		const guildId = channel.guild_id;
 		const previous = this.lookups.cached(channel.id)?.name;
 		const ref = this.lookups.remember(channel);
+
 		if (guildId === undefined || !ref?.name || previous === undefined || previous === ref.name) return;
 
 		const isThread = THREAD_TYPES.has(ref.type);
+
 		if (!(await this.owns(ref))) return;
 
 		const kind = isThread ? "thread" : "channel";
@@ -881,8 +1005,10 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async onChannelDelete(channel: DiscordChannel): Promise<void> {
 		const guildId = channel.guild_id;
+
 		if (guildId === undefined) return;
 		const isThread = THREAD_TYPES.has(channel.type ?? 0);
+
 		if (!(await this.owns(channel))) return;
 		await this.stopThread(guildId, channel.id, true).catch((error) =>
 			log(`could not stop the turn in deleted ${isThread ? "thread" : "channel"} ${channel.id}: ${describeError(error)}`),
@@ -911,6 +1037,7 @@ export class BotGateway extends DurableObject<Env> {
 			return (await this.session(guildId).config()).ready;
 		} catch (error) {
 			log(`could not read whether guild ${guildId} has a provider: ${describeError(error)}`);
+
 			return undefined;
 		}
 	}
@@ -943,6 +1070,7 @@ export class BotGateway extends DurableObject<Env> {
 	): Promise<void> {
 		try {
 			const botUserId = this.botUserId;
+
 			if (!botUserId) return;
 			// Wait for the message before this one to finish its acquisition check.
 			// Turn order is already reserved; this also means a follow-up in a thread
@@ -952,6 +1080,7 @@ export class BotGateway extends DurableObject<Env> {
 			// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
 			const roleId = await this.lookups.botRoleMention(message, botUserId);
 			const thread = THREAD_TYPES.has(channel.type);
+
 			if (thread && !(await this.ownsThread(channel.id))) {
 				if (!(await this.addressed(message, roleId))) return;
 				log(`joining and adopting thread ${channel.id} after being addressed`);
@@ -967,12 +1096,17 @@ export class BotGateway extends DurableObject<Env> {
 			}
 
 			const text = stripMention(message.content ?? "", botUserId, roleId);
+
 			if (!text && attachmentsOf(message).length === 0) return;
+
 			if (isStopText(text)) {
 				await this.stopThread(guildId, channel.id);
+
 				return;
 			}
+
 			const authorId = message.author?.id;
+
 			if (!authorId) return;
 
 			// A running turn blocked on a question cannot take a new prompt. While
@@ -982,12 +1116,15 @@ export class BotGateway extends DurableObject<Env> {
 					.answerFormText({ threadId: channel.id, userId: authorId, text })
 					.catch((error) => {
 						log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
+
 						return { consumed: false };
 					});
+
 				if (answered.consumed) {
 					if (answered.message) {
 						await this.rest.sendMessage(channel.id, answered.message).catch(() => undefined);
 					}
+
 					return;
 				}
 			}
@@ -995,14 +1132,18 @@ export class BotGateway extends DurableObject<Env> {
 			ticket.ready(async () => {
 				if ((await this.guildReady(guildId)) === false) {
 					await this.requireSetup(channel.id);
+
 					return;
 				}
+
 				// A scheduled conversation has a capability scope. A member below that
 				// scope may still read a public thread, but must not steer the session.
 				const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
 					log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
+
 					return { ok: false, message: "Eryn could not verify your access to this conversation." };
 				});
+
 				if (!allowed.ok) {
 					await this.rest
 						.sendMessage(
@@ -1011,16 +1152,20 @@ export class BotGateway extends DurableObject<Env> {
 								"Only people who can access every channel this schedule uses can talk to Eryn here.",
 						)
 						.catch(() => undefined);
+
 					return;
 				}
+
 				// The agent is told about the channel the request came from, which for
 				// a message inside a thread is the thread's parent — the thread is
 				// where the reply goes, the parent is the room it belongs to.
 				const parent =
 					thread && channel.parent_id ? await this.lookups.channel(channel.parent_id) : undefined;
+
 				const discord = thread
 					? await this.lookups.context(guildId, parent, channel)
 					: await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel");
+
 				await this.forward(
 					guildId,
 					channel.id,
@@ -1036,6 +1181,7 @@ export class BotGateway extends DurableObject<Env> {
 			// every early return, so one unhandled message cannot stall the queue.
 			ticket.skip();
 		}
+
 		await ticket.done;
 	}
 
@@ -1053,18 +1199,22 @@ export class BotGateway extends DurableObject<Env> {
 		message: DiscordMessage,
 	): Promise<void> {
 		const ticket = this.conversations.begin(message.id);
+
 		try {
 			const botUserId = this.botUserId;
+
 			if (!botUserId) return;
 			await ticket.previousChecked;
 			// Discord also creates a managed role named after the bot, and its `@`
 			// autocomplete can insert `<@&role>` instead of `<@user>`, so accept both.
 			const roleId = await this.lookups.botRoleMention(message, botUserId);
+
 			if (!(await this.addressed(message, roleId))) return;
 
 			const text = stripMention(message.content ?? "", botUserId, roleId);
 			const name = threadName(text);
 			let threadId: string;
+
 			try {
 				threadId = await this.createThread(channel.id, message.id, name);
 			} catch (error) {
@@ -1072,6 +1222,7 @@ export class BotGateway extends DurableObject<Env> {
 				await this.rest
 					.sendMessage(channel.id, `I could not start a thread for that: ${describeError(error)}`)
 					.catch(() => undefined);
+
 				return;
 			}
 
@@ -1079,20 +1230,26 @@ export class BotGateway extends DurableObject<Env> {
 			// Add the requester to the thread, silently, so a completion ping lands
 			// for someone who has already navigated away.
 			const authorId = message.author?.id;
+
 			if (authorId) {
 				await this.rest
 					.addThreadMember(threadId, authorId)
 					.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
 			}
+
 			if (!text && attachmentsOf(message).length === 0) {
 				await this.rest.sendMessage(threadId, "What would you like me to do?").catch(() => undefined);
+
 				return;
 			}
+
 			ticket.ready(async () => {
 				if ((await this.guildReady(guildId)) === false) {
 					await this.requireSetup(threadId);
+
 					return;
 				}
+
 				await this.forward(
 					guildId,
 					threadId,
@@ -1106,6 +1263,7 @@ export class BotGateway extends DurableObject<Env> {
 		} finally {
 			ticket.skip();
 		}
+
 		await ticket.done;
 	}
 
@@ -1126,6 +1284,7 @@ export class BotGateway extends DurableObject<Env> {
 	): Promise<void> {
 		return this.withLock(threadId, async () => {
 			const client = this.session(guildId);
+
 			// A reply is a request about the message it answers, and the reply
 			// itself may be nothing but "this". Put that message in front of the
 			// request so the model can resolve what "this" is, even when the
@@ -1133,6 +1292,7 @@ export class BotGateway extends DurableObject<Env> {
 			const parent = message.referenced_message
 				? renderMessage(message.referenced_message, this.botUserId)
 				: undefined;
+
 			try {
 				await client.prompt({
 					threadId,
@@ -1144,10 +1304,12 @@ export class BotGateway extends DurableObject<Env> {
 					...(notice ? { notice } : {}),
 					attachments: attachmentsOf(message),
 				});
+
 				return;
 			} catch (error) {
 				log(`session prompt for ${threadId} could not be delivered: ${describeError(error)}`);
 			}
+
 			// The session object is gone or refused the turn, so nothing will edit
 			// the message it may have left behind. Say so rather than leaving the
 			// thread looking like the agent is still thinking.
@@ -1166,8 +1328,10 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async takeRenameNotice(channelId: string): Promise<string | undefined> {
 		const notice = await this.ctx.storage.get<RenameNotice>(RENAME_PREFIX + channelId);
+
 		if (!notice) return undefined;
 		await this.ctx.storage.delete(RENAME_PREFIX + channelId);
+
 		return renderChannelRenamed(notice);
 	}
 
@@ -1199,12 +1363,15 @@ export class BotGateway extends DurableObject<Env> {
 	private async addressed(message: DiscordMessage, roleId: string | undefined): Promise<boolean> {
 		if (isMention(message, this.botUserId, roleId) || isReplyTo(message, this.botUserId)) return true;
 		const referenced = message.referenced_message;
+
 		if (referenced?.author !== undefined) return false;
 		// A gateway payload can omit the referenced message. Ask REST rather
 		// than dropping a reply that may be aimed at Eryn.
 		const messageId = referenced?.id ?? message.message_reference?.message_id;
+
 		if (messageId === undefined || this.botUserId === undefined) return false;
 		const original = await this.rest.message(message.channel_id, messageId).catch(() => undefined);
+
 		return original?.author?.id === this.botUserId;
 	}
 
@@ -1220,14 +1387,17 @@ export class BotGateway extends DurableObject<Env> {
 	private withLock<T>(key: string, run: () => Promise<T>): Promise<T> {
 		const previous = this.locks.get(key) ?? Promise.resolve();
 		const next = previous.then(run, run);
+
 		const guard = next.then(
 			() => undefined,
 			() => undefined,
 		);
+
 		this.locks.set(key, guard);
 		void guard.then(() => {
 			if (this.locks.get(key) === guard) this.locks.delete(key);
 		});
+
 		return next;
 	}
 
@@ -1239,8 +1409,10 @@ export class BotGateway extends DurableObject<Env> {
 			// A thread already exists for this message, e.g. a second mention.
 			if (error instanceof DiscordError && error.status === 400) {
 				const existing = await this.rest.channel(messageId);
+
 				if (existing) return existing.id;
 			}
+
 			throw error;
 		}
 	}

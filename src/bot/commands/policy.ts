@@ -35,13 +35,21 @@ import {
 } from "./interaction";
 
 export const POLICY_MENU_ID = "policy:menu";
+
 const PRESET_ID = "policy:preset:";
+
 const CUSTOMISE_ID = "policy:customise";
+
 const RESET_ID = "policy:reset";
+
 const CLOSE_ID = "policy:close";
+
 const PROFILE_ID = "policy:profile";
+
 const GROUP_ID = "policy:group:";
+
 const EFFECT_ID = "policy:effect:";
+
 /** The select value that means "drop the channel override". */
 const INHERIT = "default";
 
@@ -55,14 +63,18 @@ interface Target {
 /** Where the interaction happened, which is the scope it configures. */
 async function targetOf(request: InteractionRequest): Promise<Target | undefined> {
 	const channelId = request.interaction.channel_id;
+
 	if (!channelId) return undefined;
 	const channel = await request.ctx.rest.channel(channelId).catch(() => undefined);
+
 	if (!channel) return undefined;
+
 	// A normal channel also has a parent_id: its category. Only Discord's thread
 	// types (public, private, announcement) are a thread scope.
 	if ([10, 11, 12].includes(channel.type)) {
 		return { channelId: channel.parent_id ?? channelId, threadId: channelId, label: "this thread" };
 	}
+
 	return { channelId, label: `#${channel.name ?? "channel"}` };
 }
 
@@ -82,19 +94,24 @@ function scopeRequest(target: Target) {
 
 export async function policyMenu(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
+
 	// The public policy card opens a fresh ephemeral menu; editing it in place
 	// would show the configuration to everyone in the channel.
 	const publicSource =
 		request.interaction.type === 3 &&
 		request.interaction.guild_id !== undefined &&
 		((request.interaction.message?.flags ?? 0) & 64) === 0;
+
 	if (publicSource) await answer.deferNew();
 	else await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) {
 		await answer.reply("Run `/eryn policy` in a channel or thread.", [closeRow(request)]);
+
 		return;
 	}
+
 	const state = await request.session.policy(stateRequest(target));
 	await answer.reply(renderMenu(state, target), menuRows(state));
 }
@@ -112,6 +129,7 @@ function defaultName(state: PolicyState): string {
 
 function renderMenu(state: PolicyState, target: Target): string {
 	const own = state.own !== undefined;
+
 	const text = [
 		`**Permissions in ${target.label}**`,
 		`Server default: **${defaultName(state)}**`,
@@ -121,13 +139,16 @@ function renderMenu(state: PolicyState, target: Target): string {
 		"",
 		`Profiles: ${state.profiles.map((profile) => `**${profile.name}**`).join(" · ")}`,
 	].join("\n");
+
 	return text.length > 1_900 ? `${text.slice(0, 1_899)}…` : text;
 }
 
 function menuRows(state: PolicyState) {
 	const active = matchProfile(state.effective, customOf(state)) ?? state.effective.profile;
+
 	const inherits =
 		state.own?.profile === undefined && state.own?.preset === undefined;
+
 	const options = [
 		{
 			label: `Server default (${defaultName(state)})`,
@@ -143,15 +164,19 @@ function menuRows(state: PolicyState) {
 			default: !inherits && active === profile.id,
 		})),
 	];
+
 	const quick = LISTED_PROFILES.map((id) => {
 		const profile = state.profiles.find((candidate) => candidate.id === id);
+
 		return actionButton(profile?.name ?? id, `${PRESET_ID}${id}`, active === id ? 1 : 2);
 	});
+
 	const actions = [
 		actionButton("Customise", CUSTOMISE_ID, 2),
 		actionButton("Reset to default", RESET_ID, 2, state.own === undefined),
 		actionButton("Close", CLOSE_ID, 2),
 	];
+
 	return [
 		selectRow({
 			type: 3,
@@ -168,14 +193,18 @@ async function applyProfile(request: InteractionRequest, profile: string): Promi
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) return;
+
 	try {
 		if (profile === INHERIT) await request.session.clearPolicy(scopeRequest(target));
 		else await request.session.setPolicy({ ...scopeRequest(target), policy: { profile } });
 	} catch (error) {
 		await answer.update(`Could not change the policy: ${describeError(error)}`, [closeRow(request)]);
+
 		return;
 	}
+
 	const state = await request.session.policy(stateRequest(target));
 	await answer.update(renderMenu(state, target), menuRows(state));
 }
@@ -184,6 +213,7 @@ async function customise(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) return;
 	const state = await request.session.policy(stateRequest(target));
 	await answer.update(
@@ -209,12 +239,14 @@ function groupOptions(state: PolicyState): DiscordSelectOption[] {
 		value: group,
 		description: `Currently ${effectWord(state.effective.tools?.[group])}`.slice(0, 100),
 	}));
+
 	const mcpAll = state.effective.mcp?.[MCP_ALL] ?? "allow";
 	options.push({
 		label: "All MCP servers",
 		value: "mcp",
 		description: `Currently ${effectWord(mcpAll)}`.slice(0, 100),
 	});
+
 	for (const server of state.mcpServers) {
 		options.push({
 			label: server.slice(0, 100),
@@ -222,6 +254,7 @@ function groupOptions(state: PolicyState): DiscordSelectOption[] {
 			description: `Currently ${effectWord(state.effective.mcp?.[server] ?? mcpAll)}`.slice(0, 100),
 		});
 	}
+
 	return options.slice(0, MAX_SELECT_OPTIONS);
 }
 
@@ -231,13 +264,17 @@ function effectWord(effect: PolicyEffect | undefined): string {
 
 function groupTitle(key: string): string {
 	if (key === "mcp") return "All MCP servers";
+
 	if (key.startsWith("mcp:")) return key.slice(4);
+
 	return GROUP_LABELS[key as PolicyGroup] ?? key;
 }
 
 function currentEffect(state: PolicyState, key: string): PolicyEffect {
 	if (key === "mcp") return state.effective.mcp?.[MCP_ALL] ?? "allow";
+
 	if (key.startsWith("mcp:")) return state.effective.mcp?.[key.slice(4)] ?? state.effective.mcp?.[MCP_ALL] ?? "allow";
+
 	return state.effective.tools?.[key] ?? "allow";
 }
 
@@ -245,6 +282,7 @@ async function groupScreen(request: InteractionRequest, key: string): Promise<vo
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) return;
 	const state = await request.session.policy(stateRequest(target));
 	await answer.update(
@@ -277,16 +315,18 @@ async function applyEffect(
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) return;
 	const state = await request.session.policy(stateRequest(target));
-	const tools: Record<string, PolicyEffect> = { ...(state.own?.tools ?? {}) };
-	const mcp: Record<string, PolicyEffect> = { ...(state.own?.mcp ?? {}) };
+	const tools: Record<string, PolicyEffect> = { ...state.own?.tools };
+	const mcp: Record<string, PolicyEffect> = { ...state.own?.mcp };
 
 	if (key === "mcp") {
 		if (effect === "inherit") delete mcp[MCP_ALL];
 		else mcp[MCP_ALL] = effect;
 	} else if (key.startsWith("mcp:")) {
 		const server = key.slice(4);
+
 		if (effect === "inherit") delete mcp[server];
 		else mcp[server] = effect;
 	} else {
@@ -301,6 +341,7 @@ async function applyEffect(
 				...(state.own.elicitation ? { elicitation: state.own.elicitation } : {}),
 			}
 		: {};
+
 	const patch: Policy = {
 		...own,
 		...(Object.keys(tools).length ? { tools } : {}),
@@ -311,8 +352,10 @@ async function applyEffect(
 		await request.session.setPolicy({ ...scopeRequest(target), policy: patch });
 	} catch (error) {
 		await answer.update(`Could not change the policy: ${describeError(error)}`, [closeRow(request)]);
+
 		return;
 	}
+
 	const next = await request.session.policy(stateRequest(target));
 	await answer.update(renderMenu(next, target), menuRows(next));
 }
@@ -321,13 +364,17 @@ async function reset(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const target = await targetOf(request);
+
 	if (!target) return;
+
 	try {
 		await request.session.clearPolicy(scopeRequest(target));
 	} catch (error) {
 		await answer.update(`Could not reset the policy: ${describeError(error)}`, [closeRow(request)]);
+
 		return;
 	}
+
 	const state = await request.session.policy(stateRequest(target));
 	await answer.update(renderMenu(state, target), menuRows(state));
 }
@@ -339,36 +386,50 @@ export async function policyComponent(
 	values: readonly string[],
 ): Promise<boolean> {
 	if (customId === POLICY_MENU_ID) return await claim(request, "update", () => policyMenu(request));
+
 	if (customId === CUSTOMISE_ID) return await claim(request, "update", () => customise(request));
+
 	if (customId === RESET_ID) return await claim(request, "update", () => reset(request));
+
 	if (customId === CLOSE_ID) {
 		await responder(request).close().catch(() => undefined);
+
 		return true;
 	}
+
 	if (customId.startsWith(PRESET_ID)) {
 		const value = customId.slice(PRESET_ID.length);
+
 		if ((LISTED_PROFILES as readonly string[]).includes(value)) {
 			return await claim(request, "update", () => applyProfile(request, value));
 		}
 	}
+
 	if (customId === PROFILE_ID) {
 		const value = values[0];
+
 		if (value) return await claim(request, "update", () => applyProfile(request, value));
 	}
+
 	if (customId === `${GROUP_ID}pick`) {
 		const key = values[0];
+
 		if (key) return await claim(request, "update", () => groupScreen(request, key));
 	}
+
 	if (customId.startsWith(EFFECT_ID)) {
 		const rest = customId.slice(EFFECT_ID.length);
 		const separator = rest.lastIndexOf(":");
+
 		if (separator > 0) {
 			const key = rest.slice(0, separator);
 			const effect = rest.slice(separator + 1);
+
 			if (effect === "allow" || effect === "ask" || effect === "block" || effect === "inherit") {
 				return await claim(request, "update", () => applyEffect(request, key, effect));
 			}
 		}
 	}
+
 	return false;
 }

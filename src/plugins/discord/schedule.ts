@@ -33,26 +33,34 @@ type SessionMetadata = NonNullable<Parameters<Plugin.Context["session"]["update"
 /** The effective tool name is `opencode_schedule_create` or similar. */
 function scheduleTool(tool: string): ScheduleTool | undefined {
 	const name = tool.slice(tool.lastIndexOf(".") + 1);
+
 	if (name === "schedule_create" || name.endsWith("_schedule_create")) return "create";
+
 	if (name === "schedule_delete" || name.endsWith("_schedule_delete")) return "delete";
+
 	return undefined;
 }
 
 function scheduleId(value: unknown): string | undefined {
 	if (!value || typeof value !== "object") return undefined;
+
 	if (typeof (value as { id?: unknown }).id === "string") return (value as { id: string }).id;
 	const output = (value as { output?: unknown }).output;
+
 	if (output && typeof output === "object" && typeof (output as { id?: unknown }).id === "string") {
 		return (output as { id: string }).id;
 	}
+
 	return undefined;
 }
 
 async function readContext(ctx: Plugin.Context, sessionID: string): Promise<DiscordContext | undefined> {
 	const session = await ctx.session.get({ sessionID }).catch((error) => {
 		log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
+
 		return undefined;
 	});
+
 	return readDiscordContext(session?.metadata);
 }
 
@@ -71,7 +79,9 @@ async function conversationCapabilities(
 	authorId: string,
 ): Promise<ScopeChannelCapabilities | undefined> {
 	const info = await rest.channel(context.thread.id).catch(() => undefined);
+
 	if (!info || info.guild_id !== guildId) return undefined;
+
 	return await authority.scopeCapabilities(authorId, info);
 }
 
@@ -93,11 +103,15 @@ async function writeScope(
 	await withDiscordMetadataLock(sessionID, async () => {
 		const session = await ctx.session.get({ sessionID }).catch((error) => {
 			log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
+
 			return undefined;
 		});
+
 		const latest = readDiscordContext(session?.metadata);
+
 		if (!session || !latest) return;
 		const next = update(latest);
+
 		if (!next) return;
 		await ctx.session.update({
 			sessionID,
@@ -126,6 +140,7 @@ export async function registerScheduleScope(
 		const context = await readContext(ctx, event.sessionID);
 		const scope = context?.scheduleScope;
 		const authorId = context?.authorId;
+
 		if (!context || !authorId || !canCreateSchedule(scope, authorId)) {
 			throw new Error(
 				scope
@@ -133,12 +148,15 @@ export async function registerScheduleScope(
 					: "A schedule needs a person to create it in this conversation.",
 			);
 		}
+
 		// A schedule may not read or send where its creator cannot. Fail before
 		// the schedule exists rather than storing a scope it cannot justify.
 		const capabilities = await conversationCapabilities(rest, guildId, authority, context, authorId);
+
 		if (!capabilities) {
 			throw new Error("Eryn could not verify your Discord access to this conversation.");
 		}
+
 		if (!capabilities.read && !capabilities.send) {
 			throw new Error("Your Discord permissions do not allow a schedule to read or send in this conversation.");
 		}
@@ -147,29 +165,38 @@ export async function registerScheduleScope(
 	await ctx.tool.hook("execute.after", async (event) => {
 		if (event.status !== "completed") return;
 		const kind = scheduleTool(event.tool);
+
 		if (!kind) return;
 		const context = await readContext(ctx, event.sessionID);
+
 		if (!context) return;
 
 		if (kind === "create") {
 			const id = scheduleId(event.result);
+
 			// Without the returned id there is no safe scope to grant. The
 			// schedule still exists, but its turns fail closed as no-speaker
 			// turns until a scope can be recorded.
 			if (!id) {
 				log("discord-plugin", `schedule_create for ${event.sessionID} returned no id`);
+
 				return;
 			}
+
 			const ownerId = context.authorId;
+
 			if (!ownerId || !canCreateSchedule(context.scheduleScope, ownerId)) return;
 			const now = Date.now();
 			const capabilities = await conversationCapabilities(rest, guildId, authority, context, ownerId);
+
 			// Without at least one capability there is no justified scope. The
 			// schedule exists, but its turns fail closed as no-speaker turns.
 			if (!capabilities || (!capabilities.read && !capabilities.send)) return;
 			await writeScope(ctx, event.sessionID, (latest) => {
 				const latestOwner = latest.authorId;
+
 				if (!latestOwner || !canCreateSchedule(latest.scheduleScope, latestOwner)) return undefined;
+
 				const existing = latest.scheduleScope
 					? addChannelToScope(latest.scheduleScope, latest.thread.id, capabilities, now)
 					: defaultScheduleScope({
@@ -179,18 +206,22 @@ export async function registerScheduleScope(
 							capabilities,
 							now,
 						});
+
 				return { scope: addScheduleToScope(existing, id, now) };
 			}).catch((error) => log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`));
 			onCreated?.(context.thread.id);
+
 			return;
 		}
 
 		if (!context.scheduleScope) return;
 		const id = scheduleId(event.input) ?? scheduleId(event.result);
+
 		if (!id) return;
 		await writeScope(ctx, event.sessionID, (latest) => {
 			if (!latest.scheduleScope) return undefined;
 			const next = removeScheduleFromScope(latest.scheduleScope, id, Date.now());
+
 			return { scope: next.scheduleIds.length ? next : undefined };
 		}).catch((error) => log("discord-plugin", `could not update a schedule scope: ${describeError(error)}`));
 	});

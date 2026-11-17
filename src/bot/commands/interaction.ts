@@ -91,8 +91,21 @@ export function removeRow(request: InteractionRequest, removeId: string, cancelI
  */
 const acknowledged = new WeakSet<DiscordInteraction>();
 
+/**
+ * Whether this interaction is a modal submitted from a message on screen.
+ *
+ * Discord includes that message on the interaction and accepts the same update
+ * response a component gets. Using it is what keeps a form (such as "Link a
+ * server") from leaving its menu behind and answering below it: the flow
+ * continues in the message it was opened from.
+ */
+function modalFromMessage(interaction: DiscordInteraction): boolean {
+	return interaction.type === 5 && interaction.message !== undefined;
+}
+
 export function responder(request: InteractionRequest) {
 	const { ctx, interaction } = request;
+
 	/**
 	 * An edit replaces the whole message, so its components default to none.
 	 * Discord keeps the previous ones when the field is left out, which is how a
@@ -103,6 +116,7 @@ export function responder(request: InteractionRequest) {
 		ctx.rest.interactionEditOriginal(ctx.applicationId, interaction.token, content, {
 			components: components ?? [],
 		});
+
 	return {
 		/**
 		 * Acknowledge now, so a slow lookup stays inside Discord's 3-second
@@ -112,7 +126,8 @@ export function responder(request: InteractionRequest) {
 		defer: async () => {
 			if (acknowledged.has(interaction)) return;
 			acknowledged.add(interaction);
-			if (interaction.type === 3) {
+
+			if (interaction.type === 3 || modalFromMessage(interaction)) {
 				// Drop the buttons while the work runs, so a second click cannot
 				// start the same step twice.
 				await ctx.rest.interactionUpdate(interaction.id, interaction.token, "Working…", { components: [] });
@@ -133,13 +148,21 @@ export function responder(request: InteractionRequest) {
 		reply: (content: string, components?: readonly DiscordComponent[]) => {
 			if (acknowledged.has(interaction)) return edit(content, components);
 			acknowledged.add(interaction);
-			return ctx.rest.interactionReply(interaction.id, interaction.token, content, {
-				...(components?.length ? { components } : {}),
-			});
+
+			// A modal submitted from a message answers in that message; anything
+			// else with no acknowledgement gets its own ephemeral reply.
+			if (modalFromMessage(interaction)) {
+				return ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
+					components: components ?? [],
+				});
+			}
+
+			return ctx.rest.interactionReply(interaction.id, interaction.token, content, (components?.length ? { components } : {}));
 		},
 		update: (content: string, components?: readonly DiscordComponent[]) => {
 			if (acknowledged.has(interaction)) return edit(content, components);
 			acknowledged.add(interaction);
+
 			return ctx.rest.interactionUpdate(interaction.id, interaction.token, content, {
 				components: components ?? [],
 			});
@@ -154,9 +177,11 @@ export function responder(request: InteractionRequest) {
 		close: async () => {
 			if (!acknowledged.has(interaction)) {
 				acknowledged.add(interaction);
+
 				if (interaction.type === 3) await ctx.rest.interactionDeferUpdate(interaction.id, interaction.token);
 				else await ctx.rest.interactionDefer(interaction.id, interaction.token, true);
 			}
+
 			await ctx.rest.interactionDeleteOriginal(ctx.applicationId, interaction.token);
 		},
 		modal: (modal: DiscordModal) => ctx.rest.interactionModal(interaction.id, interaction.token, modal),
@@ -196,6 +221,7 @@ export async function claim(
 	run: () => Promise<void>,
 ): Promise<true> {
 	await guarded(request, kind, run);
+
 	return true;
 }
 
@@ -217,7 +243,9 @@ export function canManage(interaction: DiscordInteraction): boolean {
 	// The install DM has no guild context; it is only delivered to the installer.
 	if (!interaction.guild_id) return true;
 	const raw = interaction.member?.permissions;
+
 	if (typeof raw !== "string") return false;
+
 	try {
 		return (BigInt(raw) & MANAGE_GUILD) !== 0n;
 	} catch {
@@ -225,9 +253,15 @@ export function canManage(interaction: DiscordInteraction): boolean {
 	}
 }
 
-/** A single-line text input, the only kind these modals use. */
+/**
+ * A single-line text input, the only kind these modals use.
+ *
+ * Discord treats an omitted `required` as true, so a field labelled "(optional)"
+ * would still block the form. Default to optional and let a field ask to be
+ * required, rather than the other way around.
+ */
 export function textInput(input: Omit<DiscordTextInput, "type" | "style">): DiscordTextInput {
-	return { type: 4, style: 1, ...input };
+	return { type: 4, style: 1, required: false, ...input };
 }
 
 /** One input per row, which is how Discord lays a simple form out. */

@@ -34,10 +34,13 @@ async function deployChanged(
 	env: Versioned,
 ): Promise<boolean> {
 	const version = request.headers.get(DEPLOY_HEADER) ?? currentDeploy(env);
+
 	if (!version) return false;
 	const stored = await storage.get<string>(DEPLOY_KEY);
+
 	if (stored === version) return false;
 	await storage.put(DEPLOY_KEY, version);
+
 	return stored !== undefined;
 }
 
@@ -53,15 +56,18 @@ export async function deployRestart(
 ): Promise<boolean> {
 	if (!(await deployChanged(storage, request, env))) return false;
 	await storage.setAlarm(Date.now() + RESTART_DELAY_MS);
+
 	return true;
 }
 
 /** Request options for a call into a Durable Object, carrying the current deploy. */
 export function withDeploy(env: Versioned, init: RequestInit = {}): RequestInit {
 	const deploy = currentDeploy(env);
+
 	if (!deploy) return init;
 	const headers = new Headers(init.headers);
 	headers.set(DEPLOY_HEADER, deploy);
+
 	return { ...init, headers };
 }
 
@@ -78,5 +84,6 @@ export function withOrigin(init: RequestInit, origin: string | undefined): Reque
 	if (!origin) return init;
 	const headers = new Headers(init.headers);
 	headers.set(ORIGIN_HEADER, origin);
+
 	return { ...init, headers };
 }

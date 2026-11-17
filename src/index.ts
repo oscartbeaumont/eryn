@@ -52,13 +52,17 @@ const isRead = (request: Request): boolean => request.method === "GET" || reques
  */
 export async function wake(env: Env, origin?: string): Promise<WakeState | undefined> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
+
 	const call = async (): Promise<WakeState | undefined> => {
 		const response = await stub.fetch("https://bot.internal/wake", withOrigin(withDeploy(env), origin));
+
 		if (!response.ok) return undefined;
+
 		return (await response.json().catch(() => undefined)) as WakeState | undefined;
 	};
 
 	let state = await call().catch(() => undefined);
+
 	// A pending restart means the object resets into the new deploy a second from
 	// now. Keep poking briefly so the replacement is woken, but do not multiply
 	// every anonymous /health request into a ten-second stream of DO calls when
@@ -67,7 +71,9 @@ export async function wake(env: Env, origin?: string): Promise<WakeState | undef
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		state = (await call().catch(() => undefined)) ?? state;
 	}
+
 	if (!state) return undefined;
+
 	return {
 		connected: state.connected,
 		shards: state.shards,
@@ -84,25 +90,33 @@ export async function wake(env: Env, origin?: string): Promise<WakeState | undef
  */
 export async function handle(request: Request, ctx: ExecutionContext): Promise<Response | undefined> {
 	const url = new URL(request.url);
+
 	// Discord posts every interaction here once the application's endpoint is
 	// set; the route verifies the signature and hands it to the bot object.
 	if (url.pathname === INTERACTIONS_PATH) return await handleInteractions(request, ctx);
+
 	// Brand images and the favicon are static assets; the Worker owns these
 	// paths so it can add the long-lived cache headers.
 	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
+
 	// The landing page's buttons point here so a self-hosted deployment installs
 	// its own application instead of the hosted one.
 	if (isRead(request) && url.pathname === "/install") {
 		return Response.redirect(installUrl(await applicationId(env)), 302);
 	}
+
 	// The landing page's PostHog traffic, proxied so a blocker does not drop it.
 	if (isPostHogRequest(url.pathname)) return await posthogProxy(request, url);
+
 	if (url.pathname === "/" && isRead(request)) {
 		const response = await solidHandler.fetch(request);
 		response.headers.set("cache-control", "public, max-age=300");
+
 		return response;
 	}
+
 	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
+
 	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
 
 	// The filtered models.dev catalogue an embedded host points at, so it does
@@ -110,7 +124,9 @@ export async function handle(request: Request, ctx: ExecutionContext): Promise<R
 	if (isRead(request) && isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
 
 	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) return await handleMcpStart(request, url);
+
 	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
+
 	return await handleMcpCallback(request, url);
 }
 
@@ -131,11 +147,13 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 	const body = await request.text();
 	const signature = request.headers.get("x-signature-ed25519") ?? "";
 	const timestamp = request.headers.get("x-signature-timestamp") ?? "";
+
 	if (!(await signedByDiscord(signature, timestamp, body))) {
 		return new Response("invalid request signature", { status: 401 });
 	}
 
 	let interaction: DiscordInteraction | undefined;
+
 	try {
 		interaction = JSON.parse(body) as DiscordInteraction;
 	} catch {
@@ -145,6 +163,7 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 	// Registering the endpoint sends a signed PING, which only counts as
 	// answered if it gets a PONG back.
 	if (interaction?.type === 1) return Response.json({ type: 1 });
+
 	if (typeof interaction?.id !== "string" || typeof interaction.token !== "string") {
 		return new Response("bad request", { status: 400 });
 	}
@@ -167,6 +186,7 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 			})
 			.catch((error) => log("interactions", `could not deliver the interaction: ${String(error)}`)),
 	);
+
 	return new Response(null, { status: 202 });
 }
 
@@ -185,31 +205,39 @@ const MAX_SIGNATURE_AGE_MS = 5 * 60_000;
 /** Decode a hex string, or undefined when it is not one. */
 function hexBytes(value: string): Uint8Array | undefined {
 	if (!value) return undefined;
+
 	return Result.getOrUndefined(Hex.decode(value));
 }
 
 /** Whether Discord signed this timestamp and body for this application. */
 async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
 	const signatureBytes = hexBytes(signature);
+
 	if (!signatureBytes || !timestamp) return false;
 	// The header is seconds since the epoch, as a decimal string.
 	const seconds = Number(timestamp);
+
 	if (!Number.isFinite(seconds) || Math.abs(Date.now() - seconds * 1_000) > MAX_SIGNATURE_AGE_MS) return false;
 	const payload = new TextEncoder().encode(timestamp + body);
+
 	// The hosted application's key is a constant, so a normal interaction never
 	// costs a request. A self-hosted deployment runs its own application, and the
 	// first interaction it sees teaches it the key to check.
 	if (await signedWith(APPLICATION_PUBLIC_KEY, signatureBytes, payload)) return true;
 	const key = (await application(env))?.verifyKey;
+
 	return key ? await signedWith(key, signatureBytes, payload) : false;
 }
 
 /** Whether `signature` is valid for `payload` under a hex-encoded Ed25519 key. */
 async function signedWith(keyHex: string, signature: Uint8Array, payload: Uint8Array): Promise<boolean> {
 	const keyBytes = hexBytes(keyHex);
+
 	if (!keyBytes) return false;
+
 	try {
 		const key = await crypto.subtle.importKey("raw", keyBytes, ED25519, false, ["verify"]);
+
 		return await crypto.subtle.verify(ED25519, key, signature, payload);
 	} catch {
 		return false;
@@ -224,10 +252,12 @@ async function handleMcpStart(request: Request, url: URL): Promise<Response> {
 	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
 
 	const pointer = await readPointer(url.pathname.slice(MCP_START_PATH.length + 1), env);
+
 	if (!pointer) return invalidLink();
 
 	try {
 		const target = await new SessionClient(env, pointer.guildId).mcpAuthUrl(pointer.attemptId);
+
 		return Response.redirect(target, 302);
 	} catch {
 		return page(
@@ -243,20 +273,24 @@ async function handleMcpCallback(request: Request, url: URL): Promise<Response> 
 	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
 
 	const pointer = await readPointer(url.searchParams.get("state") ?? undefined, env);
+
 	if (!pointer) return invalidLink();
 
 	const error = url.searchParams.get("error") ?? undefined;
 	const code = url.searchParams.get("code") ?? undefined;
+
 	if (error) log("callback", `an MCP authorization server returned ${error}`);
 
 	try {
 		const result = await new SessionClient(env, pointer.guildId).mcpAuthComplete(pointer.attemptId, code, error);
+
 		if (result.ok && result.link) {
 			return page(
 				"Connected",
 				`<strong>${escapeHtml(result.link.name)}</strong> is connected to your Discord server. You can close this tab and return to Discord.`,
 			);
 		}
+
 		return page(
 			"Sign-in did not complete",
 			`${escapeHtml(result.message ?? "The server did not accept the sign-in.")} You can close this tab and try again from Discord.`,
@@ -264,6 +298,7 @@ async function handleMcpCallback(request: Request, url: URL): Promise<Response> 
 		);
 	} catch (failure) {
 		log("callback", `the MCP sign-in callback failed: ${String(failure)}`);
+
 		return page(
 			"Sign-in did not complete",
 			"Eryn could not finish the sign-in. You can close this tab and try again from Discord.",
@@ -278,9 +313,12 @@ async function readPointer(
 	env: Env,
 ): Promise<{ guildId: string; attemptId: string } | undefined> {
 	const secret = sessionSecret(env);
+
 	if (!secret || !token) return undefined;
 	const pointer = await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret);
+
 	if (typeof pointer?.guildId !== "string" || typeof pointer.attemptId !== "string") return undefined;
+
 	return { guildId: pointer.guildId, attemptId: pointer.attemptId };
 }
 
@@ -350,7 +388,9 @@ export default {
 		if (!configuredOrigin(env)) {
 			ctx.waitUntil(ensureEndpoint(env, new URL(request.url).origin).catch(() => undefined));
 		}
+
 		const handled = await handle(request, ctx).catch(() => undefined);
+
 		if (handled) return handled;
 
 		if (new URL(request.url).pathname === "/health") {
@@ -359,6 +399,7 @@ export default {
 			// which code is actually serving: a Durable Object keeps the code it
 			// started with until it restarts.
 			const botState = await wake(env, new URL(request.url).origin).catch(() => undefined);
+
 			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
 		}
 

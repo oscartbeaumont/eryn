@@ -34,6 +34,7 @@ const KEY_PREFIX = KEYS.fs;
 /** Build a filesystem over a Durable Object's storage. */
 export function fileStore(storage: DurableObjectStorage): FileStore {
 	const key = (path: string) => `${KEY_PREFIX}${path}`;
+
 	return {
 		async get(path) {
 			return await storage.get<StoredFile>(key(path));
@@ -47,10 +48,12 @@ export function fileStore(storage: DurableObjectStorage): FileStore {
 		async list(prefix) {
 			const root = prefix === "/" ? "/" : prefix.replace(/\/+$/, "");
 			const entries = await storage.list<StoredFile>({ prefix: key(prefix) });
+
 			return [...entries]
 				.map(([stored, file]) => ({ path: stored.slice(KEY_PREFIX.length), file }))
 				.filter((entry) => {
 					if (root === "/") return entry.path.startsWith("/");
+
 					return entry.path === root || entry.path.startsWith(`${root}/`);
 				});
 		},

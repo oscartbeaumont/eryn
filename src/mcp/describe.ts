@@ -7,9 +7,11 @@
 
 export function describeTools(tools: readonly { name: string }[]): string {
 	if (!tools.length) return "It advertises no tools.";
+
 	const shown = tools
 		.slice(0, 8)
 		.map((tool) => tool.name.slice(0, 40))
 		.join(", ");
+
 	return `It offers ${tools.length} tool${tools.length === 1 ? "" : "s"}: ${shown}${tools.length > 8 ? ", …" : ""}.`;
 }

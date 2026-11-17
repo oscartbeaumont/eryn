@@ -20,6 +20,7 @@ test("a tool output carries text and files side by side", async () => {
 				{ uri: "data:image/png;base64,AQID", mime: "image/png", name: "ticket.png" },
 			]),
 	});
+
 	assert.deepEqual(await execute({}, call), {
 		content: [
 			{ type: "text", text: "a screenshot" },
@@ -35,6 +36,7 @@ test("a text-only tool output stays plain text", async () => {
 		input: objectSchema({}),
 		run: async () => new ToolOutput("no pictures here"),
 	});
+
 	assert.deepEqual(await execute({}, call), { content: "no pictures here" });
 });
 
@@ -45,5 +47,6 @@ test("a plain value is still JSON-encoded", async () => {
 		input: objectSchema({}),
 		run: async () => ({ ok: true }),
 	});
+
 	assert.deepEqual(await execute({}, call), { content: '{\n  "ok": true\n}' });
 });

@@ -27,9 +27,11 @@ export interface Turn {
 
 export function createTurn(threadId: string): Turn {
 	let resolve!: () => void;
+
 	const completed = new Promise<void>((res) => {
 		resolve = res;
 	});
+
 	return {
 		threadId,
 		createdAt: Date.now(),
@@ -53,8 +55,11 @@ function complete(turn: Turn): void {
 function errorDetail(error: unknown): string | undefined {
 	if (!error || typeof error !== "object") return undefined;
 	const shape = error as { message?: unknown; type?: unknown };
+
 	if (typeof shape.message === "string" && shape.message.trim()) return shape.message.trim();
+
 	if (typeof shape.type === "string") return shape.type;
+
 	return undefined;
 }
 
@@ -70,25 +75,31 @@ export function applyTurnEvent(turn: Turn, type: string, data: Record<string, un
 		case "session.execution.started":
 		case "session.step.started":
 			turn.started = true;
+
 			return;
 		case "session.execution.failed":
 			turn.error ??= errorDetail(data.error);
 			complete(turn);
+
 			return;
 		case "session.step.failed":
 			// The SDK puts the provider's own message here, which is the only
 			// place the real reason for a failure appears.
 			turn.error ??= errorDetail(data.error);
+
 			return;
 		case "session.execution.interrupted":
 			complete(turn);
+
 			return;
 		case "session.execution.succeeded":
 			complete(turn);
+
 			return;
 		case "session.idle":
 			// Only a session that actually started work is considered finished.
 			if (turn.started) complete(turn);
+
 			return;
 	}
 }

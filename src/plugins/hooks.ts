@@ -32,6 +32,7 @@ export async function appendToSystemPrompt(
 		await ctx.session.hook(name, async (event) => {
 			if (event.system.some((part) => part.text.includes(marker))) return;
 			const text = typeof block === "string" ? block : await block(event.sessionID);
+
 			if (!text) return;
 			event.system.push({ type: "text", text });
 		});

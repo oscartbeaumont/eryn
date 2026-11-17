@@ -9,6 +9,7 @@
  */
 
 const SHELL_BLOCK = /!`([^`]+)`/g;
+
 const PROTECTED_PREFIX = "!\u200b`";
 
 /** Matches a protected block and captures its shell source. */

@@ -28,9 +28,13 @@ import {
 export const MODEL_SCREEN_ID = `${SETUP_MENU_ID}:model`;
 
 const SELECT_ID = "setup:model";
+
 const MANUAL_ID = "setup:model:manual";
+
 const MODAL_ID = "setup:model:modal";
+
 const SEARCH_ID = "setup:model:search";
+
 const SEARCH_MODAL_ID = "setup:model:search:modal";
 
 /** The model select's entries, in catalogue order, with the current one preselected. */
@@ -91,10 +95,12 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const models = await connectedModels(request);
+
 	// A catalogue with connected models means a provider is in place, so the
 	// public install greeting has done its job. Dismiss it even if the admin
 	// wanders off before picking a model.
 	if (models.length) await request.ctx.dismissGreeting(request.guildId).catch(() => undefined);
+
 	if (!models.length) {
 		const status = await request.session.config().catch(() => undefined);
 		const connected = status?.providers.map((provider) => provider.integrationID) ?? [];
@@ -112,8 +118,10 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 				]),
 			],
 		);
+
 		return;
 	}
+
 	const status = await request.session.config().catch(() => undefined);
 	const current = status?.model;
 	await answer.reply(
@@ -142,9 +150,11 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 	const answer = responder(request);
 	await answer.defer();
 	const needle = query.trim().toLowerCase();
+
 	const matches = (await connectedModels(request)).filter(
 		(model) => !needle || `${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle),
 	);
+
 	if (!matches.length) {
 		await answer.reply(`No models match “${query.trim()}”. Try a shorter search.`, [
 			buttonRow([
@@ -152,8 +162,10 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 				actionButton("Back", request.id(MODEL_SCREEN_ID), 2),
 			]),
 		]);
+
 		return;
 	}
+
 	const current = (await request.session.config().catch(() => undefined))?.model;
 	await answer.reply(
 		matches.length >= MAX_SELECT_OPTIONS
@@ -178,18 +190,23 @@ async function searchModels(request: InteractionRequest, query: string): Promise
 async function selectModel(request: InteractionRequest, model: string): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
+
 	if (!model) {
 		await answer.reply("No model was selected.", [backRow(request, MODEL_SCREEN_ID)]);
+
 		return;
 	}
+
 	try {
 		await request.session.setModel(model);
 	} catch (error) {
 		await answer.reply(`Could not use \`${model}\`: ${describeError(error)}`, [
 			retryRow(request, request.id(MANUAL_ID), MODEL_SCREEN_ID),
 		]);
+
 		return;
 	}
+
 	await answer.reply(
 		[
 			`**Model set to \`${model}\`.**`,
@@ -219,6 +236,7 @@ export async function modelComponent(
 		case MANUAL_ID:
 			return await claim(request, "reply", () => responder(request).modal(modelModal(request)));
 	}
+
 	return false;
 }
 
@@ -234,5 +252,6 @@ export async function modelModalSubmit(
 		case MODAL_ID:
 			return await claim(request, "reply", () => selectModel(request, values.model?.trim() ?? ""));
 	}
+
 	return false;
 }

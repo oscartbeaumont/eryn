@@ -8,6 +8,7 @@
  */
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 const MAX_REDIRECTS = 5;
 
 function isLoopback(hostname: string): boolean {
@@ -38,6 +39,7 @@ export function isSecureUrl(url: URL): boolean {
 
 function assertSupported(url: URL, allowLoopback: boolean): void {
 	if (url.protocol === "https:") return;
+
 	if (allowLoopback && url.protocol === "http:" && isLoopback(url.hostname)) return;
 	throw new Error("A redirect pointed at an unsupported URL.");
 }
@@ -56,9 +58,11 @@ export async function fetchWithRedirects(
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
 		const response = await fetch(current, options);
 		const location = response.headers.get("location");
+
 		if (!REDIRECT_STATUSES.has(response.status) || !location) return response;
 
 		await response.body?.cancel().catch(() => undefined);
+
 		if (hop === MAX_REDIRECTS) throw new Error("Too many redirects.");
 
 		const next = new URL(location, current);
@@ -68,6 +72,7 @@ export async function fetchWithRedirects(
 		// 303 always becomes a GET. 301/302 do the same for non-GET/HEAD, which
 		// is what the fetch standard specifies.
 		const nonGet = options.method !== undefined && options.method !== "GET" && options.method !== "HEAD";
+
 		if (response.status === 303 || ((response.status === 301 || response.status === 302) && nonGet)) {
 			const headers = new Headers(options.headers);
 			headers.delete("content-type");

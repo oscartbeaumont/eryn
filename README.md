@@ -86,10 +86,12 @@ the policy matches, per server or per tool.
 
 Each link has an approval mode. `discord` posts the server's elicitation
 questions in the conversation, `browser` sends the admin to the server's own
-page, `agent` lets the model answer, and `off` declines them. By default Eryn
-only adds the routing parameter to servers that document it, such as Executor,
-so a server with a strict OAuth resource URI is left untouched; choosing a mode
-in the add dialog applies it explicitly.
+page, `agent` lets the model answer, and `off` declines them. The link is created
+on the mode the server's own URL asks for, or Discord when it names none, and the
+message that confirms the link offers the other modes as one click each;
+**Approvals** on the MCP screen changes it later. By default Eryn only adds the
+routing parameter to servers that document it, such as Executor, so a server with
+a strict OAuth resource URI is left untouched.
 
 A server that drives a browser, a desktop, or another machine is just an MCP
 server with those tools. Eryn calls them like any other tool; the work happens

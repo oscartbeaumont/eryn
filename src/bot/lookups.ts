@@ -28,11 +28,15 @@ export class DiscordLookups {
 	/** A channel or thread, cached. */
 	async channel(channelId: string): Promise<DiscordChannelRef | undefined> {
 		const cached = this.channels.get(channelId);
+
 		if (cached) return cached;
 		const channel = await this.rest.channel(channelId).catch(() => undefined);
+
 		if (!channel) return undefined;
+
 		if (this.channels.size > MAX_CACHED_CHANNELS) this.channels.clear();
 		this.channels.set(channelId, channel);
+
 		return channel;
 	}
 
@@ -55,6 +59,7 @@ export class DiscordLookups {
 	 */
 	remember(channel: DiscordChannel): DiscordChannelRef | undefined {
 		if (typeof channel.type !== "number") return undefined;
+
 		const ref: DiscordChannelRef = {
 			id: channel.id,
 			type: channel.type,
@@ -62,18 +67,24 @@ export class DiscordLookups {
 			...(channel.parent_id ? { parent_id: channel.parent_id } : {}),
 			...(channel.name ? { name: channel.name } : {}),
 		};
+
 		if (this.channels.size > MAX_CACHED_CHANNELS) this.channels.clear();
 		this.channels.set(ref.id, ref);
+
 		return ref;
 	}
 
 	/** A guild's name, from one cached listing. A failed listing is not cached. */
 	async guildName(guildId: string): Promise<string | undefined> {
 		const cached = this.guildNames.get(guildId);
+
 		if (cached) return cached;
 		const guilds = await this.rest.guilds().catch(() => undefined);
+
 		if (!guilds) return undefined;
+
 		for (const guild of guilds) this.guildNames.set(guild.id, guild.name);
+
 		return this.guildNames.get(guildId);
 	}
 
@@ -88,15 +99,20 @@ export class DiscordLookups {
 	 */
 	async botRoleMention(message: DiscordMessage, botUserId: string): Promise<string | undefined> {
 		const guildId = message.guild_id;
+
 		if (guildId === undefined) return undefined;
 		const roles = message.mention_roles ?? [];
+
 		if (!roles.length && !/<@&\d+>/.test(message.content ?? "")) return undefined;
 		const cached = this.botRoles.get(guildId);
+
 		if (cached) return cached;
 		const guildRoles = await this.rest.guildRoles(guildId).catch(() => undefined);
 		const role = guildRoles?.find((candidate) => candidate.tags?.bot_id === botUserId);
+
 		if (!role) return undefined;
 		this.botRoles.set(guildId, role.id);
+
 		return role.id;
 	}
 
@@ -115,13 +131,18 @@ export class DiscordLookups {
 	async botPermissions(guildId: string, botUserId: string | undefined): Promise<bigint | undefined> {
 		try {
 			const guild = (await this.rest.guilds()).find((entry) => entry.id === guildId);
+
 			if (guild?.permissions) return parsePermissions(guild.permissions);
+
 			if (!botUserId) return undefined;
+
 			const [roles, member] = await Promise.all([
 				this.rest.guildRoles(guildId),
 				this.rest.guildMember(guildId, botUserId),
 			]);
+
 			if (!member) return undefined;
+
 			return guildPermissions({
 				guildId,
 				userId: botUserId,
@@ -148,6 +169,7 @@ export class DiscordLookups {
 	): Promise<DiscordContext> {
 		const channel = invocation ?? conversation;
 		const guildName = await this.guildName(guildId);
+
 		return {
 			guild: guildName ? { id: guildId, name: guildName } : { id: guildId },
 			channel: channel.name ? { id: channel.id, name: channel.name } : { id: channel.id },

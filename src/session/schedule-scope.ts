@@ -62,6 +62,7 @@ export function defaultScheduleScope(input: {
 	now?: number;
 }): ScheduleScopeShape {
 	const now = input.now ?? Date.now();
+
 	return {
 		ownerId: input.ownerId,
 		scheduleIds: [input.scheduleId],
@@ -85,7 +86,9 @@ export function scopeAllows(
 	required: bigint,
 ): boolean {
 	const allowed = scope.channels[channelId];
+
 	if (!allowed) return false;
+
 	const known =
 		Permission.ViewChannel |
 		Permission.ReadMessageHistory |
@@ -95,19 +98,26 @@ export function scopeAllows(
 		Permission.ManageThreads |
 		Permission.CreatePublicThreads |
 		Permission.AddReactions;
+
 	if ((required & ~known) !== 0n) return false;
+
 	if ((required & Permission.ReadMessageHistory) !== 0n && !allowed.read) return false;
+
 	if (
 		(required & (Permission.SendMessages | Permission.SendMessagesInThreads)) !== 0n &&
 		!allowed.send
 	) {
 		return false;
 	}
+
 	if ((required & (Permission.ManageMessages | Permission.ManageThreads)) !== 0n && !allowed.manage) {
 		return false;
 	}
+
 	if ((required & Permission.CreatePublicThreads) !== 0n && allowed.createThread !== true) return false;
+
 	if ((required & Permission.AddReactions) !== 0n && allowed.react !== true) return false;
+
 	return true;
 }
 
@@ -123,7 +133,9 @@ export function scopeCoveredBy(
 ): boolean {
 	return Object.entries(scope.channels).every(([channelId, required]) => {
 		const have = actual[channelId];
+
 		if (!have) return false;
+
 		return (
 			(!required.read || have.read) &&
 			(!required.send || have.send) &&
@@ -158,6 +170,7 @@ export function canCreateSchedule(
 	authorId: string | undefined,
 ): boolean {
 	if (!authorId) return false;
+
 	return scope === undefined || scope.ownerId === authorId;
 }
 
@@ -169,6 +182,7 @@ export function addChannelToScope(
 	now = Date.now(),
 ): ScheduleScopeShape {
 	if (scope.channels[channelId]) return scope;
+
 	return {
 		...scope,
 		channels: { ...scope.channels, [channelId]: { ...capabilities } },
@@ -186,6 +200,7 @@ export function removeChannelFromScope(
 	if (channelId === conversationId || !scope.channels[channelId]) return scope;
 	const channels = { ...scope.channels };
 	delete channels[channelId];
+
 	return { ...scope, channels, updatedAt: now };
 }
 
@@ -196,6 +211,7 @@ export function addScheduleToScope(
 	now = Date.now(),
 ): ScheduleScopeShape {
 	if (scope.scheduleIds.includes(scheduleId)) return scope;
+
 	return { ...scope, scheduleIds: [...scope.scheduleIds, scheduleId], updatedAt: now };
 }
 

@@ -11,9 +11,13 @@ import { CONFIG_PATH, INSTRUCTIONS_PATH, COMMANDS_ROOT, SKILLS_ROOT } from "./lo
 export const SEED_VERSION = 4;
 
 export const DEFAULT_CONFIG_PATH = CONFIG_PATH;
+
 export const DEFAULT_AGENTS_PATH = INSTRUCTIONS_PATH;
+
 export const DEFAULT_DISCORD_SKILL_PATH = `${SKILLS_ROOT}/discord/SKILL.md`;
+
 export const DEFAULT_CONFIG_SKILL_PATH = `${SKILLS_ROOT}/config/SKILL.md`;
+
 export const DEFAULT_EXPLAIN_COMMAND_PATH = `${COMMANDS_ROOT}/explain.md`;
 
 export const DEFAULT_CONFIG = `{

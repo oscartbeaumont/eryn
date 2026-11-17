@@ -41,6 +41,7 @@ class GuildStoreImpl {
 
 	private requireSecret(): string {
 		if (!this.secret?.trim()) throw botError("ENCRYPTION_KEY is not configured, so credentials cannot be stored");
+
 		return this.secret;
 	}
 
@@ -54,7 +55,9 @@ class GuildStoreImpl {
 	): Promise<S["Type"] | undefined> {
 		if (!sealed) return undefined;
 		const plaintext = await decryptSecret(this.requireSecret(), sealed).catch(() => undefined);
+
 		if (plaintext === undefined) return undefined;
+
 		return Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(schema))(plaintext));
 	}
 
@@ -71,7 +74,9 @@ class GuildStoreImpl {
 		const entries = await this.storage.list<Sealed>({ prefix });
 		const values = await Promise.all([...entries].map(([key, sealed]) => read(key, sealed)));
 		const found: T[] = [];
+
 		for (const value of values) if (value !== undefined) found.push(value);
+
 		return found;
 	}
 
@@ -100,6 +105,7 @@ class GuildStoreImpl {
 
 	async providers(): Promise<ProviderConnection[]> {
 		const connections = await this.sealedList(KEYS.provider, ProviderConnectionSchema);
+
 		return connections.sort((a, b) => a.integrationID.localeCompare(b.integrationID));
 	}
 
@@ -118,19 +124,23 @@ class GuildStoreImpl {
 	 */
 	private async readLink(key: string, sealed: Sealed): Promise<McpLink | undefined> {
 		const link = await this.open(sealed, McpLinkSchema);
+
 		if (link?.kind !== "eryn") return link;
 		await this.storage.delete(key);
+
 		return undefined;
 	}
 
 	async links(): Promise<McpLink[]> {
 		const links = await this.readSealed(KEYS.link, (key, sealed) => this.readLink(key, sealed));
+
 		return links.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
 	async getLink(id: string): Promise<McpLink | undefined> {
 		const key = KEYS.link + id;
 		const sealed = await this.storage.get<Sealed>(key);
+
 		return sealed ? await this.readLink(key, sealed) : undefined;
 	}
 
@@ -144,6 +154,7 @@ class GuildStoreImpl {
 
 	async authAttempts(): Promise<PendingMcpAuth[]> {
 		const attempts = await this.sealedList(KEYS.mcpAuth, PendingMcpAuthSchema);
+
 		return attempts.sort((a, b) => a.createdAt - b.createdAt);
 	}
 
@@ -162,10 +173,13 @@ class GuildStoreImpl {
 	async profiles(): Promise<PolicyProfile[]> {
 		const entries = await this.storage.list<unknown>({ prefix: KEYS.policyProfile });
 		const profiles: PolicyProfile[] = [];
+
 		for (const value of entries.values()) {
 			const profile = Option.getOrUndefined(Schema.decodeUnknownOption(PolicyProfileSchema)(value));
+
 			if (profile) profiles.push(profile);
 		}
+
 		return profiles.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name));
 	}
 

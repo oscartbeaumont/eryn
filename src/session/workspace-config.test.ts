@@ -40,18 +40,23 @@ class MemoryStorage {
 	async delete(key: string | string[]): Promise<boolean> {
 		if (Array.isArray(key)) {
 			let deleted = false;
+
 			for (const entry of key) deleted = this.values.delete(entry) || deleted;
+
 			return deleted;
 		}
+
 		return this.values.delete(key);
 	}
 
 	async list<T>(options: { prefix?: string } = {}): Promise<Map<string, T>> {
 		const result = new Map<string, T>();
+
 		for (const [key, value] of this.values) {
 			if (options.prefix && !key.startsWith(options.prefix)) continue;
 			result.set(key, value as T);
 		}
+
 		return result;
 	}
 }
@@ -318,9 +323,11 @@ test("workspace skills register with their real guild paths", async () => {
 			content: "Prepare the release.",
 		},
 	]);
+
 	assert.ok(plugin);
 
 	const added: Array<Record<string, unknown>> = [];
+
 	const context = {
 		skill: {
 			transform: async (callback: (editor: { add: (skill: never) => void }) => void) => {
@@ -328,6 +335,7 @@ test("workspace skills register with their real guild paths", async () => {
 			},
 		},
 	};
+
 	await plugin!.setup(context as never);
 
 	assert.equal(added.length, 1);
@@ -342,6 +350,7 @@ test("workspace skills register with their real guild paths", async () => {
 
 test("an activated skill records its directory for relative reads", async () => {
 	const active = new Map<string, string>();
+
 	const plugin = workspaceSkillsPlugin(
 		[
 			{
@@ -353,6 +362,7 @@ test("an activated skill records its directory for relative reads", async () => 
 		],
 		active,
 	);
+
 	assert.ok(plugin);
 
 	const context = {
@@ -367,6 +377,7 @@ test("an activated skill records its directory for relative reads", async () => 
 			},
 		},
 	};
+
 	await plugin!.setup(context as never);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.equal(active.get("ses_1"), "/eryn/.opencode/skills/release");

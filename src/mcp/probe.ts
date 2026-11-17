@@ -23,6 +23,7 @@ import { externalFetch, isSecureUrl } from "../http";
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+
 const MAX_TOOL_PAGES = 10;
 
 export interface ProbeOptions {
@@ -55,15 +56,19 @@ class ChallengeSeen extends Error {
  */
 export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 	let endpoint: URL;
+
 	try {
 		endpoint = new URL(options.url);
 	} catch {
 		return failed("That URL is not valid.");
 	}
+
 	if (!isSecureUrl(endpoint)) return failed("An MCP server URL must use https.");
+
 	if (endpoint.username || endpoint.password) {
 		return failed("An MCP server URL must not contain a username or password.");
 	}
+
 	endpoint.hash = "";
 
 	const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
@@ -90,12 +95,14 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		// with a second, same-origin-only policy.
 		redirectPolicy: "follow",
 	});
+
 	const client = new Client({ name: "eryn", version: "1.0.0" }, { listMaxPages: MAX_TOOL_PAGES });
 
 	try {
 		await client.connect(transport);
 		const listing = await client.listTools();
 		const serverName = client.getServerVersion()?.name;
+
 		return {
 			ok: true,
 			tools: listing.tools.map(toolSummary),
@@ -103,8 +110,11 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		};
 	} catch (error) {
 		if (challenge) return challenge;
+
 		if (error instanceof ChallengeSeen) return failed("This server needs authorisation before it will talk.");
+
 		if (error instanceof SdkHttpError) return failed(`The server answered HTTP ${error.status}.`, error.status);
+
 		return failed(describeError(error));
 	} finally {
 		// A test should not leave a server holding a session it will never use.
@@ -119,6 +129,7 @@ function challengeFailure(response: Response, hasToken: boolean): ProbeFailure {
 	// A challenge may list several schemes; only Bearer can carry a sign-in or a
 	// token, so the others are reported as a plain refusal.
 	const bearer = !header || /\bbearer\b/i.test(header);
+
 	return {
 		ok: false,
 		tools: [],

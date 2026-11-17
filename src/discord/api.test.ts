@@ -21,11 +21,13 @@ function captureFetch(captured: Captured): () => void {
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		captured.url = String(input);
 		captured.init = init;
+
 		return new Response(JSON.stringify({ id: "42" }), {
 			status: 200,
 			headers: { "content-type": "application/json" },
 		});
 	}) as typeof fetch;
+
 	return () => {
 		globalThis.fetch = original;
 	};
@@ -34,6 +36,7 @@ function captureFetch(captured: Captured): () => void {
 test("a message without files is sent as JSON", async () => {
 	const captured: Captured = {};
 	const restore = captureFetch(captured);
+
 	try {
 		const rest = discordRest("token");
 		const sent = await rest.sendMessage("123", "hello");
@@ -50,6 +53,7 @@ test("a message without files is sent as JSON", async () => {
 test("a message with files is uploaded as multipart form data", async () => {
 	const captured: Captured = {};
 	const restore = captureFetch(captured);
+
 	try {
 		const rest = discordRest("token");
 		await rest.sendMessage("123", "the breakdown", {

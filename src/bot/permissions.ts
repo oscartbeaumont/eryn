@@ -18,6 +18,7 @@ export function missingPermissions(current: bigint): bigint {
 /** The human names of the permissions the bot lacks. */
 export function missingPermissionNames(current: bigint): string[] {
 	const missing = missingPermissions(current);
+
 	return BOT_PERMISSION_LABELS.filter(([bit]) => (missing & bit) !== 0n).map(([, label]) => label);
 }
 

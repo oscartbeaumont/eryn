@@ -66,13 +66,16 @@ export async function createHost(options: HostOptions): Promise<HostInterface> {
 	// because plugins see the client services rather than Core's.
 	let schedule: Schedule.Interface | undefined;
 	let schedulesStarted = false;
+
 	const scheduleService = async () => {
 		if (!schedule) {
 			const services = await Effect.runPromise(host.runtime.contextEffect);
 			schedule = Context.get(services, Schedule.Service);
 		}
+
 		return schedule;
 	};
+
 	const startSchedules = async () => {
 		if (schedulesStarted) return;
 		const service = await scheduleService();
@@ -81,15 +84,19 @@ export async function createHost(options: HostOptions): Promise<HostInterface> {
 		// stay retryable, or the host answers "running" with no runner behind it.
 		schedulesStarted = true;
 	};
+
 	const ensureSchedules = async () => {
 		if (schedulesStarted) return true;
 		const active = await host.runtime.runPromise((await scheduleService()).list());
+
 		if (!active.some((entry) => entry.status === "active")) return false;
 		await startSchedules();
+
 		return true;
 	};
 
 	const client = OpenCode.make({ baseUrl: "http://opencode.local", fetch: host.fetch });
+
 	const register = (plugin: PromisePlugin.Plugin) =>
 		host.runtime.runPromise(host.plugins.register(fromPromise(plugin)));
 

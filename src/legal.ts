@@ -7,6 +7,7 @@
  */
 
 const CONTACT = "oscar@otbeaumont.me";
+
 const UPDATED = "3 November 2026";
 
 function shell(title: string, body: string): Response {

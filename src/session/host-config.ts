@@ -64,6 +64,7 @@ const INTEGRATION_PROVIDERS: Record<string, readonly string[]> = {
 /** POST one internal body to the bot gateway, throwing when it refuses. */
 async function postToGateway(env: Env, path: string, body: Record<string, unknown>): Promise<void> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
+
 	const response = await stub.fetch(
 		`https://bot.internal${path}`,
 		withDeploy(env, {
@@ -72,6 +73,7 @@ async function postToGateway(env: Env, path: string, body: Record<string, unknow
 			body: JSON.stringify(body),
 		}),
 	);
+
 	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
 }
 
@@ -133,15 +135,18 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	// origin the Worker is served from. The same origin is the "hostname" the
 	// agent puts in its attribution footer.
 	const origin = await resolveOrigin(options.env);
+
 	if (!origin) {
 		throw new Error(
 			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
 		);
 	}
+
 	const hostname = new URL(origin).hostname;
 
 	// Every plugin is the promise API, which is what this host accepts.
 	const activeSkills = new Map<string, string>();
+
 	const plugins = [
 		workspacePlugin(storage, activeSkills),
 		commandShellPlugin(storage),
@@ -157,16 +162,22 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			onScheduleCreated,
 		),
 	];
+
 	const skills = workspaceSkillsPlugin(workspace.skills, activeSkills);
+
 	if (skills) plugins.push(skills);
 	const mcp = guildMcpPlugin(config.links);
+
 	if (mcp) plugins.push(mcp);
 	const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
+
 	if (guidance) plugins.push(guidance);
 
 	const catalogueProviders = new Set(config.connections.map((connection) => connection.integrationID));
+
 	for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
 		if (!catalogueProviders.has(integrationID)) continue;
+
 		for (const providerID of providerIDs) catalogueProviders.add(providerID);
 	}
 
@@ -196,10 +207,12 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	// after each restart. Reuse the credential for this key, and clear out
 	// the duplicates earlier builds left behind.
 	const credentials = await host.credential.list().catch(() => []);
+
 	for (const connection of config.connections) {
 		if (!connection.key) continue;
 		const owned = credentials.filter((entry) => entry.integrationID === connection.integrationID);
 		const existing = owned.find((entry) => entry.value.type === "key" && entry.value.key === connection.key);
+
 		try {
 			if (!existing) {
 				await host.integration.connect.key({
@@ -209,9 +222,12 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 				});
 				continue;
 			}
+
 			if (!existing.active) await host.credential.activate({ credentialID: existing.id });
+
 			for (const stale of owned) {
 				if (stale.id === existing.id) continue;
+
 				if (stale.value.type !== "key" || stale.value.key !== connection.key) continue;
 				await host.credential.remove({ credentialID: stale.id }).catch(() => undefined);
 			}
@@ -219,5 +235,6 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			log("session", `could not connect ${connection.integrationID}: ${describeError(error)}`);
 		}
 	}
+
 	return host;
 }

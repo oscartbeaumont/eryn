@@ -21,11 +21,13 @@ import type { DiscordAttachment, DiscordUser } from "./api";
 import type { DiscordComponent } from "./components";
 
 const GATEWAY_URL = "wss://gateway.discord.gg/";
+
 /**
  * Discord allows one IDENTIFY per five seconds per shard bucket. Starting the
  * shards apart keeps a restart inside that budget without tracking the bucket.
  */
 const IDENTIFY_SPACING_MS = 5_000;
+
 /**
  * GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT.
  *
@@ -33,7 +35,9 @@ const IDENTIFY_SPACING_MS = 5_000;
  * MESSAGE_CONTENT is privileged and must also be enabled in the portal.
  */
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
+
 const RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
+
 /**
  * Cloudflare stops pinning a Durable Object 15 minutes after an outbound
  * connection opens, and evicts it shortly after if nothing else pins it.
@@ -44,14 +48,17 @@ const RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
  * drops every message until the next wake.
  */
 const CONNECTION_RECYCLE_MS = 6 * 60_000;
+
 /** Discord closes with these codes when the bot configuration itself is wrong. */
 const FATAL_CLOSE_CODES = new Set([4004, 4012, 4013, 4014]);
+
 /**
  * Discord closes with these codes when this connection's shard layout is
  * wrong. Reconnecting the same way would fail again, so the owner has to
  * rebuild the shards from Discord's current recommendation.
  */
 const RESHARD_CLOSE_CODES = new Set([4010, 4011]);
+
 /** Discord closes with these codes when the session cannot be resumed, so re-identify instead. */
 const SESSION_RESET_CLOSE_CODES = new Set([4007, 4009]);
 
@@ -168,16 +175,19 @@ type DiscordEventHandler = (data: unknown, handlers: DiscordSocketHandlers) => v
 /** A dispatch payload that is a channel, or `undefined` when it is not one. */
 function asChannel(data: unknown): DiscordChannel | undefined {
 	const channel = data as DiscordChannel | undefined;
+
 	return channel && typeof channel.id === "string" ? channel : undefined;
 }
 
 function dispatchChannelUpdate(data: unknown, handlers: DiscordSocketHandlers): void {
 	const channel = asChannel(data);
+
 	if (channel) handlers.onChannelUpdate(channel);
 }
 
 function dispatchChannelDelete(data: unknown, handlers: DiscordSocketHandlers): void {
 	const channel = asChannel(data);
+
 	if (channel) handlers.onChannelDelete(channel);
 }
 
@@ -188,26 +198,31 @@ function dispatchChannelDelete(data: unknown, handlers: DiscordSocketHandlers): 
 const DISCORD_EVENTS: Record<string, DiscordEventHandler> = {
 	MESSAGE_CREATE(data, handlers) {
 		const message = data as DiscordMessage | undefined;
+
 		if (message && typeof message.id === "string" && typeof message.channel_id === "string") {
 			handlers.onMessage(message);
 		}
 	},
 	INTERACTION_CREATE(data, handlers) {
 		const interaction = data as DiscordInteraction | undefined;
+
 		if (interaction && typeof interaction.id === "string" && typeof interaction.token === "string") {
 			handlers.onInteraction(interaction);
 		}
 	},
 	GUILD_CREATE(data, handlers) {
 		const guild = data as DiscordGuildCreate | undefined;
+
 		if (guild && typeof guild.id === "string") handlers.onGuild(guild);
 	},
 	GUILD_UPDATE(data, handlers) {
 		const guild = data as DiscordGuildCreate | undefined;
+
 		if (guild && typeof guild.id === "string") handlers.onGuildUpdate(guild);
 	},
 	THREAD_CREATE(data, handlers) {
 		const thread = data as DiscordChannel | undefined;
+
 		if (thread && typeof thread.id === "string") handlers.onThreadCreate(thread);
 	},
 	// A thread is a channel: Discord names a thread update THREAD_UPDATE, but
@@ -274,38 +289,48 @@ class DiscordShard {
 	 */
 	ensure(startAt = 0): void {
 		if (this.disposed || this.broken || this.reshard) return;
+
 		if (this.socket || this.reconnectTimer || this.startTimer) return;
 		const wait = startAt - Date.now();
+
 		if (wait > 0) {
 			this.startTimer = setTimeout(() => {
 				this.startTimer = undefined;
 				this.connect();
 			}, wait);
+
 			return;
 		}
+
 		this.connect();
 	}
 
 	/** Drop the current socket and resume the session on a fresh one. */
 	recycle(): void {
 		if (this.disposed || this.broken || this.reshard) return;
+
 		if (!this.socket) {
 			this.ensure();
+
 			return;
 		}
+
 		this.reconnect("connection refresh");
 	}
 
 	stop(): void {
 		this.disposed = true;
 		this.stopHeartbeat();
+
 		for (const timer of [this.reconnectTimer, this.startTimer]) {
 			if (timer !== undefined) clearTimeout(timer);
 		}
+
 		this.reconnectTimer = undefined;
 		this.startTimer = undefined;
 		const socket = this.socket;
 		this.socket = undefined;
+
 		try {
 			socket?.close(1000, "eryn shutting down");
 		} catch {
@@ -327,6 +352,7 @@ class DiscordShard {
 		this.awaitingAck = 0;
 
 		let socket: WebSocket;
+
 		try {
 			const query = new URLSearchParams({
 				v: "10",
@@ -334,11 +360,14 @@ class DiscordShard {
 				shard: String(this.shard.index),
 				num_shards: String(this.shard.count),
 			});
+
 			socket = new WebSocket(`${GATEWAY_URL}?${query}`);
 		} catch (error) {
 			this.reconnect(`connect failed (${describeError(error)})`);
+
 			return;
 		}
+
 		this.socket = socket;
 
 		socket.addEventListener("open", () => {
@@ -353,14 +382,17 @@ class DiscordShard {
 		socket.addEventListener("close", (event) => {
 			if (this.socket !== socket) return;
 			this.socket = undefined;
+
 			if (RESHARD_CLOSE_CODES.has(event.code)) {
 				this.reshard = true;
 				this.stopHeartbeat();
 				this.log(
 					this.say(`gateway closed with ${event.code}; Discord says the shard count is wrong, so it has to be rebuilt.`),
 				);
+
 				return;
 			}
+
 			if (FATAL_CLOSE_CODES.has(event.code)) {
 				this.broken = true;
 				this.stopHeartbeat();
@@ -370,32 +402,40 @@ class DiscordShard {
 							"Check the bot token, that the bot is in the guild, and that the Message Content intent is enabled.",
 					),
 				);
+
 				return;
 			}
+
 			if (SESSION_RESET_CLOSE_CODES.has(event.code)) {
 				this.session = undefined;
 				this.sequence = null;
 			}
+
 			this.reconnect(`socket closed (${event.code})`);
 		});
 	}
 
 	private receive(event: MessageEvent): void {
 		const raw = event.data;
+
 		if (typeof raw !== "string") return;
 
 		let payload: GatewayPayload;
+
 		try {
 			payload = JSON.parse(raw) as GatewayPayload;
 		} catch {
 			this.log(this.say("gateway sent unreadable JSON"));
+
 			return;
 		}
 
 		switch (payload.op) {
 			case 10: {
 				const interval = (payload.d as { heartbeat_interval?: unknown } | undefined)?.heartbeat_interval;
+
 				if (typeof interval === "number" && interval > 0) this.intervalMs = Math.max(5_000, interval);
+
 				if (this.session) {
 					this.send({ op: 6, d: { token: this.token, session_id: this.session, seq: this.sequence ?? 0 } });
 				} else {
@@ -409,9 +449,11 @@ class DiscordShard {
 						},
 					});
 				}
+
 				this.startHeartbeat();
 				break;
 			}
+
 			case 11:
 				this.awaitingAck = 0;
 				break;
@@ -423,17 +465,22 @@ class DiscordShard {
 				break;
 			case 9: {
 				const resumable = payload.d === true;
+
 				if (!resumable) {
 					this.session = undefined;
 					this.sequence = null;
 				}
+
 				this.reconnect(resumable ? "invalid session, resuming" : "invalid session, re-identifying");
 				break;
 			}
+
 			case 0: {
 				if (typeof payload.s === "number") this.sequence = payload.s;
+
 				if (payload.t === "READY") {
 					const session = (payload.d as { session_id?: unknown } | undefined)?.session_id;
+
 					if (typeof session === "string") this.session = session;
 					this.attempt = 0;
 					this.log(this.say("gateway connected"));
@@ -443,8 +490,10 @@ class DiscordShard {
 				} else if (payload.t) {
 					DISCORD_EVENTS[payload.t]?.(payload.d, this.handlers);
 				}
+
 				break;
 			}
+
 			default:
 				break;
 		}
@@ -458,6 +507,7 @@ class DiscordShard {
 
 	private startHeartbeat(): void {
 		this.stopHeartbeat();
+
 		const beat = () => {
 			// Discord expects each heartbeat to be acknowledged before the next
 			// one. Checking before sending is what makes that true: checking after
@@ -465,11 +515,14 @@ class DiscordShard {
 			// arrived, and would reconnect every healthy socket.
 			if (this.awaitingAck >= 1) {
 				this.reconnect("heartbeat was not acknowledged");
+
 				return;
 			}
+
 			this.sendHeartbeat();
 			this.heartbeat = setTimeout(beat, this.intervalMs);
 		};
+
 		// Discord expects the first heartbeat after a jittered fraction of the interval.
 		this.heartbeat = setTimeout(beat, Math.max(1_000, this.intervalMs * (0.9 + Math.random() * 0.1)));
 	}
@@ -485,11 +538,13 @@ class DiscordShard {
 		this.stopHeartbeat();
 		const socket = this.socket;
 		this.socket = undefined;
+
 		try {
 			socket?.close(4000, reason.slice(0, 100));
 		} catch {
 			// The socket is already gone.
 		}
+
 		if (this.reconnectTimer !== undefined) return;
 
 		const delay = RECONNECT_DELAYS[Math.min(this.attempt, RECONNECT_DELAYS.length - 1)] ?? 60_000;
@@ -503,7 +558,9 @@ class DiscordShard {
 
 	private send(payload: unknown): void {
 		const socket = this.socket;
+
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
 		try {
 			socket.send(JSON.stringify(payload));
 		} catch (error) {
@@ -570,6 +627,7 @@ export class DiscordSocket {
 	/** Drop the stale shards and resume them on fresh connections. */
 	recycle(): void {
 		if (this.disposed) return;
+
 		for (const shard of this.shards) {
 			if (shard.stale) shard.recycle();
 		}
@@ -577,6 +635,7 @@ export class DiscordSocket {
 
 	stop(): void {
 		this.disposed = true;
+
 		for (const shard of this.shards) shard.stop();
 	}
 }
@@ -584,11 +643,13 @@ export class DiscordSocket {
 /** The component payload a modal submit carries, flattened to `custom_id -> value`. */
 export function modalValues(interaction: DiscordInteraction): Record<string, string> {
 	const values: Record<string, string> = {};
+
 	for (const row of interaction.data?.components ?? []) {
 		for (const component of row.components ?? []) {
 			if (typeof component.custom_id !== "string") continue;
 			values[component.custom_id] = component.value ?? component.values?.[0] ?? "";
 		}
 	}
+
 	return values;
 }

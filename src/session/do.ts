@@ -29,8 +29,10 @@ import { workspaceSignature } from "./workspace-config";
 
 /** Keep a warm host briefly after the last request, then let the object hibernate. */
 const HOST_IDLE_MS = 5 * 60_000;
+
 /** How often to wake while a turn or schedule is still running. */
 const BUSY_POLL_MS = 20_000;
+
 /** How soon to try a schedule that is already due. */
 const SCHEDULE_SOON_MS = 5_000;
 
@@ -77,11 +79,14 @@ export class BotSession extends DurableObject<Env> {
 		// a restart is already armed must not be aborted in the moment before it
 		// is counted, or the work it carries is lost with no error.
 		this.inFlight += 1;
+
 		try {
 			await this.ensureCurrentVersion(request);
+
 			return await this.router(request);
 		} catch (error) {
 			log("session", `internal route failed: ${describeError(error)}`);
+
 			return json({ error: describeError(error) }, 500);
 		} finally {
 			this.inFlight -= 1;
@@ -109,17 +114,21 @@ export class BotSession extends DurableObject<Env> {
 				// A turn is still running. Restarting now would drop the reply, so wait
 				// for it to finish and check again.
 				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+
 				return;
 			}
+
 			// Retry the alarm: the replacement object starts with no timers, and a
 			// schedule that was armed before the deploy must still be woken. The
 			// stored deploy version is already current, so this cannot loop.
 			this.ctx.abort("deploy changed", { retryAlarm: true });
+
 			return;
 		}
 
 		const now = Date.now();
 		const due = this.scheduleDueAt();
+
 		if (due !== null && due <= now + 1_000) {
 			// `runScheduleTick` leaves its own short follow-up alarm so the turn it
 			// admitted has time to start. If the tick itself fails there is no
@@ -130,6 +139,7 @@ export class BotSession extends DurableObject<Env> {
 				await this.ctx.storage.setAlarm(Date.now() + BUSY_POLL_MS).catch(() => undefined);
 			});
 			this.lastActivityAt = Date.now();
+
 			return;
 		}
 
@@ -138,6 +148,7 @@ export class BotSession extends DurableObject<Env> {
 			// is what lets the object hibernate between conversations.
 			await this.agent.close();
 		}
+
 		await this.armAlarm();
 	}
 
@@ -157,6 +168,7 @@ export class BotSession extends DurableObject<Env> {
 			const row = this.ctx.storage.sql
 				.exec("SELECT MIN(next_due_at) AS due FROM schedule WHERE status = 'active' AND next_due_at IS NOT NULL")
 				.one() as { due: number | null };
+
 			return typeof row.due === "number" ? row.due : null;
 		} catch {
 			// The table only exists once a session has had schedules enabled.
@@ -167,11 +179,13 @@ export class BotSession extends DurableObject<Env> {
 	/** Wake the host so its schedule runner fires what is due. */
 	private async runScheduleTick(): Promise<void> {
 		const config = await this.loadConfig(true);
+
 		if (config.connections.length === 0) {
 			// Nothing can run the schedule. Leave no alarm: the next provider
 			// change is a request, and its `armAlarm` retries the due schedule.
 			return;
 		}
+
 		// A fired schedule turns into a normal Session turn, which runs after this
 		// request returns. Keep a follow-up alarm in case the object is evicted
 		// before that turn settles; the next boot resumes a suspended Session.
@@ -196,6 +210,7 @@ export class BotSession extends DurableObject<Env> {
 					    OR (time_busy IS NOT NULL AND (time_idle IS NULL OR time_busy > time_idle))`,
 				)
 				.one() as { busy: number };
+
 			return Number(row.busy) > 0;
 		} catch {
 			return false;
@@ -214,15 +229,20 @@ export class BotSession extends DurableObject<Env> {
 		const now = Date.now();
 		const candidates: number[] = [];
 		const due = this.scheduleDueAt();
+
 		if (due !== null) candidates.push(Math.max(due, now + SCHEDULE_SOON_MS));
 		const busy = this.busy();
+
 		if (busy) candidates.push(now + BUSY_POLL_MS);
+
 		if (this.agent.hasHost()) candidates.push(this.lastActivityAt + HOST_IDLE_MS);
 
 		if (candidates.length === 0) {
 			await this.ctx.storage.deleteAlarm().catch(() => undefined);
+
 			return;
 		}
+
 		const at = Math.min(...candidates);
 		await this.ctx.storage.setAlarm(Math.max(at, now + 1_000));
 	}
@@ -236,6 +256,7 @@ export class BotSession extends DurableObject<Env> {
 		// Seed before signing so a fresh guild's first host build and the
 		// signature it is compared against agree.
 		await seedWorkspace(this.ctx.storage);
+
 		return {
 			connections,
 			model: settings.model,
@@ -255,13 +276,16 @@ export class BotSession extends DurableObject<Env> {
 	private async reconcileModel(config: HostConfig): Promise<HostConfig> {
 		try {
 			const model = await this.agent.resolveModel(config);
+
 			if (model === config.model) return config;
 			const settings = await this.store.settings();
 			await this.store.putSettings({ ...settings, model, updatedAt: Date.now() });
 			log("session", `using ${model} instead of the unavailable ${config.model}`);
+
 			return { ...config, model };
 		} catch (error) {
 			log("session", `could not reconcile the model: ${describeError(error)}`);
+
 			return config;
 		}
 	}

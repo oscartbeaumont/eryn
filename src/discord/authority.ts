@@ -22,14 +22,18 @@ import {
 
 /** How long the guild's roles and owner are trusted. These change rarely. */
 const GUILD_TTL_MS = 5 * 60_000;
+
 /**
  * How long a member's roles are trusted. A demotion should take effect within
  * seconds, not minutes, so this is deliberately short.
  */
 const MEMBER_TTL_MS = 30_000;
+
 /** Channel overwrites and thread membership change about as often as membership. */
 const CHANNEL_TTL_MS = 30_000;
+
 const THREAD_MEMBER_TTL_MS = 30_000;
+
 /** A failed lookup is retried soon, but not on every tool call. */
 const FAILURE_TTL_MS = 5_000;
 
@@ -65,20 +69,26 @@ export class DiscordAuthority {
 	private async guildPermissions(): Promise<GuildPermissions | undefined> {
 		const now = Date.now();
 		const cached = this.guild;
+
 		if (this.fresh(cached, now)) return cached.value;
+
 		try {
 			const [roles, info] = await Promise.all([
 				this.rest.guildRoles(this.guildId),
 				this.rest.guildInfo(this.guildId),
 			]);
+
 			const value: GuildPermissions = {
 				roles,
 				...(info?.ownerId ? { ownerId: info.ownerId } : {}),
 			};
+
 			this.guild = { value, expiresAt: now + GUILD_TTL_MS };
+
 			return value;
 		} catch {
 			this.guild = { value: undefined, expiresAt: now + FAILURE_TTL_MS };
+
 			return undefined;
 		}
 	}
@@ -86,7 +96,9 @@ export class DiscordAuthority {
 	private async memberRoles(userId: string): Promise<readonly string[] | undefined> {
 		const now = Date.now();
 		const cached = this.members.get(userId);
+
 		if (this.fresh(cached, now)) return cached.value;
+
 		try {
 			const member = await this.rest.guildMember(this.guildId, userId);
 			// Undefined means Discord said this user is not a member; there is
@@ -95,9 +107,11 @@ export class DiscordAuthority {
 				value: member?.roles,
 				expiresAt: now + (member ? MEMBER_TTL_MS : FAILURE_TTL_MS),
 			});
+
 			return member?.roles;
 		} catch {
 			this.members.set(userId, { value: undefined, expiresAt: now + FAILURE_TTL_MS });
+
 			return undefined;
 		}
 	}
@@ -105,16 +119,20 @@ export class DiscordAuthority {
 	private async channelInfo(channelId: string): Promise<DiscordChannelRef | undefined> {
 		const now = Date.now();
 		const cached = this.channels.get(channelId);
+
 		if (this.fresh(cached, now)) return cached.value;
+
 		try {
 			const channel = await this.rest.channel(channelId);
 			this.channels.set(channelId, {
 				value: channel,
 				expiresAt: now + (channel ? CHANNEL_TTL_MS : FAILURE_TTL_MS),
 			});
+
 			return channel;
 		} catch {
 			this.channels.set(channelId, { value: undefined, expiresAt: now + FAILURE_TTL_MS });
+
 			return undefined;
 		}
 	}
@@ -124,10 +142,14 @@ export class DiscordAuthority {
 		channelId: string,
 	): Promise<{ channel: DiscordChannelRef; parent?: DiscordChannelRef } | undefined> {
 		const channel = await this.channelInfo(channelId);
+
 		if (!channel) return undefined;
+
 		if (!THREAD_TYPES.has(channel.type) || !channel.parent_id) return { channel };
 		const parent = await this.channelInfo(channel.parent_id);
+
 		if (!parent) return undefined;
+
 		return { channel, parent };
 	}
 
@@ -135,14 +157,17 @@ export class DiscordAuthority {
 		const key = `${threadId}:${userId}`;
 		const now = Date.now();
 		const cached = this.threadMembers.get(key);
+
 		if (this.fresh(cached, now)) return cached.value;
 		// A failure is not a "no": ask once more, then deny this call without
 		// caching the answer, so a transient outage cannot lock a real thread
 		// member out after Discord recovers.
 		const first = await this.rest.isThreadMember(threadId, userId);
 		const member = first === undefined ? await this.rest.isThreadMember(threadId, userId) : first;
+
 		if (member === undefined) return false;
 		this.threadMembers.set(key, { value: member, expiresAt: now + THREAD_MEMBER_TTL_MS });
+
 		return member;
 	}
 
@@ -154,9 +179,12 @@ export class DiscordAuthority {
 				this.guildPermissions(),
 				this.channelAndParent(channelId),
 			]);
+
 			if (!member || !guild || !found) return false;
+
 			const isThreadMember =
 				found.channel.type === 12 ? await this.threadMember(channelId, userId) : false;
+
 			const permissions = effectivePermissions({
 				guildId: this.guildId,
 				...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
@@ -167,6 +195,7 @@ export class DiscordAuthority {
 				...(found.parent ? { parent: found.parent } : {}),
 				isThreadMember,
 			});
+
 			return hasPermission(permissions, required);
 		} catch {
 			return false;
@@ -177,7 +206,9 @@ export class DiscordAuthority {
 	async canManageGuild(userId: string): Promise<boolean> {
 		try {
 			const [member, guild] = await Promise.all([this.memberRoles(userId), this.guildPermissions()]);
+
 			if (!member || !guild) return false;
+
 			const permissions = guildPermissions({
 				guildId: this.guildId,
 				...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
@@ -185,6 +216,7 @@ export class DiscordAuthority {
 				roles: guild.roles,
 				memberRoleIds: member,
 			});
+
 			return hasPermission(permissions, Permission.ManageGuild);
 		} catch {
 			return false;
@@ -207,11 +239,13 @@ export class DiscordAuthority {
 		react: boolean;
 	}> {
 		const thread = THREAD_TYPES.has(channel.type);
+
 		const sendInThreads = await this.can(
 			userId,
 			channel.id,
 			Permission.ViewChannel | Permission.SendMessagesInThreads,
 		);
+
 		// The scope has one management boolean for both moderation bits. Gate it
 		// on both so enabling it can never grant a bit the person lacks; a
 		// person with only one of the two loses the other, never gains it.
@@ -220,11 +254,13 @@ export class DiscordAuthority {
 			channel.id,
 			Permission.ViewChannel | Permission.ManageMessages,
 		);
+
 		const manageThreads = await this.can(
 			userId,
 			channel.id,
 			Permission.ViewChannel | Permission.ManageThreads,
 		);
+
 		return {
 			read: await this.can(
 				userId,
@@ -265,24 +301,31 @@ export class DiscordAuthority {
 	): Promise<DiscordChannelRef[]> {
 		try {
 			const [member, guild] = await Promise.all([this.memberRoles(userId), this.guildPermissions()]);
+
 			if (!member || !guild) return [];
 			// The caller has already listed these channels, so their metadata is
 			// fresher than a per-channel fetch and saves parents being re-read.
 			const now = Date.now();
+
 			for (const channel of channels) {
 				this.channels.set(channel.id, { value: channel, expiresAt: now + CHANNEL_TTL_MS });
 			}
+
 			const visible: DiscordChannelRef[] = [];
+
 			for (const channel of channels) {
 				const parent =
 					THREAD_TYPES.has(channel.type) && channel.parent_id
 						? await this.channelInfo(channel.parent_id)
 						: undefined;
+
 				// A thread cannot be evaluated without its parent: the parent holds
 				// the overwrites when the thread has none of its own.
 				if (THREAD_TYPES.has(channel.type) && channel.parent_id && !parent) continue;
+
 				const isThreadMember =
 					channel.type === 12 ? await this.threadMember(channel.id, userId) : false;
+
 				const permissions = effectivePermissions({
 					guildId: this.guildId,
 					...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
@@ -293,8 +336,10 @@ export class DiscordAuthority {
 					...(parent ? { parent } : {}),
 					isThreadMember,
 				});
+
 				if (hasPermission(permissions, Permission.ViewChannel)) visible.push(channel);
 			}
+
 			return visible;
 		} catch {
 			return [];

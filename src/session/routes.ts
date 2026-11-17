@@ -16,6 +16,7 @@ import { describeError } from "../errors";
 import { json } from "../http";
 import { describeTools } from "../mcp/describe";
 import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "../mcp/links";
+import { applyElicitation } from "../mcp/elicitation";
 import { AUTH_TTL_MS } from "../mcp/paths";
 import { probeServer } from "../mcp/probe";
 import type { GuildAgentShape } from "./agent";
@@ -37,6 +38,7 @@ import {
 	InterruptRequestSchema,
 	InteractRequestSchema,
 	LinkAddRequestSchema,
+	LinkElicitationRequestSchema,
 	LinkRemoveRequestSchema,
 	McpAuthAttemptRequestSchema,
 	McpAuthCompleteRequestSchema,
@@ -72,6 +74,7 @@ export interface RouteContext {
 /** The secrets a link carries are the bearer and, for OAuth, the refresh pair. */
 function publicLink(link: McpLink): PublicLink {
 	const { token: _token, oauth: _oauth, ...rest } = link;
+
 	return rest;
 }
 
@@ -106,7 +109,9 @@ interface Route {
 }
 
 const internalFailure = (error: unknown) => json({ error: describeError(error) }, 500);
+
 const badGateway = (error: unknown) => json({ error: describeError(error) }, 502);
+
 const probeFailure = (error: unknown) => json({ ok: false, tools: [], error: describeError(error) }, 502);
 
 /** A route whose body names the guild, so it must match this object. */
@@ -138,6 +143,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		await store.clearPendingOAuth();
 		const next = await reconcileModel(await loadConfig());
 		await metrics.capture("provider_connected", { provider: integrationID, first: firstProvider });
+
 		if (firstProvider) await metrics.capture("setup_completed", { provider: integrationID, model: next.model });
 	};
 
@@ -148,6 +154,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			// A status read does not need a live token; the turn does, and
 			// refreshing here would put network calls in front of a reply.
 			const links = await store.links();
+
 			return json({
 				ready: connections.length > 0,
 				model: settings.model,
@@ -176,6 +183,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			async (body) => {
 				const config = await loadConfig();
 				const firstProvider = config.connections.length === 0;
+
 				// A key connection is a single step: replay the key, then record
 				// the connection so the next turn rebuilds the host with it.
 				if (body.key !== undefined && body.action === undefined) {
@@ -183,20 +191,26 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 					await store.putProvider({ integrationID: body.integrationID, method: body.methodID ?? "key", key: body.key });
 					const next = await reconcileModel(await loadConfig());
 					await metrics.capture("provider_connected", { provider: body.integrationID, first: firstProvider });
+
 					if (firstProvider) {
 						await metrics.capture("setup_completed", { provider: body.integrationID, model: next.model });
 					}
+
 					return json({ ok: true });
 				}
+
 				const action = body.action ?? "start";
+
 				if (action === "start") {
 					const result = await agent.oauthConnect(config, body.integrationID, body.methodID ?? "", body.answer ?? {});
+
 					if ("error" in result) return json({ error: result.error }, 400);
 					await store.putPendingOAuth({
 						integrationID: body.integrationID,
 						attemptID: result.attemptID,
 						createdAt: Date.now(),
 					});
+
 					return json({
 						url: result.url,
 						attemptID: result.attemptID,
@@ -204,25 +218,35 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 						instructions: result.instructions,
 					});
 				}
+
 				// A device-code flow finishes from a modal that only carries the
 				// provider id, so the attempt is read back from storage.
 				const pending = await store.pendingOAuth();
+
 				const attemptID =
 					body.attemptID ??
 					(pending && pending.integrationID === body.integrationID ? pending.attemptID : undefined);
+
 				if (!attemptID) return json({ error: "Start the sign-in again." }, 400);
+
 				if (action === "status") {
 					const status = await agent.oauthStatus(config, body.integrationID, attemptID);
+
 					if (status.status === "complete") await recordOAuth(body.integrationID, firstProvider);
+
 					return json({ status });
 				}
+
 				if (action === "complete") {
 					await agent.oauthComplete(config, body.integrationID, attemptID, body.code);
 					await recordOAuth(body.integrationID, firstProvider);
+
 					return json({ ok: true });
 				}
+
 				await agent.oauthCancel(config, body.integrationID, attemptID);
 				await store.clearPendingOAuth();
+
 				return json({ ok: true });
 			},
 			badGateway,
@@ -233,9 +257,11 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			async (body) => {
 				await agent.disconnect(await loadConfig(), body.integrationID);
 				await store.removeProvider(body.integrationID);
+
 				// If another provider is still connected, move the guild off a
 				// model whose provider was just removed.
 				if ((await store.providers()).length > 0) await reconcileModel(await loadConfig());
+
 				return json({ ok: true });
 			},
 			badGateway,
@@ -243,17 +269,21 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 		[ROUTES.model]: route(ModelRequestSchema, async (body) => {
 			const model = body.model.trim();
+
 			if (!isValidModel(model)) return json({ error: "model must be a provider/model reference" }, 400);
 			const config = await loadConfig();
 			const models = await agent.models(config).catch(() => []);
 			const candidate = models.find((entry) => entry.id === model);
+
 			if (!candidate) {
 				return json({ error: `That model is not in the current catalogue.` }, 400);
 			}
+
 			if (!candidate.connected) {
 				const connected =
 					[...new Set(models.filter((entry) => entry.connected).map((entry) => entry.provider))].join(", ") ||
 					"none";
+
 				return json(
 					{
 						error: `The provider for \`${model}\` is not connected here. Connected providers: ${connected}. Pick a model from one of those.`,
@@ -261,12 +291,14 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 					400,
 				);
 			}
+
 			const existing = await store.settings();
 			await store.putSettings({
 				model,
 				updatedAt: Date.now(),
 				...(existing.configuredBy ? { configuredBy: existing.configuredBy } : {}),
 			});
+
 			return json({ ok: true });
 		}),
 
@@ -275,16 +307,39 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		[ROUTES.linkAdd]: route(LinkAddRequestSchema, async (body) => {
 			const link = body.link;
 			const existing = await store.links();
+
 			if (existing.some((candidate) => candidate.name === link.name && candidate.id !== link.id)) {
 				return json({ error: `A server named "${link.name}" is already linked.` }, 400);
 			}
+
 			await store.putLink(link);
 			await metrics.capture("mcp_connected", { host: urlHost(link.url) });
+
 			return json({ ok: true });
 		}),
 
 		[ROUTES.linkRemove]: route(LinkRemoveRequestSchema, async (body) => {
 			await store.removeLink(body.linkId);
+
+			return json({ ok: true });
+		}),
+
+		/**
+		 * Move a link's approval questions, keeping its bearer.
+		 *
+		 * The link is read here rather than sent by the bot, so changing a
+		 * setting never round-trips a token or an OAuth pair through the gateway.
+		 */
+		[ROUTES.linkElicitation]: route(LinkElicitationRequestSchema, async (body) => {
+			const link = await store.getLink(body.linkId);
+
+			if (!link) return json({ error: "That MCP server is no longer linked." }, 404);
+			await store.putLink({
+				...link,
+				elicitation: body.elicitation,
+				url: applyElicitation(link.url, body.elicitation),
+			});
+
 			return json({ ok: true });
 		}),
 
@@ -300,7 +355,9 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			McpTestRequestSchema,
 			async (body) => {
 				const link = await store.getLink(body.linkId);
+
 				if (!link) return json({ ok: false, tools: [], error: "That MCP server is no longer linked." }, 404);
+
 				return json(await testLink(await refreshLink(store, link)));
 			},
 			probeFailure,
@@ -311,15 +368,20 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			McpAuthStartRequestSchema,
 			async (body) => {
 				const name = body.name.trim();
+
 				if (!name) return json({ ok: false, error: "A name is required." }, 400);
 				const links = await store.links();
+
 				if (links.some((link) => link.name === name)) {
 					return json({ ok: false, error: `A server named "${name}" is already linked.` }, 400);
 				}
+
 				const probe = await probeServer({ url: body.url });
+
 				if (probe.ok) {
 					return json({ ok: false, error: "This server did not ask for a sign-in." }, 400);
 				}
+
 				try {
 					const started = await beginAuthorization({
 						store,
@@ -333,6 +395,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 						...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
 						...(probe.scope ? { scope: probe.scope } : {}),
 					});
+
 					return json({ ok: true, ...started });
 				} catch (error) {
 					return json({ ok: false, error: describeError(error) }, 400);
@@ -346,13 +409,18 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			McpAuthAttemptRequestSchema,
 			async (body) => {
 				const attempt = await store.getAuthAttempt(body.attemptId);
+
 				if (!attempt) return json({ status: "missing" });
+
 				if (attempt.status === "pending" && Date.now() - attempt.createdAt > AUTH_TTL_MS) {
 					const message = "That sign-in expired. Start it again from `/eryn setup` under MCP servers.";
 					await store.putAuthAttempt({ ...attempt, status: "failed", message });
+
 					return json({ status: "failed", message });
 				}
+
 				const link = attempt.linkId ? await store.getLink(attempt.linkId) : undefined;
+
 				return json({
 					status: attempt.status,
 					...(attempt.message ? { message: attempt.message } : {}),
@@ -365,12 +433,17 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		/** Resolve a started sign-in to its full authorization URL. */
 		[ROUTES.linkOauthUrl]: route(McpAuthAttemptRequestSchema, async (body) => {
 			const attempt = await store.getAuthAttempt(body.attemptId);
+
 			if (!attempt?.authorizationUrl) return json({ error: "That sign-in is no longer available." }, 404);
+
 			if (attempt.status !== "pending") return json({ error: "That sign-in is no longer pending." }, 404);
+
 			if (Date.now() - attempt.createdAt > AUTH_TTL_MS) {
 				await store.putAuthAttempt({ ...attempt, status: "failed", message: "That sign-in expired." });
+
 				return json({ error: "That sign-in expired." }, 404);
 			}
+
 			return json({ url: attempt.authorizationUrl });
 		}),
 
@@ -384,21 +457,26 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			McpAuthCompleteRequestSchema,
 			async (body) => {
 				const attempt = await store.getAuthAttempt(body.attemptId);
+
 				if (!attempt) return json({ ok: false, error: "That sign-in is no longer available." }, 404);
 				const firstFinish = attempt.status === "pending";
+
 				const result = await finishAuthorization(store, attempt, {
 					...(body.code ? { code: body.code } : {}),
 					...(body.error ? { error: body.error } : {}),
 				});
+
 				if (firstFinish && result.link) {
 					await metrics.capture("mcp_connected", { host: urlHost(result.link.url) });
 					const message = `**${result.link.name} is connected.** ${describeTools(result.tools ?? [])} Eryn will use it on the next turn.`;
+
 					if (attempt.applicationId && attempt.interactionToken) {
 						await rest
 							.interactionEditOriginal(attempt.applicationId, attempt.interactionToken, message, { components: [] })
 							.catch((error) => log("session", `could not update the MCP sign-in message: ${describeError(error)}`));
 					}
 				}
+
 				return json({
 					ok: result.status === "complete",
 					status: result.status,
@@ -412,10 +490,13 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 		[ROUTES.prompt]: route(PromptRequestSchema, async (body) => {
 			const config = await loadConfig(true);
+
 			if (config.connections.length === 0) {
 				return json({ ok: false, error: "no provider is connected" }, 400);
 			}
+
 			await agent.prompt(body, await reconcileModel(config));
+
 			// The object's alarm is re-armed after this request returns, so a
 			// schedule the turn created still fires on time.
 			return json({ ok: true });
@@ -423,9 +504,11 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 		[ROUTES.command]: route(CommandRequestSchema, async (body) => {
 			const config = await loadConfig(true);
+
 			if (config.connections.length === 0) {
 				return json({ ok: false, error: "no provider is connected" }, 400);
 			}
+
 			return json(await agent.command(body, await reconcileModel(config)));
 		}),
 
@@ -448,9 +531,11 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		 */
 		[ROUTES.context]: route(ContextUpdateRequestSchema, async (body) => {
 			const config = await loadConfig();
+
 			if (config.connections.length > 0) {
 				await agent.updateContext(await reconcileModel(config), body.threadId, body.discord);
 			}
+
 			return json({ ok: true });
 		}),
 
@@ -465,11 +550,13 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 		[ROUTES.policySet]: route(PolicySetRequestSchema, async (body) => {
 			const state = await agent.setPolicy(body);
+
 			return json({ ok: true, state });
 		}),
 
 		[ROUTES.policyClear]: route(PolicyClearRequestSchema, async (body) => {
 			const state = await agent.clearPolicy(body);
+
 			return json({ ok: true, state });
 		}),
 
@@ -477,16 +564,19 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 		[ROUTES.profileSet]: route(ProfileSetRequestSchema, async (body) => {
 			const state = await agent.putProfile(body);
+
 			return json({ ok: true, ...state });
 		}),
 
 		[ROUTES.profileRemove]: route(ProfileRemoveRequestSchema, async (body) => {
 			const state = await agent.removeProfile(body.id);
+
 			return json({ ok: true, ...state });
 		}),
 
 		[ROUTES.profileDefault]: route(ProfileDefaultRequestSchema, async (body) => {
 			const state = await agent.setDefaultProfile(body.id);
+
 			return json({ ok: true, ...state });
 		}),
 
@@ -497,6 +587,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 				...(body.userId ? { userId: body.userId } : {}),
 				...(body.manager !== undefined ? { manager: body.manager } : {}),
 			});
+
 			return view ? json(view) : json({ error: "That form is no longer waiting." }, 404);
 		}),
 
@@ -514,15 +605,18 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 			// was cold, so the config lets the agent build the host it needs to
 			// remove the Session and stop a suspended turn from resuming.
 			const config = gone ? await loadConfig().catch(() => undefined) : undefined;
+
 			return json({ stopped: await agent.interrupt(body.threadId, gone, config) });
 		}),
 
 		/** Compact one conversation's history, at a member's request. */
 		[ROUTES.compact]: route(CompactRequestSchema, async (body) => {
 			const config = await loadConfig(true).catch(() => undefined);
+
 			if (!config || config.connections.length === 0) {
 				return json({ ok: false, message: "Connect a provider before compacting a conversation." });
 			}
+
 			return json(await agent.compact(body.threadId, config));
 		}),
 
@@ -538,15 +632,20 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 	return async (request: Request): Promise<Response> => {
 		const url = new URL(request.url);
 		const found = request.method === "POST" ? routes[url.pathname] : undefined;
+
 		if (!found) return json({ error: "not found" }, 404);
 
 		let body: unknown;
+
 		if (found.schema) {
 			const parsed = await parseBody(found.schema, request);
+
 			if (parsed instanceof Response) return parsed;
+
 			if (found.scoped && guildId && (parsed as { guildId?: unknown }).guildId !== guildId) {
 				return json({ error: "guild mismatch" }, 403);
 			}
+
 			body = parsed;
 		}
 

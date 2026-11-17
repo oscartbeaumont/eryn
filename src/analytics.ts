@@ -17,6 +17,7 @@ import { describeError } from "./errors";
 
 /** PostHog's US ingestion endpoint, matching the project the website uses. */
 const INGEST = "https://us.i.posthog.com/capture/";
+
 /** A capture must never hold a turn open; PostHog is normally much faster. */
 const TIMEOUT_MS = 3_000;
 
@@ -49,6 +50,7 @@ export function analytics(
 ): Analytics {
 	const key = optional(env, "POSTHOG_KEY");
 	const secret = optional(env, "ENCRYPTION_KEY");
+
 	if (!key || !secret || !subject) return DISABLED;
 
 	let distinctId: Promise<string> | undefined;
@@ -57,6 +59,7 @@ export function analytics(
 		enabled: true,
 		capture(event, properties = {}) {
 			distinctId ??= subjectId(subject, secret);
+
 			const send = async (): Promise<void> => {
 				try {
 					const response = await fetch(INGEST, {
@@ -78,15 +81,19 @@ export function analytics(
 						}),
 						signal: AbortSignal.timeout(TIMEOUT_MS),
 					});
+
 					if (!response.ok) log("analytics", `PostHog returned HTTP ${response.status} for ${event}`);
 				} catch (error) {
 					log("analytics", `could not send ${event}: ${describeError(error)}`);
 				}
 			};
+
 			if (waitUntil) {
 				waitUntil(send());
+
 				return Promise.resolve();
 			}
+
 			return send();
 		},
 	};
@@ -94,9 +101,11 @@ export function analytics(
 
 function clean(properties: Record<string, AnalyticsValue>): Record<string, string | number | boolean> {
 	const cleaned: Record<string, string | number | boolean> = {};
+
 	for (const [name, value] of Object.entries(properties)) {
 		if (value !== undefined) cleaned[name] = value;
 	}
+
 	return cleaned;
 }
 
@@ -115,13 +124,16 @@ async function subjectId(subject: string, secret: string): Promise<string> {
 		false,
 		["sign"],
 	);
+
 	const signature = await crypto.subtle.sign(
 		"HMAC",
 		key,
 		new TextEncoder().encode(`eryn-analytics:${subject}`),
 	);
+
 	const hex = [...new Uint8Array(signature)]
 		.map((byte) => byte.toString(16).padStart(2, "0"))
 		.join("");
+
 	return `guild_${hex.slice(0, 32)}`;
 }

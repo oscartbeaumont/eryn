@@ -23,7 +23,9 @@ const EMBED_COLOR = 0xa1a1aa;
 
 /** Discord's limits for one embed field and for an embed's text in total. */
 const FIELD_NAME_LIMIT = 256;
+
 const FIELD_VALUE_LIMIT = 1_024;
+
 const EMBED_TEXT_LIMIT = 6_000;
 
 type Alignment = "left" | "center" | "right";
@@ -51,12 +53,14 @@ export function formatMessage(markdown: string): FormattedMessage {
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index]!;
 		const marker = fenceMarker(line);
+
 		if (marker) {
 			if (fence === undefined) fence = marker;
 			else if (marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
 			output.push(line);
 			continue;
 		}
+
 		if (fence !== undefined) {
 			output.push(line);
 			continue;
@@ -64,6 +68,7 @@ export function formatMessage(markdown: string): FormattedMessage {
 
 		const header = line.includes("|") ? splitRow(line) : undefined;
 		const align = header && index + 1 < lines.length ? delimiter(lines[index + 1]!) : undefined;
+
 		if (!header || !align || header.length !== align.length) {
 			output.push(line);
 			continue;
@@ -71,8 +76,10 @@ export function formatMessage(markdown: string): FormattedMessage {
 
 		const rows: string[][] = [];
 		let row = index + 2;
+
 		while (row < lines.length) {
 			const candidate = lines[row]!;
+
 			if (!candidate.trim() || !candidate.includes("|")) break;
 			rows.push(splitRow(candidate));
 			row++;
@@ -84,14 +91,17 @@ export function formatMessage(markdown: string): FormattedMessage {
 		const widest = Math.max(header.length, ...rows.map((cells) => cells.length));
 		const shifted = widest === header.length + 1 && rows.every((cells) => cells.length === widest);
 		const paddedHeader = shifted ? ["", ...header] : fit(header, widest);
+
 		const paddedAlign: Alignment[] = shifted
 			? ["left", ...align]
 			: [...align, ...Array<Alignment>(widest - align.length).fill("left")];
+
 		const paddedRows = rows.map((cells) => fit(cells, widest));
 
 		const layout = tableLayout(paddedHeader, paddedRows);
 		const trailing = lines.slice(row).join("\n").trim() === "";
 		const embed = !layout.compact && trailing ? embedTable(paddedHeader, paddedRows) : undefined;
+
 		if (embed) {
 			embeds.push(embed);
 			index = row - 1;
@@ -117,13 +127,17 @@ function fenceMarker(line: string): string | undefined {
 /** Split one table row into trimmed cells, honouring `\|` as a literal pipe. */
 function splitRow(line: string): string[] {
 	let text = line.trim();
+
 	if (text.startsWith("|")) text = text.slice(1);
+
 	if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
 
 	const cells: string[] = [];
 	let cell = "";
+
 	for (let index = 0; index < text.length; index++) {
 		const char = text[index]!;
+
 		if (char === "\\" && text[index + 1] === "|") {
 			cell += "|";
 			index++;
@@ -134,7 +148,9 @@ function splitRow(line: string): string[] {
 			cell += char;
 		}
 	}
+
 	cells.push(cell.trim());
+
 	return cells;
 }
 
@@ -142,18 +158,23 @@ function splitRow(line: string): string[] {
 function delimiter(line: string): Alignment[] | undefined {
 	if (!line.includes("|")) return undefined;
 	const align: Alignment[] = [];
+
 	for (const cell of splitRow(line)) {
 		const match = /^(:?)-+(:?)$/.exec(cell);
+
 		if (!match) return undefined;
 		align.push(match[1] && match[2] ? "center" : match[2] ? "right" : "left");
 	}
+
 	return align.length > 0 ? align : undefined;
 }
 
 /** Pad or trim a row to the header's width. */
 function fit(cells: string[], width: number): string[] {
 	const row = cells.slice(0, width);
+
 	while (row.length < width) row.push("");
+
 	return row;
 }
 
@@ -170,12 +191,15 @@ interface TableLayout {
 function tableLayout(header: string[], rows: string[][]): TableLayout {
 	const plainHeader = header.map(plain);
 	const plainRows = rows.map((row) => row.map(plain));
+
 	const widths = plainHeader.map((cell, column) =>
 		Math.max(displayWidth(cell), ...plainRows.map((row) => displayWidth(row[column] ?? ""))),
 	);
+
 	// A pipe inside a cell would look like a column boundary in a code block.
 	const hasPipe = [...header, ...rows.flat()].some((cell) => cell.includes("|"));
 	const total = widths.reduce((sum, width) => sum + width, 0) + 3 * widths.length + 1;
+
 	return { header: plainHeader, rows: plainRows, widths, compact: !hasPipe && total <= COMPACT_WIDTH };
 }
 
@@ -183,8 +207,10 @@ function tableLayout(header: string[], rows: string[][]): TableLayout {
 function compactTable(header: string[], align: Alignment[], rows: string[][], widths: number[]): string {
 	const line = (cells: string[]) =>
 		`│ ${cells.map((cell, column) => alignCell(cell, widths[column]!, align[column]!)).join(" │ ")} │`;
+
 	const rule = (left: string, middle: string, right: string) =>
 		`${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
+
 	// The layout depends on every column being the same width in a monospace
 	// font, so it has to be a code block; plain message text would not line up.
 	return [
@@ -207,15 +233,19 @@ function labelledRows(header: string[], rows: string[][]): string {
 	const blocks = rows.map((row) => {
 		const lines: string[] = [];
 		const title = (row[0] ?? "").trim();
+
 		if (title) lines.push(title.includes("**") ? title : `**${title}**`);
 		row.forEach((cell, column) => {
 			const value = cell.trim();
+
 			if (column === 0 || !value) return;
 			const label = fieldName(header[column] ?? "", "");
 			lines.push(label ? `- **${label}:** ${value}` : `- ${value}`);
 		});
+
 		return lines.join("\n");
 	});
+
 	return blocks.filter(Boolean).join("\n\n");
 }
 
@@ -235,7 +265,9 @@ function embedTable(header: string[], rows: string[][]): DiscordEmbed | undefine
 			: header.length === 3
 				? columnFields(header, rows)
 				: undefined;
+
 	if (!fields) return undefined;
+
 	if (
 		fields.some(
 			(field) =>
@@ -247,27 +279,35 @@ function embedTable(header: string[], rows: string[][]): DiscordEmbed | undefine
 	) {
 		return undefined;
 	}
+
 	const total = fields.reduce((sum, field) => sum + field.name.length + field.value.length, 0);
+
 	if (total > EMBED_TEXT_LIMIT) return undefined;
+
 	return { color: EMBED_COLOR, fields };
 }
 
 /** One inline field per option, with the row labels repeated in each value. */
 function optionFields(header: string[], rows: string[][]): DiscordEmbedField[] | undefined {
 	const fields: DiscordEmbedField[] = [];
+
 	for (let column = 1; column < header.length; column++) {
 		const name = fieldName(header[column] ?? "", `Option ${column}`);
+
 		const value = rows
 			.map((row) => {
 				const label = (row[0] ?? "").trim().replaceAll("**", "");
 				const cell = (row[column] ?? "").trim();
+
 				return label && cell ? `**${label}:** ${cell}` : cell;
 			})
 			.filter(Boolean)
 			.join("\n");
+
 		if (!value) return undefined;
 		fields.push({ name, value, inline: true });
 	}
+
 	return fields.length >= 2 ? fields : undefined;
 }
 
@@ -278,24 +318,31 @@ function columnFields(header: string[], rows: string[][]): DiscordEmbedField[] |
 		value: rows.map((row) => row[column] ?? "").join("\n"),
 		inline: true,
 	}));
+
 	if (fields.some((field) => field.value.trim() === "")) return undefined;
+
 	return fields;
 }
 
 /** A field name without the Markdown that Discord would show literally. */
 function fieldName(cell: string, fallback: string): string {
 	const name = cell.replace(/(\*\*|__|`)/g, "").trim();
+
 	return name || fallback;
 }
 
 /** Pad a cell to its column width in the requested direction. */
 function alignCell(text: string, width: number, alignment: Alignment): string {
 	const gap = Math.max(0, width - displayWidth(text));
+
 	if (alignment === "right") return " ".repeat(gap) + text;
+
 	if (alignment === "center") {
 		const left = Math.floor(gap / 2);
+
 		return " ".repeat(left) + text + " ".repeat(gap - left);
 	}
+
 	return text + " ".repeat(gap);
 }
 
@@ -325,9 +372,11 @@ const WIDE: ReadonlyArray<readonly [number, number]> = [
 /** The width of text in a monospace cell, counting wide characters twice. */
 function displayWidth(text: string): number {
 	let width = 0;
+
 	for (const char of text) {
 		const code = char.codePointAt(0)!;
 		width += WIDE.some(([start, end]) => code >= start && code <= end) ? 2 : 1;
 	}
+
 	return width;
 }

@@ -78,6 +78,7 @@ export class McpOAuthError extends Error {
  */
 export async function discover(resourceUrl: string, resourceMetadataUrl?: string): Promise<McpDiscovery> {
 	requireTransport(resourceUrl, "MCP server URL");
+
 	const info = await discoverOAuthServerInfo(resourceUrl, {
 		...(resourceMetadataUrl
 			? { resourceMetadataUrl: requireTransport(resourceMetadataUrl, "resource metadata") }
@@ -86,9 +87,11 @@ export async function discover(resourceUrl: string, resourceMetadataUrl?: string
 	}).catch(fail);
 
 	const metadata = info.authorizationServerMetadata;
+
 	if (!metadata) throw new McpOAuthError("This server's authorization server metadata could not be read.");
 	requireTransport(metadata.authorization_endpoint, "authorization endpoint");
 	requireTransport(metadata.token_endpoint, "token endpoint");
+
 	if (metadata.registration_endpoint) {
 		requireTransport(metadata.registration_endpoint, "client registration");
 	}
@@ -123,9 +126,11 @@ export async function initiate(
 			"This server does not support automatic client registration. Add it with a token instead.",
 		);
 	}
+
 	requireTransport(input.discovery.registrationEndpoint, "client registration");
 
 	const metadata = input.discovery.authorizationServerMetadata;
+
 	const client = await registerClient(input.discovery.authorizationServerUrl, {
 		metadata,
 		clientMetadata: resolveClientMetadata({
@@ -164,6 +169,7 @@ export async function exchangeCode(input: {
 	verifier: string;
 }): Promise<McpTokens> {
 	const { authorizationServerUrl, metadata } = tokenRequest(input.tokenEndpoint);
+
 	const tokens = await exchangeAuthorization(authorizationServerUrl, {
 		metadata,
 		clientInformation: clientInformation(input.clientId, input.clientSecret),
@@ -173,6 +179,7 @@ export async function exchangeCode(input: {
 		...(input.resource ? { resource: input.resource } : {}),
 		fetchFn,
 	}).catch(fail);
+
 	return toTokens(tokens);
 }
 
@@ -185,6 +192,7 @@ export async function refreshTokens(input: {
 	resource?: string;
 }): Promise<McpTokens> {
 	const { authorizationServerUrl, metadata } = tokenRequest(input.tokenEndpoint);
+
 	const tokens = await refreshAuthorization(authorizationServerUrl, {
 		metadata,
 		clientInformation: clientInformation(input.clientId, input.clientSecret),
@@ -192,6 +200,7 @@ export async function refreshTokens(input: {
 		...(input.resource ? { resource: input.resource } : {}),
 		fetchFn,
 	}).catch(fail);
+
 	return toTokens(tokens);
 }
 
@@ -226,6 +235,7 @@ function tokenRequest(tokenEndpoint: string): {
 	metadata: AuthorizationServerMetadata;
 } {
 	const endpoint = requireTransport(tokenEndpoint, "the token endpoint");
+
 	return {
 		authorizationServerUrl: endpoint.origin,
 		metadata: {
@@ -249,23 +259,29 @@ function toTokens(tokens: OAuthTokens): McpTokens {
 /** Turn a library error into the one-line answer a Discord message can show. */
 function fail(error: unknown): never {
 	if (error instanceof McpOAuthError) throw error;
+
 	if (error instanceof RegistrationRejectedError) {
 		throw new McpOAuthError(
 			"This server would not register Eryn as a client. Add it with a token instead.",
 		);
 	}
+
 	if (error instanceof IssuerMismatchError) {
 		throw new McpOAuthError("This server's authorization metadata names a different issuer.");
 	}
+
 	if (error instanceof AuthorizationServerMismatchError) {
 		throw new McpOAuthError("The sign-in came back from a different authorization server.");
 	}
+
 	if (error instanceof InsecureTokenEndpointError) {
 		throw new McpOAuthError("This server's token endpoint must use https.");
 	}
+
 	if (error instanceof OAuthError) {
 		throw new McpOAuthError(`The sign-in server refused the request (${error.code}).`);
 	}
+
 	throw new McpOAuthError(describeError(error));
 }
 
@@ -279,11 +295,14 @@ const fetchFn: FetchLike = externalFetch(DISCOVERY_TIMEOUT_MS);
 /** OAuth endpoints carry secrets, so only https is acceptable in production. */
 function requireTransport(url: string, label: string): URL {
 	let parsed: URL;
+
 	try {
 		parsed = new URL(url);
 	} catch {
 		throw new McpOAuthError(`The ${label} URL is not valid.`);
 	}
+
 	if (!isSecureUrl(parsed)) throw new McpOAuthError(`The ${label} must use https.`);
+
 	return parsed;
 }

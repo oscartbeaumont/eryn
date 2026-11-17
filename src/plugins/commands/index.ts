@@ -19,15 +19,18 @@ import { fileStore, type FileStore } from "../workspace/store.ts";
 export async function expandShellBlocks(store: FileStore, text: string): Promise<string> {
 	const pattern = shellBlockPattern();
 	const matches = [...text.matchAll(pattern)];
+
 	if (matches.length === 0) return text;
 
 	const outputs: string[] = [];
+
 	for (const match of matches) {
 		const result = await runShell(store, match[1] ?? "", WORKSPACE_ROOT, WORKSPACE_ROOT);
 		outputs.push([result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd());
 	}
 
 	let index = 0;
+
 	return text.replace(shellBlockPattern(), () => outputs[index++] ?? "");
 }
 

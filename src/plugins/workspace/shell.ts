@@ -23,6 +23,7 @@ export interface ShellResult {
 export async function runShell(store: FileStore, command: string, cwd: string, root: string): Promise<ShellResult> {
 	const entries = await store.list(root);
 	const before = new Map(entries.map((entry) => [entry.path, entry.file]));
+
 	const fs = new InMemoryFs(
 		Object.fromEntries(entries.map((entry) => [entry.path, base64ToBytes(entry.file.b)])),
 	);
@@ -31,9 +32,11 @@ export async function runShell(store: FileStore, command: string, cwd: string, r
 	const result = await bash.exec(command);
 
 	const after = new Map<string, StoredFile>();
+
 	for (const path of fs.getAllPaths()) {
 		if (!path.startsWith(`${root}/`)) continue;
 		const stat = await fs.stat(path).catch(() => undefined);
+
 		if (!stat?.isFile) continue;
 		const bytes = await fs.readFileBuffer(path);
 		after.set(path, { b: bytesToBase64(bytes), m: stat.mtime.getTime() });
@@ -41,8 +44,10 @@ export async function runShell(store: FileStore, command: string, cwd: string, r
 
 	for (const [path, file] of after) {
 		const previous = before.get(path);
+
 		if (!previous || previous.b !== file.b) await store.put(path, file);
 	}
+
 	for (const path of before.keys()) {
 		if (!after.has(path)) await store.delete(path);
 	}

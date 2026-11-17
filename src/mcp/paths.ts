@@ -8,6 +8,7 @@
 
 /** Where an authorization server sends the browser back to. */
 export const MCP_CALLBACK_PATH = "/api/bot/mcp/callback";
+
 /** Short browser hop that forwards to a long authorization URL. */
 export const MCP_START_PATH = "/api/bot/mcp/start";
 

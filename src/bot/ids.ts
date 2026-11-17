@@ -42,9 +42,11 @@ export function unmarshalId(customId: string): { id: string; dmGuildId?: string 
 	if (!customId.startsWith(INSTALL_PREFIX)) return { id: customId };
 	const rest = customId.slice(INSTALL_PREFIX.length);
 	const separator = rest.indexOf(":");
+
 	// The install DM's "Start setup" button is `install:setup:<guildId>` with no
 	// base; it opens the menu.
 	if (separator < 0) return { id: SETUP_MENU_ID, dmGuildId: rest || undefined };
+
 	return { id: rest.slice(separator + 1) || SETUP_MENU_ID, dmGuildId: rest.slice(0, separator) || undefined };
 }
 

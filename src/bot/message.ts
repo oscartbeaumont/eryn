@@ -33,10 +33,13 @@ export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
 	// keeps the two attachment arrays separate, so carry both.
 	const sources = [...(message.attachments ?? []), ...(message.referenced_message?.attachments ?? [])];
 	const seen = new Set<string>();
+
 	return sources.flatMap((attachment) => {
 		const url = attachment.url ?? attachment.proxy_url;
+
 		if (!url || seen.has(url)) return [];
 		seen.add(url);
+
 		return [
 			{
 				url,
@@ -55,6 +58,7 @@ export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
  */
 export function authorInfo(message: DiscordMessage): PromptUser {
 	const username = message.author?.username?.trim();
+
 	return {
 		name:
 			message.member?.nick?.trim() ||
@@ -73,6 +77,7 @@ export function authorInfo(message: DiscordMessage): PromptUser {
 export function mentionInfo(message: DiscordMessage, botUserId: string | undefined): PromptUser[] {
 	const seen = new Set<string>();
 	const mentions: PromptUser[] = [];
+
 	for (const user of message.mentions ?? []) {
 		if (!user.id || user.id === botUserId || user.id === message.author?.id || seen.has(user.id)) continue;
 		seen.add(user.id);
@@ -84,6 +89,7 @@ export function mentionInfo(message: DiscordMessage, botUserId: string | undefin
 			...(user.bot ? { bot: true } : {}),
 		});
 	}
+
 	return mentions;
 }
 
@@ -95,13 +101,18 @@ function mentionPattern(botUserId: string): RegExp {
 /** A message that is addressed to the bot, by user ping or by its managed role. */
 export function isMention(message: DiscordMessage, botUserId: string | undefined, roleId?: string): boolean {
 	if (!botUserId) return false;
+
 	if (message.mentions?.some((user) => user.id === botUserId)) return true;
 	const content = message.content ?? "";
+
 	if (mentionPattern(botUserId).test(content)) return true;
+
 	if (roleId !== undefined) {
 		if (message.mention_roles?.includes(roleId)) return true;
+
 		if (content.includes(`<@&${roleId}>`)) return true;
 	}
+
 	return false;
 }
 
@@ -126,17 +137,23 @@ export function isReplyTo(message: DiscordMessage, userId: string | undefined): 
  */
 export function stripMention(content: string, botUserId: string | undefined, roleId?: string): string {
 	const pattern = botUserId ? mentionPattern(botUserId) : undefined;
+
 	const replace = (replacement: string): string => {
 		let text = pattern ? content.replace(pattern, replacement) : content;
+
 		if (roleId !== undefined) text = text.replaceAll(`<@&${roleId}>`, replacement);
+
 		return text.trim();
 	};
+
 	return replace("") ? replace("Eryn") : "";
 }
 
 /** Derive a thread name from the request, inside Discord's 100 character limit. */
 export function threadName(content: string): string {
 	const text = content.replace(/\s+/g, " ").trim();
+
 	if (!text) return DEFAULT_THREAD_NAME;
+
 	return text.length > MAX_THREAD_NAME ? text.slice(0, MAX_THREAD_NAME - 1) : text;
 }

@@ -10,6 +10,7 @@ import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
  * workers.dev instead. `ERYN_DOMAIN` attaches an explicit domain either way.
  */
 const SELF_HOSTED = process.env.WORKERS_CI === "1";
+
 const DOMAIN =
 	process.env.ERYN_DOMAIN !== undefined
 		? process.env.ERYN_DOMAIN.trim() || undefined

@@ -93,6 +93,7 @@ export function sameCommands(
 		type: command.type,
 		options: (command.options ?? []).map(optionShape),
 	});
+
 	return Equal.equals(registered.map(shape), desired.map(shape));
 }
 
@@ -134,6 +135,7 @@ const MODAL_HANDLERS: readonly Handler<Record<string, string>>[] = [
 export async function handleInteraction(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
 	// A component carries the select's values; a modal carries its fields.
 	const customId = interaction.data?.custom_id;
+
 	switch (interaction.type) {
 		case 2:
 			return await handleCommand(ctx, interaction);
@@ -141,14 +143,17 @@ export async function handleInteraction(ctx: CommandContext, interaction: Discor
 			// Approvals and form cards belong to the conversation, not to the
 			// setup flow: a requester without Manage Server can still answer one.
 			if (customId?.startsWith("approval:")) return await handleApproval(ctx, interaction, customId);
+
 			if (customId?.startsWith("form:")) {
 				return await handleFormComponent(ctx, interaction, customId, interaction.data?.values ?? []);
 			}
+
 			return await dispatch(ctx, interaction, COMPONENT_HANDLERS, interaction.data?.values ?? []);
 		case 5:
 			if (customId?.startsWith("form:modal:")) {
 				return await handleFormModal(ctx, interaction, customId, modalValues(interaction));
 			}
+
 			return await dispatch(ctx, interaction, MODAL_HANDLERS, modalValues(interaction));
 	}
 }
@@ -176,15 +181,19 @@ function requestFor(
 function optionValue(sub: unknown, name: string): string | undefined {
 	const options = (sub as { options?: readonly { name?: string; value?: unknown }[] } | undefined)
 		?.options;
+
 	const value = options?.find((option) => option.name === name)?.value;
+
 	return typeof value === "string" ? value : undefined;
 }
 
 /** The accounts an interaction can carry; a guild member or a DM user. */
 function authorOf(interaction: DiscordInteraction): PromptUser | undefined {
 	const user = interaction.member?.user ?? interaction.user;
+
 	if (!user) return undefined;
 	const username = user.username?.trim();
+
 	return {
 		name:
 			interaction.member?.nick?.trim() ||
@@ -203,9 +212,11 @@ function truncate(text: string): string {
 
 function commandListText(commands: readonly { name: string; description?: string }[]): string {
 	if (commands.length === 0) return "This conversation has no OpenCode commands yet.";
+
 	const names = commands
 		.map((command) => `\`${command.name}\`${command.description ? ` — ${command.description}` : ""}`)
 		.join("\n• ");
+
 	return truncate(
 		[
 			"**OpenCode commands**",
@@ -217,6 +228,7 @@ function commandListText(commands: readonly { name: string; description?: string
 
 async function handleCommand(ctx: CommandContext, interaction: DiscordInteraction): Promise<void> {
 	const data = interaction.data;
+
 	if (data?.name !== "eryn") return;
 	const group = data.options?.[0];
 	const sub = group?.type === 2 ? group.options?.[0] : group;
@@ -224,13 +236,17 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 	const path = group && group.type === 2 && command ? `${group.name}:${command}` : command;
 
 	const guildId = interaction.guild_id;
+
 	if (!guildId) {
 		await rejectInteraction(ctx, interaction, "Run `/eryn` inside a server, so I know which setup to change.");
+
 		return;
 	}
+
 	// Every slash command is a usage signal; the arguments and the conversation
 	// are deliberately not part of it.
 	void ctx.analytics(guildId).capture("command_used", { command: path ?? "unknown" });
+
 	// Stopping a run, compacting a conversation, running a command, and reading
 	// help are conversation actions, not configuration; everything else is.
 	if (
@@ -243,6 +259,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 	) {
 		return await denyConfiguration(ctx, interaction);
 	}
+
 	const request = requestFor(ctx, interaction, guildId);
 
 	switch (path) {
@@ -261,10 +278,13 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 		case "stop":
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
+
 				if (!channelId || !(await ctx.ownsConversation(channelId))) {
 					await responder(request).reply("There is no Eryn run here.");
+
 					return;
 				}
+
 				await responder(request).reply("Stopping the current run…");
 				await request.session.interrupt(channelId, false).catch(() => undefined);
 			});
@@ -272,10 +292,13 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
 				const answer = responder(request);
+
 				if (!channelId || !(await ctx.ownsConversation(channelId))) {
 					await answer.reply("There is no Eryn conversation here yet.");
+
 					return;
 				}
+
 				// Compaction summarises with the model, so acknowledge first and
 				// edit the ephemeral reply when the runner reports the outcome.
 				await answer.defer();
@@ -290,27 +313,37 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
 				const answer = responder(request);
+
 				if (!channelId || !(await ctx.ownsConversation(channelId))) {
 					await answer.reply("There is no Eryn conversation here yet.");
+
 					return;
 				}
+
 				const name = optionValue(sub, "name");
+
 				if (!name) {
 					await answer.reply("Name the command to run, for example `/eryn command review`.");
+
 					return;
 				}
+
 				const argumentsText = optionValue(sub, "arguments") ?? "";
 				// Acknowledge before the Discord lookup and the turn, both of which
 				// can take longer than the interaction window.
 				await answer.defer();
 				const discord = await ctx.context(guildId, channelId);
+
 				if (!discord) {
 					await answer.reply("I could not read this conversation from Discord. Try again in a moment.");
+
 					return;
 				}
+
 				// Do not gate on a list read: a cold Location has not activated
 				// its config plugins yet, while `session.command` waits for them.
 				const author = authorOf(interaction);
+
 				const result = await request.session.command({
 					threadId: channelId,
 					title: name,
@@ -319,6 +352,7 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 					...(author ? { author } : {}),
 					discord,
 				});
+
 				await answer.reply(
 					result.ok ? `Ran \`/${name}\`.` : truncate(result.message ?? "That command failed."),
 				);
@@ -327,16 +361,22 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 			return await guarded(request, "reply", async () => {
 				const channelId = interaction.channel_id;
 				const answer = responder(request);
+
 				if (!channelId || !(await ctx.ownsConversation(channelId))) {
 					await answer.reply("There is no Eryn conversation here yet.");
+
 					return;
 				}
+
 				await answer.defer();
 				const discord = await ctx.context(guildId, channelId);
+
 				if (!discord) {
 					await answer.reply("I could not read this conversation from Discord. Try again in a moment.");
+
 					return;
 				}
+
 				const commands = await request.session.commands(discord.channel.id);
 				await answer.reply(commandListText(commands));
 			});
@@ -363,6 +403,7 @@ function resolveGuild(
 	// menu rather than the DM one.
 	const inGuild = interaction.guild_id;
 	const guildId = inGuild ?? dmGuildId;
+
 	return guildId ? { customId: id, guildId, dmGuildId: inGuild ? undefined : dmGuildId } : undefined;
 }
 
@@ -374,15 +415,21 @@ async function dispatch<Values>(
 	values: Values,
 ): Promise<void> {
 	const raw = interaction.data?.custom_id;
+
 	if (!raw) return;
+
 	if (!canManage(interaction)) return await denyConfiguration(ctx, interaction);
 
 	const target = resolveGuild(interaction, raw);
+
 	if (!target) {
 		await rejectInteraction(ctx, interaction, "Run this inside a server.");
+
 		return;
 	}
+
 	const request = requestFor(ctx, interaction, target.guildId, target.dmGuildId);
+
 	for (const handle of handlers) {
 		if (await handle(request, target.customId, values)) return;
 	}
@@ -400,6 +447,7 @@ async function handleApproval(
 	const channelId = interaction.channel_id;
 	const [, decision, ...rest] = customId.split(":");
 	const requestId = rest.join(":");
+
 	if (
 		!guildId ||
 		!channelId ||
@@ -408,8 +456,10 @@ async function handleApproval(
 	) {
 		return;
 	}
+
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
 	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+
 	const result = await ctx
 		.session(guildId)
 		.replyApproval({
@@ -420,11 +470,13 @@ async function handleApproval(
 			manager: canManage(interaction),
 		})
 		.catch((error) => ({ ok: false, message: describeError(error) }));
+
 	const message = result.ok
 		? decision === "block"
 			? "Blocked in this conversation."
 			: "Approved."
 		: result.message ?? "That request is no longer waiting.";
+
 	await ctx.rest
 		.interactionEditOriginal(ctx.applicationId, interaction.token, message, { components: [] })
 		.catch(() => undefined);
@@ -444,9 +496,11 @@ async function handleFormComponent(
 	values: readonly string[],
 ): Promise<void> {
 	const guildId = interaction.guild_id;
+
 	if (!guildId) return;
 	const parts = customId.split(":");
 	const action = parts[1];
+
 	if (!action) return;
 	const session = ctx.session(guildId);
 	const userId = interaction.member?.user?.id ?? interaction.user?.id;
@@ -455,26 +509,34 @@ async function handleFormComponent(
 
 	if (action === "open") {
 		const formId = parts.slice(2).join(":");
+
 		if (!formId) return;
 		const view = await session.form(formId, auth).catch(() => undefined);
+
 		if (!view) {
 			await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
+
 			return;
 		}
+
 		const fields = view.fields
 			.map((field, index) => ({ field, index }))
 			.filter(({ index }) => !view.answered.includes(index))
 			.slice(0, 5);
+
 		if (fields.length === 0) {
 			await rejectInteraction(ctx, interaction, "That form is already answered.");
+
 			return;
 		}
+
 		const hint = (field: (typeof fields)[number]["field"]) =>
 			field.type === "boolean"
 				? " (yes/no)"
 				: field.type === "number" || field.type === "integer"
 					? " (number)"
 					: "";
+
 		await ctx.rest
 			.interactionModal(
 				interaction.id,
@@ -499,33 +561,44 @@ async function handleFormComponent(
 				),
 			)
 			.catch(() => undefined);
+
 		return;
 	}
 
 	if (action === "pick" || action === "select") {
 		const field = Number(parts[2]);
+
 		if (!Number.isInteger(field)) return;
+
 		const formId =
 			action === "pick" ? parts.slice(4).join(":") : parts.slice(3).join(":");
+
 		if (!formId) return;
 		const option = action === "pick" && parts[3] !== "" ? Number(parts[3]) : undefined;
+
 		if (action === "pick" && option !== undefined && !Number.isInteger(option)) return;
 
 		const answer =
 			action === "pick"
-				? { ...(option !== undefined ? { option } : {}) }
+				? (option !== undefined ? { option } : {})
 				: { values: [...values] };
+
 		await answerForm(ctx, interaction, () => session.answerFormField(formId, field, answer, auth));
+
 		return;
 	}
 
 	// Every remaining action belongs to the whole form.
 	const formId = parts.slice(2).join(":");
+
 	if (!formId) return;
+
 	if (action === "done" || action === "submit") {
 		await answerForm(ctx, interaction, () => session.replyForm(formId, {}, auth, true));
+
 		return;
 	}
+
 	if (action === "cancel") {
 		await answerForm(ctx, interaction, () => session.cancelForm(formId, auth));
 	}
@@ -539,14 +612,17 @@ async function answerForm(
 ): Promise<void> {
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
 	const result = await run().catch((error) => ({ ok: false, message: describeError(error) }));
+
 	if (result.ok) {
 		// The session edits the form message itself; remove the ephemeral
 		// "thinking" reply so the channel does not keep a second copy.
 		await ctx.rest
 			.interactionDeleteOriginal(ctx.applicationId, interaction.token)
 			.catch(() => undefined);
+
 		return;
 	}
+
 	await ctx.rest
 		.interactionEditOriginal(
 			ctx.applicationId,
@@ -565,14 +641,17 @@ async function handleFormModal(
 	values: Record<string, string>,
 ): Promise<void> {
 	const guildId = interaction.guild_id;
+
 	if (!guildId) return;
 	const formId = customId.slice("form:modal:".length);
 	const userId = interaction.member?.user?.id ?? interaction.user?.id;
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
+
 	const result = await ctx
 		.session(guildId)
 		.replyForm(formId, values, { ...(userId ? { userId } : {}), manager: canManage(interaction) })
 		.catch((error) => ({ ok: false, message: describeError(error) }));
+
 	await ctx.rest
 		.interactionEditOriginal(
 			ctx.applicationId,

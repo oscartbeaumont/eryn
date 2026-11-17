@@ -19,13 +19,17 @@ const CODES = new Map<string, ProviderChoice>([
 	["m", "many"],
 	["n", "none"],
 ]);
+
 const CODE_FOR: Record<ProviderChoice, string> = { key: "k", oauth: "o", many: "m", none: "n" };
 
 /** The shape of a provider's supported methods. */
 export function providerChoice(methods: readonly IntegrationMethodOption[]): ProviderChoice {
 	const supported = methods.filter((method) => method.supported);
+
 	if (supported.length === 0) return "none";
+
 	if (supported.length > 1) return "many";
+
 	return supported[0]?.type === "key" ? "key" : "oauth";
 }
 
@@ -42,8 +46,11 @@ export function encodeProviderChoice(providerId: string, methods: readonly Integ
  */
 export function decodeProviderChoice(value: string): { providerId: string; choice?: ProviderChoice } {
 	const separator = value.lastIndexOf("|");
+
 	if (separator <= 0) return { providerId: value };
 	const choice = CODES.get(value.slice(separator + 1));
+
 	if (!choice) return { providerId: value };
+
 	return { providerId: value.slice(0, separator), choice };
 }

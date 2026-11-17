@@ -10,6 +10,7 @@ import { Result } from "effect";
 import { Base64Url } from "effect/encoding";
 
 const encoder = new TextEncoder();
+
 const decoder = new TextDecoder();
 
 export const base64url = Base64Url.encode;
@@ -37,17 +38,20 @@ export async function encryptSecret(secret: string, plaintext: string): Promise<
 	const key = await aesKey(secret);
 	const iv = crypto.getRandomValues(new Uint8Array(12));
 	const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(plaintext));
+
 	return { iv: base64url(iv), data: base64url(new Uint8Array(ciphertext)) };
 }
 
 /** Decrypt a value produced by `encryptSecret`. Throws if it was tampered with. */
 export async function decryptSecret(secret: string, sealed: Sealed): Promise<string> {
 	const key = await aesKey(secret);
+
 	const plaintext = await crypto.subtle.decrypt(
 		{ name: "AES-GCM", iv: fromBase64url(sealed.iv) },
 		key,
 		fromBase64url(sealed.data),
 	);
+
 	return decoder.decode(plaintext);
 }
 
@@ -62,6 +66,7 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
 export async function sign(payload: unknown, secret: string): Promise<string> {
 	const body = base64url(encoder.encode(JSON.stringify(payload)));
 	const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(body));
+
 	return `${body}.${base64url(new Uint8Array(signature))}`;
 }
 
@@ -69,7 +74,9 @@ export async function sign(payload: unknown, secret: string): Promise<string> {
 export async function verify<T>(token: string | undefined, secret: string): Promise<T | undefined> {
 	if (!token) return undefined;
 	const [body, signature] = token.split(".");
+
 	if (!body || !signature) return undefined;
+
 	// The token comes from a URL, so it can be any bytes a browser sends: a
 	// malformed one is an invalid token, not a thrown error.
 	try {
@@ -79,7 +86,9 @@ export async function verify<T>(token: string | undefined, secret: string): Prom
 			fromBase64url(signature),
 			encoder.encode(body),
 		);
+
 		if (!valid) return undefined;
+
 		return JSON.parse(decoder.decode(fromBase64url(body))) as T;
 	} catch {
 		return undefined;

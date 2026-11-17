@@ -67,7 +67,9 @@ function channelSummary(channel: DiscordChannelRef) {
 
 /** The input fields several tools share. */
 const CHANNEL_ID = { type: "string", description: "Channel or thread id" };
+
 const MESSAGE_ID = { type: "string", description: "Message id" };
+
 const THREAD_ID = { type: "string", description: "Thread id" };
 
 /**
@@ -78,28 +80,35 @@ const THREAD_ID = { type: "string", description: "Thread id" };
  */
 function forDiscord(content: string): FormattedMessage {
 	const formatted = formatMessage(content);
+
 	if (formatted.content.length > MAX_CONTENT) {
 		throw new Error(
 			`Discord messages are limited to ${MAX_CONTENT} characters; this one is ${formatted.content.length}. Split it into smaller messages.`,
 		);
 	}
+
 	return formatted;
 }
 
 /** The arguments the schemas above describe, so each tool casts once. */
 type ChannelInput = { channelId: string };
+
 type MessageInput = ChannelInput & { messageId: string };
+
 type ThreadInput = { threadId: string };
 
 /** A byte count as a person would read it. */
 function formatBytes(bytes: number): string {
 	const megabytes = bytes / (1024 * 1024);
+
 	if (megabytes >= 1) return `${Number(megabytes.toFixed(1))} MB`;
+
 	return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 /** How many pictures one read may carry, so history cannot flood the prompt. */
 const MAX_READ_IMAGES = 8;
+
 /** Discord does not always declare a content type, so fall back to the name. */
 const IMAGE_NAME = /\.(?:png|jpe?g|gif|webp)$/i;
 
@@ -111,6 +120,7 @@ const IMAGE_NAME = /\.(?:png|jpe?g|gif|webp)$/i;
  */
 function isImageAttachment(attachment: DiscordAttachment): boolean {
 	if (attachment.content_type) return attachment.content_type.startsWith("image/");
+
 	return IMAGE_NAME.test(attachment.filename ?? "");
 }
 
@@ -129,10 +139,13 @@ async function readMessageImages(messages: readonly DiscordMessageView[]): Promi
 	const images = messages.flatMap((message) =>
 		(message.attachments ?? []).flatMap((attachment) => {
 			const url = attachment.url ?? attachment.proxy_url;
+
 			return url && isImageAttachment(attachment) ? [{ attachment, url }] : [];
 		}),
 	);
+
 	const selected = images.slice(0, MAX_READ_IMAGES);
+
 	const attached = await fetchAttachmentFiles(
 		selected.map(({ attachment, url }) => ({
 			url,
@@ -141,9 +154,12 @@ async function readMessageImages(messages: readonly DiscordMessageView[]): Promi
 			...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
 		})),
 	);
+
 	const notes = [...attached.notes];
 	const omitted = images.length - selected.length;
+
 	if (omitted > 0) notes.push(`${omitted} more image${omitted === 1 ? "" : "s"} not attached`);
+
 	return {
 		files: attached.files,
 		...(notes.length > 0 ? { note: `[Images not attached: ${notes.join("; ")}]` } : {}),
@@ -162,20 +178,26 @@ async function readUploads(store: FileStore, paths: readonly string[]): Promise<
 	const resolved = paths.map((path) => resolvePath(WORKSPACE_ROOT, path));
 	const names = uploadNames(resolved);
 	const uploads: DiscordUpload[] = [];
+
 	for (const [index, path] of resolved.entries()) {
 		if (!path.startsWith(`${WORKSPACE_ROOT}/`)) {
 			throw new Error(`Eryn can only attach files from ${WORKSPACE_ROOT}; ${paths[index]} is outside it.`);
 		}
+
 		const stored = await store.get(path);
+
 		if (!stored) throw new Error(`Attachment ${paths[index]} was not found in the workspace.`);
 		const data = base64ToBytes(stored.b);
+
 		if (data.byteLength > MAX_FILE_BYTES) {
 			throw new Error(
 				`Attachment ${paths[index]} is ${formatBytes(data.byteLength)}; Discord accepts at most ${formatBytes(MAX_FILE_BYTES)} per file.`,
 			);
 		}
+
 		uploads.push({ filename: names[index], data });
 	}
+
 	return uploads;
 }
 
@@ -206,27 +228,34 @@ export function discordTools(
 	/** A channel or thread the bot can use, restricted to this guild. */
 	const channel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await rest.channel(channelId);
+
 		if (!found) throw new Error(`Channel ${channelId} was not found.`);
+
 		// A DM or group DM has no guild_id. The tools only work inside this
 		// server, so anything else is refused rather than treated as local.
 		if (found.guild_id !== guildId) {
 			throw new Error(`Channel ${channelId} is not in this server.`);
 		}
+
 		return found;
 	};
 
 	const thread = async (threadId: string): Promise<DiscordChannelRef> => {
 		const found = await channel(threadId);
+
 		if (!THREAD_TYPES.has(found.type)) throw new Error(`${threadId} is not a thread.`);
+
 		return found;
 	};
 
 	/** A channel that can hold a subscribed conversation, which a thread cannot. */
 	const subscribableChannel = async (channelId: string): Promise<DiscordChannelRef> => {
 		const found = await channel(channelId);
+
 		if (THREAD_TYPES.has(found.type)) {
 			throw new Error(`${channelId} is a thread. Use discord_join_thread and discord_leave_thread for threads.`);
 		}
+
 		return found;
 	};
 
@@ -248,9 +277,11 @@ export function discordTools(
 		if (!plugin) throw new Error("Eryn cannot verify Discord permissions right now.");
 		const session = await plugin.session.get({ sessionID }).catch(() => undefined);
 		const context = readDiscordContext(session?.metadata);
+
 		if (!context) {
 			throw new Error("This conversation has no Discord context, so Eryn cannot verify who is asking.");
 		}
+
 		return context;
 	};
 
@@ -274,6 +305,7 @@ export function discordTools(
 		options: { allowWithoutAuthor?: boolean } = {},
 	): Promise<DiscordContext> => {
 		const context = await sessionContext(sessionID);
+
 		// A schedule has a capability scope, not a person. The scope is the
 		// ceiling even when the last human had more access.
 		if (context.scheduleTurn && context.scheduleScope) {
@@ -282,31 +314,38 @@ export function discordTools(
 					`This schedule's Discord access does not allow Eryn to ${label} in <#${channelId}>.`,
 				);
 			}
+
 			return context;
 		}
+
 		if (!context.authorId) {
 			if (options.allowWithoutAuthor && isCurrentConversation(context, channelId)) return context;
 			throw new Error(
 				`This turn has no Discord user attached, so Eryn will not ${label} outside this conversation.`,
 			);
 		}
+
 		if (!(await authority.can(context.authorId, channelId, required))) {
 			throw new Error(
 				`Your Discord permissions do not allow Eryn to ${label} in <#${channelId}>.`,
 			);
 		}
+
 		return context;
 	};
 
 	/** Require Manage Server, which is what server configuration asks for. */
 	const requireManageGuild = async (sessionID: string, label: string): Promise<void> => {
 		const context = await sessionContext(sessionID);
+
 		if (context.scheduleTurn) {
 			throw new Error(`A scheduled turn has no person to approve server configuration.`);
 		}
+
 		if (!context.authorId) {
 			throw new Error(`This turn has no Discord user attached, so Eryn will not ${label}.`);
 		}
+
 		if (!(await authority.canManageGuild(context.authorId))) {
 			throw new Error(`Only someone with Manage Server can ${label}.`);
 		}
@@ -320,8 +359,11 @@ export function discordTools(
 	 */
 	const canEditScope = async (context: DiscordContext): Promise<boolean> => {
 		const scope = context.scheduleScope;
+
 		if (!scope || context.scheduleTurn || !context.authorId) return false;
+
 		if (canEditScheduleScope(scope, context.authorId, false)) return true;
+
 		return await authority.canManageGuild(context.authorId);
 	};
 
@@ -331,12 +373,15 @@ export function discordTools(
 		update: (scope: ScheduleScope, context: DiscordContext) => ScheduleScope | undefined,
 	): Promise<void> => {
 		const ctx = plugin;
+
 		if (!ctx) return;
 		await withDiscordMetadataLock(sessionID, async () => {
 			const session = await ctx.session.get({ sessionID }).catch(() => undefined);
 			const context = readDiscordContext(session?.metadata);
+
 			if (!session || !context?.scheduleScope) return;
 			const next = update(context.scheduleScope, context);
+
 			if (next === context.scheduleScope) return;
 			await ctx.session.update({
 				sessionID,
@@ -355,12 +400,15 @@ export function discordTools(
 	/** Add a channel to the schedule scope when this speaker may do so. */
 	const expandScheduleScope = async (sessionID: string, channelId: string): Promise<void> => {
 		const context = await sessionContext(sessionID);
+
 		if (!context.authorId || !(await canEditScope(context))) return;
 		const info = await rest.channel(channelId).catch(() => undefined);
+
 		if (!info) return;
 		// The schedule gets only what this editor can actually do here; it does
 		// not inherit a broader grant from the bot or from the scope owner.
 		const capabilities = await authority.scopeCapabilities(context.authorId, info);
+
 		if (!capabilities.read && !capabilities.send) return;
 		await updateScheduleScope(sessionID, (scope) =>
 			addChannelToScope(scope, channelId, capabilities, Date.now()),
@@ -370,6 +418,7 @@ export function discordTools(
 	/** Remove a channel from the schedule scope, never the conversation itself. */
 	const contractScheduleScope = async (sessionID: string, channelId: string): Promise<void> => {
 		const context = await sessionContext(sessionID);
+
 		if (!(await canEditScope(context))) return;
 		await updateScheduleScope(sessionID, (scope, current) =>
 			removeChannelFromScope(scope, channelId, current.thread.id, Date.now()),
@@ -390,8 +439,10 @@ export function discordTools(
 		threadId: string,
 	): Promise<void> => {
 		const context = await sessionContext(sessionID);
+
 		if (!context.scheduleTurn) return;
 		const parent = context.scheduleScope?.channels[parentId];
+
 		if (!parent) return;
 		await updateScheduleScope(sessionID, (scope) =>
 			addChannelToScope(
@@ -425,12 +476,15 @@ export function discordTools(
 		messageId: string,
 	): Promise<DiscordMessageView> => {
 		const message = await rest.message(channelId, messageId);
+
 		if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
+
 		if (isBotAuthored(message, botUserId)) {
 			throw new Error(
 				`Message ${messageId} was written by a bot or webhook, so Eryn will not start or watch a thread from it.`,
 			);
 		}
+
 		return message;
 	};
 
@@ -444,7 +498,9 @@ export function discordTools(
 	 */
 	const crossChannel = async (call: ToolCall, targetChannelId: string): Promise<void> => {
 		const context = await sessionContext(call.sessionID);
+
 		if (isCurrentConversation(context, targetChannelId)) return;
+
 		if (!plugin) throw new Error("Eryn cannot check the cross-channel policy right now.");
 		await plugin.permission.assert({
 			action: "discord.cross-channel",
@@ -460,6 +516,7 @@ export function discordTools(
 		(key: "channelId" | "threadId") =>
 		async (input: Record<string, unknown>, call: ToolCall): Promise<void> => {
 			const channelId = input[key];
+
 			if (typeof channelId === "string") await crossChannel(call, channelId);
 		};
 
@@ -468,8 +525,11 @@ export function discordTools(
 		const session = plugin
 			? await plugin.session.get({ sessionID }).catch(() => undefined)
 			: undefined;
+
 		const discord = readDiscordContext(session?.metadata);
+
 		if (!discord) return {};
+
 		return {
 			notifyThreadId: discord.thread.id,
 			...(discord.thread.name ? { notifyTitle: discord.thread.name } : {}),
@@ -485,25 +545,32 @@ export function discordTools(
 			input: objectSchema({}),
 			async run(_rawInput, call) {
 				const context = await sessionContext(call.sessionID);
+
 				if (context.scheduleTurn) {
 					// A schedule has no view of the server beyond its scope. Return
 					// only those channels, even if the bot can see more.
 					const allowed = new Set(Object.keys(context.scheduleScope?.channels ?? {}));
+
 					const [channels, threads] = await Promise.all([
 						rest.guildChannels(guildId),
 						rest.activeThreads(guildId),
 					]);
+
 					return [...channels, ...threads].filter((entry) => allowed.has(entry.id)).map(channelSummary);
 				}
+
 				// Without a speaker there is nobody whose view of the server could
 				// be shown. The conversation's own ids are already in the prompt,
 				// so an empty list is the safe answer.
 				if (!context.authorId) return [];
+
 				const [channels, threads] = await Promise.all([
 					rest.guildChannels(guildId),
 					rest.activeThreads(guildId),
 				]);
+
 				const visible = await authority.filterVisible(context.authorId, [...channels, ...threads]);
+
 				return visible.map(channelSummary);
 			},
 		},
@@ -515,11 +582,15 @@ export function discordTools(
 			async run(_rawInput, call) {
 				const context = await sessionContext(call.sessionID);
 				const threads = await rest.activeThreads(guildId);
+
 				if (context.scheduleTurn) {
 					const allowed = new Set(Object.keys(context.scheduleScope?.channels ?? {}));
+
 					return threads.filter((entry) => allowed.has(entry.id)).map(channelSummary);
 				}
+
 				if (!context.authorId) return [];
+
 				return (await authority.filterVisible(context.authorId, threads)).map(channelSummary);
 			},
 		},
@@ -547,15 +618,19 @@ export function discordTools(
 					"read messages",
 					{ allowWithoutAuthor: true },
 				);
+
 				const messages = await rest.channelMessages(channelId, {
 					limit: Math.min(Math.max(Math.trunc(limit ?? 20), 1), 50),
 					...(before ? { before } : {}),
 				});
+
 				const text = [
 					renderChannel(channelInfo),
 					...messages.map((message) => renderMessage(message, botUserId)),
 				].join("\n\n");
+
 				const images = await readMessageImages(messages);
+
 				return new ToolOutput(
 					images.note ? `${text}\n\n${images.note}` : text,
 					images.files,
@@ -591,7 +666,9 @@ export function discordTools(
 					replyTo?: string;
 					files?: string[];
 				};
+
 				const found = await channel(channelId);
+
 				const context = await requireChannelPermission(
 					call.sessionID,
 					channelId,
@@ -602,23 +679,30 @@ export function discordTools(
 					"send messages",
 					{ allowWithoutAuthor: true },
 				);
+
 				const files = [...new Set((rawFiles ?? []).map((file) => file.trim()).filter(Boolean))];
+
 				if (files.length > MAX_FILES) {
 					throw new Error(`A message can carry at most ${MAX_FILES} files; this one has ${files.length}.`);
 				}
+
 				const text = content ?? "";
+
 				if (!text.trim() && files.length === 0) throw new Error("Message content or a file is required.");
 				const formatted = forDiscord(text);
 				const uploads = await readUploads(store, files);
+
 				const sent = await rest.sendMessage(channelId, formatted.content, {
 					...(replyTo ? { replyTo } : {}),
 					...(formatted.embeds.length > 0 ? { embeds: formatted.embeds } : {}),
 					...(uploads.length > 0 ? { files: uploads } : {}),
 				});
+
 				// A successful send is the usage signal: the turn either replied
 				// in its conversation or it did not. Content is not involved, and
 				// the id is the conversation's even when the reply went elsewhere.
 				onMessageSent?.(context.thread.id);
+
 				return sent;
 			},
 		},
@@ -648,18 +732,24 @@ export function discordTools(
 					options?: string[];
 					multiple?: boolean;
 				};
+
 				const context = await sessionContext(call.sessionID);
+
 				if (context.scheduleTurn) {
 					throw new Error("A scheduled turn has no one to answer a question.");
 				}
+
 				const authorId = context.authorId;
+
 				if (!authorId) throw new Error("This turn has no Discord user to answer.");
 				const asked = formatMessage(question.trim()).content.slice(0, 2_000);
+
 				if (!asked) throw new Error("A question is required.");
 
 				const options = [
 					...new Set((rawOptions ?? []).map((option) => option.trim()).filter(Boolean)),
 				].slice(0, 25);
+
 				const components = options.length
 					? [
 							options.length <= 5 && multiple !== true
@@ -689,6 +779,7 @@ export function discordTools(
 						? "_Choose an answer below._"
 						: "_Reply in this conversation with your answer._",
 				].join("\n");
+
 				await rest.sendMessage(
 					context.thread.id,
 					content.length > MAX_CONTENT ? `${content.slice(0, MAX_CONTENT - 10)}…` : content,
@@ -727,16 +818,21 @@ export function discordTools(
 					"create a thread",
 				);
 				const name = rawName.trim().slice(0, 100);
+
 				if (!name) throw new Error("A thread name is required.");
+
 				// Threading a bot's message is another way to make a bot-authored
 				// thread, so refuse it here as well as in the message watch.
 				if (messageId) await requireHumanMessage(channelId, messageId);
+
 				const created = messageId
 					? await rest.createThread(channelId, messageId, name)
 					: await rest.startThread(channelId, name);
+
 				// A schedule may then post in the thread it made, under the same
 				// capabilities it had in the parent channel.
 				await inheritThreadScope(call.sessionID, channelId, created.id);
+
 				return created;
 			},
 		},
@@ -749,9 +845,11 @@ export function discordTools(
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
 				const { channelId, messageId } = rawInput as MessageInput;
+
 				if (THREAD_TYPES.has((await channel(channelId)).type)) {
 					throw new Error(`A thread cannot be created from a message inside ${channelId}.`);
 				}
+
 				await requireChannelPermission(
 					call.sessionID,
 					channelId,
@@ -764,6 +862,7 @@ export function discordTools(
 					true,
 				);
 				await expandScheduleScope(call.sessionID, channelId);
+
 				return { ok: true, channelId, messageId, subscribed: true };
 			},
 		},
@@ -784,6 +883,7 @@ export function discordTools(
 				);
 				await setMessageSubscription({ channelId, messageId }, false);
 				await contractScheduleScope(call.sessionID, channelId);
+
 				return { ok: true, channelId, messageId, subscribed: false };
 			},
 		},
@@ -809,6 +909,7 @@ export function discordTools(
 					"archive that thread",
 				);
 				await rest.setThreadArchived(threadId, true, locked ?? false);
+
 				return { ok: true, threadId };
 			},
 		},
@@ -827,6 +928,7 @@ export function discordTools(
 				await requireChannelPermission(call.sessionID, threadId, Permission.ViewChannel, "join that thread");
 				await rest.joinThread(threadId);
 				await setSubscription("thread", threadId, true);
+
 				return { ok: true, threadId, subscribed: true };
 			},
 		},
@@ -842,6 +944,7 @@ export function discordTools(
 				await requireChannelPermission(call.sessionID, threadId, Permission.ViewChannel, "leave that thread");
 				await rest.leaveThread(threadId);
 				await setSubscription("thread", threadId, false);
+
 				return { ok: true, threadId, subscribed: false };
 			},
 		},
@@ -858,6 +961,7 @@ export function discordTools(
 				await requireManageGuild(call.sessionID, "subscribe Eryn to a channel");
 				await setSubscription("channel", channelId, true);
 				await expandScheduleScope(call.sessionID, channelId);
+
 				return { ok: true, channelId, subscribed: true };
 			},
 		},
@@ -873,6 +977,7 @@ export function discordTools(
 				await requireManageGuild(call.sessionID, "unsubscribe Eryn from a channel");
 				await setSubscription("channel", channelId, false);
 				await contractScheduleScope(call.sessionID, channelId);
+
 				return { ok: true, channelId, subscribed: false };
 			},
 		},
@@ -899,8 +1004,10 @@ export function discordTools(
 					Permission.ViewChannel | Permission.AddReactions,
 					"react to messages",
 				);
+
 				if (remove) await rest.removeReaction(channelId, messageId, emoji);
 				else await rest.addReaction(channelId, messageId, emoji);
+
 				return { ok: true };
 			},
 		},
@@ -921,6 +1028,7 @@ export function discordTools(
 				const { channelId, messageId, content } = rawInput as MessageInput & { content: string };
 				await channel(channelId);
 				const message = await rest.message(channelId, messageId);
+
 				if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
 				// Editing Eryn's own message only needs visibility; editing anyone
 				// else's is a moderation action.
@@ -941,6 +1049,7 @@ export function discordTools(
 					// embeds are left alone.
 					own ? { embeds: formatted.embeds } : {},
 				);
+
 				return { ok: true };
 			},
 		},
@@ -954,6 +1063,7 @@ export function discordTools(
 				const { channelId, messageId } = rawInput as MessageInput;
 				await channel(channelId);
 				const message = await rest.message(channelId, messageId);
+
 				if (!message) throw new Error(`Message ${messageId} was not found in ${channelId}.`);
 				// Deleting Eryn's own message only needs visibility; deleting anyone
 				// else's is a moderation action, matching the edit policy.
@@ -965,6 +1075,7 @@ export function discordTools(
 					own ? "delete its own message" : "delete messages",
 				);
 				await rest.deleteMessage(channelId, messageId);
+
 				return { ok: true };
 			},
 		},
@@ -990,8 +1101,10 @@ export function discordTools(
 					Permission.ViewChannel | Permission.ManageMessages,
 					"pin or unpin messages",
 				);
+
 				if (remove) await rest.unpinMessage(channelId, messageId);
 				else await rest.pinMessage(channelId, messageId);
+
 				return { ok: true };
 			},
 		},

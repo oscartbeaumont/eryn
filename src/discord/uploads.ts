@@ -11,20 +11,24 @@
 /** The last segment of a path, which becomes the attachment's filename. */
 export function uploadName(path: string): string {
 	const name = path.slice(path.lastIndexOf("/") + 1).trim();
+
 	return name || "file";
 }
 
 /** The filename for each upload, with duplicates made unique. */
 export function uploadNames(paths: readonly string[]): string[] {
 	const used = new Set<string>();
+
 	return paths.map((path) => {
 		const base = uploadName(path);
 		const dot = base.lastIndexOf(".");
 		const stem = dot > 0 ? base.slice(0, dot) : base;
 		const extension = dot > 0 ? base.slice(dot) : "";
 		let name = base;
+
 		for (let suffix = 2; used.has(name); suffix += 1) name = `${stem}-${suffix}${extension}`;
 		used.add(name);
+
 		return name;
 	});
 }

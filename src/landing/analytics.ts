@@ -38,13 +38,16 @@ export async function posthogProxy(request: Request, url: URL): Promise<Response
 		headers,
 		body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
 	});
+
 	// PostHog's loader and plugin files are versioned and immutable; the
 	// ingestion host's responses are not.
 	if (rest.startsWith("static/") && response.ok) {
 		const cached = new Response(response.body, response);
 		cached.headers.set("cache-control", "public, max-age=3600");
+
 		return cached;
 	}
+
 	return response;
 }
 

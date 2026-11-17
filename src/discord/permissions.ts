@@ -71,11 +71,13 @@ export interface EffectivePermissionInput extends GuildPermissionInput {
 
 /** Thread channel types. Kept local so this module has no Discord imports. */
 const THREAD_TYPES = new Set([10, 11, 12]);
+
 const PRIVATE_THREAD = 12;
 
 /** Parse a Discord permission bitmask, treating anything unreadable as zero. */
 export function parsePermissions(value: string | undefined): bigint {
 	if (!value) return 0n;
+
 	try {
 		return BigInt(value) & ALL_PERMISSIONS;
 	} catch {
@@ -100,12 +102,14 @@ export function guildPermissions(input: GuildPermissionInput): bigint {
 
 	const everyone = input.roles.find((role) => role.id === input.guildId);
 	let permissions = parsePermissions(everyone?.permissions);
+
 	for (const roleId of input.memberRoleIds) {
 		// `@everyone` is always present and already counted.
 		if (roleId === input.guildId) continue;
 		const role = input.roles.find((candidate) => candidate.id === roleId);
 		permissions |= parsePermissions(role?.permissions);
 	}
+
 	return hasPermission(permissions, Permission.Administrator) ? ALL_PERMISSIONS : permissions;
 }
 
@@ -113,6 +117,7 @@ export function guildPermissions(input: GuildPermissionInput): bigint {
 export function applyOverwrite(permissions: bigint, overwrite: PermissionOverwriteLike): bigint {
 	const deny = parsePermissions(overwrite.deny);
 	const allow = parsePermissions(overwrite.allow);
+
 	// Intersect allow with the complement of deny. A malformed overwrite that
 	// names the same bit in both fields must deny, not grant.
 	return (permissions & ~deny) | (allow & ~deny);
@@ -126,12 +131,16 @@ export function overwritesFor(
 	if (!THREAD_TYPES.has(channel.type)) {
 		return channel.permission_overwrites?.length ? [channel.permission_overwrites] : [];
 	}
+
 	// A thread inherits its parent's overwrites. Apply the parent's list first,
 	// then the thread's own: repeating an entry is idempotent, and a
 	// thread-specific entry cannot discard a parent deny.
 	const layers: (readonly PermissionOverwriteLike[])[] = [];
+
 	if (parent?.permission_overwrites?.length) layers.push(parent.permission_overwrites);
+
 	if (channel.permission_overwrites?.length) layers.push(channel.permission_overwrites);
+
 	return layers;
 }
 
@@ -157,12 +166,15 @@ function applyOverwrites(
 
 	let allow = 0n;
 	let deny = 0n;
+
 	for (const overwrite of overwrites) {
 		if (overwrite.type !== 0 || overwrite.id === input.guildId) continue;
+
 		if (!input.memberRoleIds.includes(overwrite.id)) continue;
 		allow |= parsePermissions(overwrite.allow);
 		deny |= parsePermissions(overwrite.deny);
 	}
+
 	permissions = (permissions & ~deny) | (allow & ~deny);
 
 	for (const member of overwrites) {
@@ -170,12 +182,14 @@ function applyOverwrites(
 			permissions = applyOverwrite(permissions, member);
 		}
 	}
+
 	return permissions;
 }
 
 /** The effective permissions of one member in one channel or thread. */
 export function effectivePermissions(input: EffectivePermissionInput): bigint {
 	let permissions = guildPermissions(input);
+
 	// An administrator is not subject to overwrites.
 	if (permissions === ALL_PERMISSIONS) return ALL_PERMISSIONS;
 
@@ -193,6 +207,7 @@ export function effectivePermissions(input: EffectivePermissionInput): bigint {
 			hasPermission(permissions, Permission.ManageThreads) ||
 			hasPermission(permissions, Permission.ManageChannels) ||
 			hasPermission(permissions, Permission.Administrator);
+
 		if (input.isThreadMember !== true && !manages) return 0n;
 	}
 

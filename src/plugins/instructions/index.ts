@@ -24,6 +24,7 @@ export function agentInstructionsPlugin(read: () => string | undefined) {
 		async setup(ctx) {
 			await appendToSystemPrompt(ctx, MARKER, async () => {
 				const editable = read()?.trim();
+
 				return [MARKER, CORE, editable].filter(Boolean).join("\n\n");
 			});
 		},

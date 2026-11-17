@@ -63,10 +63,12 @@ export function installUrl(
 		scope: "bot applications.commands",
 		permissions: (options.permissions ?? BOT_PERMISSIONS).toString(),
 	});
+
 	if (options.guildId) {
 		params.set("guild_id", options.guildId);
 		params.set("disable_guild_select", "true");
 	}
+
 	return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 

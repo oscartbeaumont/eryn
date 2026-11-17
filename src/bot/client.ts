@@ -60,9 +60,13 @@ import {
 } from "../session/models";
 
 const LinkListSchema = Schema.Struct({ links: Schema.Array(PublicLinkSchema) });
+
 const ProviderListSchema = Schema.Struct({ integrations: Schema.Array(IntegrationOptionSchema) });
+
 const ModelListSchema = Schema.Struct({ models: Schema.Array(ModelOptionSchema) });
+
 const ProfilesResponseSchema = Schema.Struct({ ok: Schema.Boolean, ...ProfilesStateSchema.fields });
+
 const PolicyStateResponseSchema = Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema });
 
 function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] {
@@ -101,14 +105,18 @@ export class SessionClient {
 				body: JSON.stringify({ ...body, guildId: this.guildId }),
 			}),
 		);
+
 		const payload = (await response.json().catch(() => undefined)) as unknown;
+
 		if (!response.ok) {
 			const message =
 				payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
 					? (payload as { error: string }).error
 					: `the guild session returned HTTP ${response.status}`;
+
 			throw botError(message);
 		}
+
 		return decode(schema, payload);
 	}
 
@@ -148,6 +156,11 @@ export class SessionClient {
 		await this.call(ROUTES.linkRemove, Schema.Unknown, { linkId });
 	}
 
+	/** Change where one link's approval questions go, keeping its token. */
+	async setLinkElicitation(linkId: string, elicitation: ElicitationMode): Promise<void> {
+		await this.call(ROUTES.linkElicitation, Schema.Unknown, { linkId, elicitation });
+	}
+
 	/** Ask a URL what it offers before it is linked, and how it wants to be authed. */
 	probe(url: string, token?: string): Promise<McpProbeResponse> {
 		return this.call(ROUTES.linkProbe, McpProbeResponseSchema, {
@@ -180,6 +193,7 @@ export class SessionClient {
 
 	async mcpAuthUrl(attemptId: string): Promise<string> {
 		const response = await this.call(ROUTES.linkOauthUrl, McpAuthUrlResponseSchema, { attemptId });
+
 		return response.url;
 	}
 
@@ -206,6 +220,7 @@ export class SessionClient {
 			CommandListResponseSchema,
 			channelId ? { channelId } : {},
 		);
+
 		return [...response.commands];
 	}
 
@@ -230,6 +245,7 @@ export class SessionClient {
 		policy: Policy;
 	}): Promise<PolicyState> {
 		const response = await this.call(ROUTES.policySet, PolicyStateResponseSchema, input);
+
 		return response.state;
 	}
 
@@ -239,6 +255,7 @@ export class SessionClient {
 		threadId?: string;
 	}): Promise<PolicyState> {
 		const response = await this.call(ROUTES.policyClear, PolicyStateResponseSchema, input);
+
 		return response.state;
 	}
 
@@ -327,6 +344,7 @@ export class SessionClient {
 			Schema.Struct({ stopped: Schema.optional(Schema.Boolean) }),
 			{ threadId, gone },
 		);
+
 		return payload.stopped === true;
 	}
 

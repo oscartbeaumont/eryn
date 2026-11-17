@@ -49,12 +49,14 @@ export function workspaceSkillsPlugin(
 						signal: controller.signal,
 					})) {
 						const directory = directories.get(String(event.data.id));
+
 						if (directory) activeSkills.set(String(event.data.sessionID), directory);
 					}
 				} catch {
 					// The host closed or replaced the subscription.
 				}
 			})();
+
 			return () => controller.abort();
 		},
 	});

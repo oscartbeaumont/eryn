@@ -87,12 +87,15 @@ export async function maybeAnnounceInstall(
 	analytics: Analytics,
 ): Promise<void> {
 	if (guild.unavailable) return;
+
 	if (await storage.get(marker(guild.id))) return;
 
 	// Reads require the View Audit Log permission; a failure just means no
 	// announcement, and the marker is left unset so a later replay can retry.
 	const entry = await rest.botAddEntry(guild.id).catch(() => undefined);
+
 	if (!entry) return;
+
 	// `target_id` is the bot that was added. Without a positive match we cannot
 	// know this entry is about us, so another bot joining must not be greeted as
 	// Eryn's install.
@@ -102,13 +105,17 @@ export async function maybeAnnounceInstall(
 	// happened just now is worth announcing. An entry whose age cannot be read is
 	// left unmarked so a later replay can retry rather than guessed at.
 	const createdAt = createdAtOf(entry);
+
 	if (createdAt === undefined) return;
+
 	if (Date.now() - createdAt > RECENT_MS) {
 		await storage.put(marker(guild.id), Date.now());
+
 		return;
 	}
 
 	const installer = entry.user_id ?? guild.owner_id;
+
 	if (!installer) return;
 
 	// A confirmed fresh install is the top of the funnel. Whether the greeting
@@ -116,16 +123,19 @@ export async function maybeAnnounceInstall(
 	await analytics.capture("install_started");
 
 	const name = guild.name ?? "this server";
+
 	const body = [
 		`Thanks for adding **Eryn** to **${name}**! Connect an inference provider and I will be ready to answer.`,
 		`<@${installer}>`,
 	].join("\n");
+
 	const components = [buttonRow([actionButton("Start setup", SETUP_MENU_ID, 1)])];
 
 	// The system channel is the guild's own welcome channel, so prefer it. A
 	// guild can have none (or the bot cannot post there), so fall back to the
 	// first text channel and let Discord's permissions decide.
 	const channels = await rest.guildChannels(guild.id).catch(() => []);
+
 	const targets = new Set<string>([
 		...(guild.system_channel_id ? [guild.system_channel_id] : []),
 		...channels.filter((channel) => WRITABLE_TYPES.has(channel.type)).map((channel) => channel.id),
@@ -142,11 +152,13 @@ export async function maybeAnnounceInstall(
 				sentAt: Date.now(),
 			} satisfies InstallGreeting);
 			log("gateway", `welcomed ${installer} about guild ${guild.id} in ${channelId}`);
+
 			return;
 		} catch (error) {
 			log("gateway", `could not post the install message in ${channelId}: ${String(error)}`);
 		}
 	}
+
 	log("gateway", `could not post the install message for guild ${guild.id}: no writable channel`);
 }
 
@@ -165,9 +177,13 @@ export async function dismissInstallGreeting(
 ): Promise<void> {
 	const key = marker(guildId);
 	const greeting = await storage.get<InstallGreeting>(key);
+
 	if (!greeting || typeof greeting !== "object") return;
+
 	if (greeting.dismissed === true) return;
+
 	if (typeof greeting.channelId !== "string" || typeof greeting.messageId !== "string") return;
+
 	try {
 		await rest.deleteMessage(greeting.channelId, greeting.messageId);
 	} catch (error) {
@@ -176,9 +192,11 @@ export async function dismissInstallGreeting(
 		// left undismissed.
 		if (!(error instanceof DiscordError && error.status === 404)) {
 			log("gateway", `could not delete the install message in ${greeting.channelId}: ${String(error)}`);
+
 			return;
 		}
 	}
+
 	// Keep the record as a dismissed marker: a READY replay re-reads the audit log
 	// for a recent install, and without it the greeting would be posted again
 	// right after the admin finished setting up.

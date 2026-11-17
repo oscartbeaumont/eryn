@@ -19,6 +19,7 @@ import { PROVIDER_SCREEN_ID } from "./providers";
 
 export async function setupMenu(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
+
 	// Every screen is ephemeral, but a component can sit on a public message: the
 	// install greeting's Start setup button. Editing that message would show the
 	// configuration to the whole channel, so a public source opens a fresh
@@ -27,10 +28,12 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 		request.interaction.type === 3 &&
 		request.interaction.guild_id !== undefined &&
 		((request.interaction.message?.flags ?? 0) & 64) === 0;
+
 	if (publicSource) await answer.deferNew();
 	else await answer.defer();
 
 	const status = await request.session.config().catch(() => undefined);
+
 	if (!status) {
 		await answer.reply("Eryn could not read this server's setup right now. Try again in a moment.", [
 			buttonRow([
@@ -38,27 +41,34 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 				actionButton("Close", request.id(SETUP_CLOSE_ID), 2),
 			]),
 		]);
+
 		return;
 	}
+
 	// The greeting exists to lead an admin into this menu, so once the server is
 	// configured it has done its job.
 	if (status.ready) await request.ctx.dismissGreeting(request.guildId).catch(() => undefined);
 	const profiles = await request.session.profiles().catch(() => undefined);
+
 	const defaultProfile = profiles?.profiles.find(
 		(profile) => profile.id === profiles.defaultProfile,
 	);
+
 	// A guild installed before a tool existed still has the old role. Discord
 	// applies new permissions only on install or re-authorisation, so point at
 	// the link that updates the role in place. `undefined` means the lookup
 	// failed, in which case this stays quiet rather than guessing.
 	const current = await request.ctx.botPermissions(request.guildId).catch(() => undefined);
 	const missing = current === undefined ? [] : missingPermissionNames(current);
+
 	const grantUrl =
 		current === undefined || missing.length === 0
 			? undefined
 			: grantPermissionsUrl(request.ctx.applicationId, request.guildId, current);
+
 	const providers = status.providers.map((provider) => provider.integrationID).join(", ") || "none";
 	const links = status.links.length;
+
 	const lines = status.ready
 		? [
 				"**Eryn is ready here.**",
@@ -73,12 +83,14 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 				...(links ? [`MCP servers: ${links} linked`] : []),
 				...(profiles ? [`Default profile: **${defaultProfile?.name ?? "Standard"}**`] : []),
 			];
+
 	if (missing.length) {
 		lines.push(
 			"",
 			`**Missing permissions:** ${missing.join(", ")}. Some tools will fail until they are granted.`,
 		);
 	}
+
 	const buttons: DiscordButton[] = [
 		actionButton(
 			status.ready ? "Change provider" : "Connect provider",
@@ -86,11 +98,15 @@ export async function setupMenu(request: InteractionRequest): Promise<void> {
 			status.ready ? 2 : 1,
 		),
 	];
+
 	if (status.ready) buttons.push(actionButton("Choose model", request.id(MODEL_SCREEN_ID), 2));
+
 	if (!request.dmGuildId) buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2));
+
 	if (!request.dmGuildId) buttons.push(actionButton("Permissions", request.id(PROFILES_SCREEN_ID), 2));
 	buttons.push(actionButton("Close", request.id(SETUP_CLOSE_ID), 2));
 	const components = [buttonRow(buttons)];
+
 	if (grantUrl) components.push(buttonRow([linkButton("Grant permissions", grantUrl)]));
 	await answer.reply(lines.join("\n"), components);
 }
@@ -106,8 +122,10 @@ export async function setupComponent(request: InteractionRequest, customId: stri
 			// Closing is best effort: if Discord has already dropped the menu there
 			// is nothing left to delete.
 			await responder(request).close().catch(() => undefined);
+
 			return true;
 	}
+
 	return false;
 }
 
@@ -117,8 +135,10 @@ async function openMcp(request: InteractionRequest): Promise<void> {
 		await responder(request).update("Manage MCP servers from the server with `/eryn setup`.", [
 			closeRow(request),
 		]);
+
 		return;
 	}
+
 	await mcpScreen(request);
 }
 

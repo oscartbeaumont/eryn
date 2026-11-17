@@ -67,6 +67,7 @@ export interface ToolSpec {
 function content(result: unknown) {
 	if (result instanceof ToolOutput) {
 		if (result.files.length === 0) return { content: result.text };
+
 		return {
 			content: [
 				{ type: "text" as const, text: result.text },
@@ -79,6 +80,7 @@ function content(result: unknown) {
 			],
 		};
 	}
+
 	return { content: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
 }
 
@@ -112,6 +114,7 @@ export function toolRun(spec: ToolSpec, ctx?: Plugin.Context) {
 		const input = (rawInput ?? {}) as Record<string, unknown>;
 		await assertAllowed(ctx, spec, rawInput, call);
 		await spec.guard?.(input, call);
+
 		return content(await spec.run(input, call));
 	};
 }
@@ -124,6 +127,7 @@ export function toolExecute(spec: ToolSpec, ctx?: Plugin.Context) {
 		// retry or report as a result. The guard runs here for the same reason.
 		await assertAllowed(ctx, spec, rawInput, call);
 		await spec.guard?.(input, call);
+
 		try {
 			return content(await spec.run(input, call));
 		} catch (error) {

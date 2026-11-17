@@ -68,18 +68,24 @@ export class ConversationQueues {
 	/** Reserve the next position for a conversation, before any await. */
 	begin(key: string): ConversationTicket {
 		let finish!: () => void;
+
 		const done = new Promise<void>((resolve) => {
 			finish = resolve;
 		});
+
 		let resolveChecked!: () => void;
+
 		const checked = new Promise<void>((resolve) => {
 			resolveChecked = resolve;
 		});
+
 		const entries = this.queues.get(key);
 		const previous = entries?.[entries.length - 1];
 		const entry: Entry = { key, settled: false, finish, checked, resolveChecked };
+
 		if (entries) entries.push(entry);
 		else this.queues.set(key, [entry]);
+
 		return new ConversationTicket(this, entry, done, previous?.checked ?? Promise.resolve());
 	}
 
@@ -96,15 +102,19 @@ export class ConversationQueues {
 	private async drain(key: string): Promise<void> {
 		if (this.draining.has(key)) return;
 		this.draining.add(key);
+
 		try {
 			for (;;) {
 				const entries = this.queues.get(key);
 				const head = entries?.[0];
+
 				if (!head) return;
+
 				// The earliest message is still deciding whether it is a turn.
 				// Nothing later may start before it: that is what keeps the order.
 				if (!head.settled) return;
 				entries.shift();
+
 				if (head.work) {
 					try {
 						await head.work();
@@ -112,10 +122,12 @@ export class ConversationQueues {
 						this.onError(`message in ${key} failed`, error);
 					}
 				}
+
 				head.finish();
 			}
 		} finally {
 			this.draining.delete(key);
+
 			if (this.queues.get(key)?.length === 0) this.queues.delete(key);
 		}
 	}

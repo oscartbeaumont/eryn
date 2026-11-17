@@ -23,16 +23,20 @@ export interface Application {
 }
 
 let cachedToken: string | undefined;
+
 let cached: Promise<Application | undefined> | undefined;
 
 /** The application the bot token belongs to, or undefined when Discord will not say. */
 export function application(env: Env): Promise<Application | undefined> {
 	const token = env.DISCORD_BOT_TOKEN?.trim();
+
 	if (!token) return Promise.resolve(undefined);
+
 	if (!cached || cachedToken !== token) {
 		cachedToken = token;
 		cached = fetchApplication(token);
 	}
+
 	return cached;
 }
 
@@ -41,16 +45,21 @@ async function fetchApplication(token: string): Promise<Application | undefined>
 		const response = await fetch(`${API}/applications/@me`, {
 			headers: { authorization: `Bot ${token}` },
 		});
+
 		if (!response.ok) {
 			log("application", `Discord returned HTTP ${response.status} for this application`);
+
 			return undefined;
 		}
+
 		const body = (await response.json()) as {
 			id?: unknown;
 			verify_key?: unknown;
 			interactions_endpoint_url?: unknown;
 		};
+
 		if (typeof body.id !== "string") return undefined;
+
 		return {
 			id: body.id,
 			...(typeof body.verify_key === "string" ? { verifyKey: body.verify_key } : {}),
@@ -60,6 +69,7 @@ async function fetchApplication(token: string): Promise<Application | undefined>
 		};
 	} catch (error) {
 		log("application", `could not read this application: ${String(error)}`);
+
 		return undefined;
 	}
 }
@@ -78,9 +88,12 @@ export async function applicationId(env: Env): Promise<string> {
  */
 export async function resolveOrigin(env: Env): Promise<string | undefined> {
 	const configured = configuredOrigin(env);
+
 	if (configured) return configured;
 	const endpoint = (await application(env))?.endpoint;
+
 	if (!endpoint) return undefined;
+
 	try {
 		return new URL(endpoint).origin;
 	} catch {
@@ -104,23 +117,31 @@ export async function ensureEndpoint(env: Env, origin: string): Promise<void> {
 	// endpoint of the application that token belongs to.
 	if (!origin.startsWith("https://")) return;
 	const endpoint = `${origin.replace(/\/$/, "")}${INTERACTIONS_PATH}`;
+
 	if (ensured.has(endpoint)) return;
 	const token = env.DISCORD_BOT_TOKEN?.trim();
+
 	if (!token) return;
 	const current = await application(env);
+
 	if (!current) return;
+
 	if (current.endpoint !== endpoint) {
 		const response = await fetch(`${API}/applications/@me`, {
 			method: "PATCH",
 			headers: { authorization: `Bot ${token}`, "content-type": "application/json" },
 			body: JSON.stringify({ interactions_endpoint_url: endpoint }),
 		});
+
 		if (!response.ok) {
 			log("application", `could not deliver interactions to ${endpoint}: HTTP ${response.status}`);
+
 			return;
 		}
+
 		current.endpoint = endpoint;
 		log("application", `interactions are now delivered to ${endpoint}`);
 	}
+
 	ensured.add(endpoint);
 }

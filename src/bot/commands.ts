@@ -7,4 +7,5 @@
  */
 
 export { erynCommand, handleInteraction, sameCommands } from "./commands/index";
+
 export type { CommandContext } from "./commands/interaction";

@@ -48,6 +48,7 @@ export const ScheduleScopeSchema = Schema.Struct({
 	createdAt: Schema.Number,
 	updatedAt: Schema.Number,
 });
+
 export type ScheduleScope = typeof ScheduleScopeSchema.Type;
 
 export const DiscordContextSchema = Schema.Struct({
@@ -82,6 +83,7 @@ export const DiscordContextSchema = Schema.Struct({
 	/** The capability scope every schedule in this conversation runs under. */
 	scheduleScope: Schema.optional(ScheduleScopeSchema),
 });
+
 export type DiscordContext = typeof DiscordContextSchema.Type;
 
 /**
@@ -125,6 +127,7 @@ export const McpLinkSchema = Schema.Struct({
 	oauth: Schema.optional(McpOAuthSchema),
 	createdAt: Schema.Number,
 });
+
 export type McpLink = typeof McpLinkSchema.Type;
 
 /** A link as a caller may see it: no secret. */
@@ -136,6 +139,7 @@ export const PublicLinkSchema = Schema.Struct({
 	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	createdAt: Schema.Number,
 });
+
 export type PublicLink = typeof PublicLinkSchema.Type;
 
 /** One tool an MCP server advertises, as a connection test reports it. */
@@ -144,6 +148,7 @@ export const McpToolSummarySchema = Schema.Struct({
 	title: Schema.optional(Schema.String),
 	description: Schema.optional(Schema.String),
 });
+
 export type McpToolSummary = typeof McpToolSummarySchema.Type;
 
 /** The outcome of talking to an MCP server: what it offers, or why it refused. */
@@ -157,6 +162,7 @@ export const McpProbeResponseSchema = Schema.Struct({
 	scope: Schema.optional(Schema.String),
 	error: Schema.optional(Schema.String),
 });
+
 export type McpProbeResponse = typeof McpProbeResponseSchema.Type;
 
 /**
@@ -190,6 +196,7 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	linkId: Schema.optional(Schema.String),
 	createdAt: Schema.Number,
 });
+
 export type PendingMcpAuth = typeof PendingMcpAuthSchema.Type;
 
 /** A sign-in's state, as the Discord interaction asks about it. */
@@ -198,6 +205,7 @@ export const McpAuthStatusSchema = Schema.Struct({
 	message: Schema.optional(Schema.String),
 	link: Schema.optional(PublicLinkSchema),
 });
+
 export type McpAuthStatus = typeof McpAuthStatusSchema.Type;
 
 export const McpAuthUrlResponseSchema = Schema.Struct({ url: Schema.String });
@@ -210,6 +218,7 @@ export const McpAuthStartResponseSchema = Schema.Struct({
 	startUrl: Schema.optional(Schema.String),
 	error: Schema.optional(Schema.String),
 });
+
 export type McpAuthStartResponse = typeof McpAuthStartResponseSchema.Type;
 
 export const McpAuthCompleteResponseSchema = Schema.Struct({
@@ -219,6 +228,7 @@ export const McpAuthCompleteResponseSchema = Schema.Struct({
 	link: Schema.optional(PublicLinkSchema),
 	tools: Schema.optional(Schema.Array(McpToolSummarySchema)),
 });
+
 export type McpAuthCompleteResponse = typeof McpAuthCompleteResponseSchema.Type;
 
 /** One provider credential a guild has connected. */
@@ -229,6 +239,7 @@ export const ProviderConnectionSchema = Schema.Struct({
 	/** The secret, for a `key` connection; empty when a sign-in holds it instead. */
 	key: Schema.String,
 });
+
 export type ProviderConnection = typeof ProviderConnectionSchema.Type;
 
 /** What a guild has configured, without any secret. */
@@ -237,6 +248,7 @@ export const GuildSettingsSchema = Schema.Struct({
 	configuredBy: Schema.optional(Schema.String),
 	updatedAt: Schema.Number,
 });
+
 export type GuildSettings = typeof GuildSettingsSchema.Type;
 
 /** The status `/eryn setup` shows: readiness, the model, and no secret. */
@@ -246,6 +258,7 @@ export const GuildStatusSchema = Schema.Struct({
 	providers: Schema.Array(Schema.Struct({ integrationID: Schema.String, method: Schema.String })),
 	links: Schema.Array(PublicLinkSchema),
 });
+
 export type GuildStatus = typeof GuildStatusSchema.Type;
 
 // --- Conversation policy -------------------------------------------------------
@@ -257,6 +270,7 @@ export type GuildStatus = typeof GuildStatusSchema.Type;
  * `block` hides the tool from the agent entirely.
  */
 export const PolicyEffectSchema = Schema.Literals(["allow", "ask", "block"]);
+
 export type PolicyEffect = typeof PolicyEffectSchema.Type;
 
 /**
@@ -275,10 +289,12 @@ export const PolicyPresetSchema = Schema.Literals([
 	"read-only",
 	"locked",
 ]);
+
 export type PolicyPreset = typeof PolicyPresetSchema.Type;
 
 /** How an approval or MCP input request is delivered. */
 export const ElicitationModeSchema = Schema.Literals(["off", "discord", "browser", "agent"]);
+
 export type ElicitationMode = typeof ElicitationModeSchema.Type;
 
 /**
@@ -300,6 +316,7 @@ export const PolicySchema = Schema.Struct({
 	elicitation: Schema.optional(ElicitationModeSchema),
 	updatedAt: Schema.optional(Schema.Number),
 });
+
 export type Policy = typeof PolicySchema.Type;
 
 /**
@@ -319,6 +336,7 @@ export const PolicyProfileSchema = Schema.Struct({
 	createdAt: Schema.Number,
 	updatedAt: Schema.Number,
 });
+
 export type PolicyProfile = typeof PolicyProfileSchema.Type;
 
 /** What the policy menu reads: the scope, its own patch, and the layered result. */
@@ -337,6 +355,7 @@ export const PolicyStateSchema = Schema.Struct({
 	/** The profile the server uses when a channel has no override. */
 	defaultProfile: Schema.String,
 });
+
 export type PolicyState = typeof PolicyStateSchema.Type;
 
 /** The profiles a server owns, and the one it uses by default. */
@@ -344,6 +363,7 @@ export const ProfilesStateSchema = Schema.Struct({
 	profiles: Schema.Array(PolicyProfileSchema),
 	defaultProfile: Schema.String,
 });
+
 export type ProfilesState = typeof ProfilesStateSchema.Type;
 
 /** Where a policy card lives, so a later edit can replace it. */
@@ -351,6 +371,7 @@ export const PolicyCardSchema = Schema.Struct({
 	channelId: Schema.String,
 	messageId: Schema.String,
 });
+
 export type PolicyCard = typeof PolicyCardSchema.Type;
 
 /** The policy applied to a conversation after a change, for callers to render. */
@@ -359,6 +380,7 @@ export const PolicyChangeResponseSchema = Schema.Struct({
 	state: PolicyStateSchema,
 	message: Schema.optional(Schema.String),
 });
+
 export type PolicyChangeResponse = typeof PolicyChangeResponseSchema.Type;
 
 /** One choice an MCP form offers, with the value the server expects back. */
@@ -367,6 +389,7 @@ export const FormFieldOptionSchema = Schema.Struct({
 	label: Schema.String,
 	description: Schema.optional(Schema.String),
 });
+
 export type FormFieldOption = typeof FormFieldOptionSchema.Type;
 
 /** One field an MCP form asks for, as Discord can render it. */
@@ -384,6 +407,7 @@ export const FormFieldSchema = Schema.Struct({
 	minItems: Schema.optional(Schema.Number),
 	maxItems: Schema.optional(Schema.Number),
 });
+
 export type FormField = typeof FormFieldSchema.Type;
 
 /** A form as the Discord side sees it: the questions, not the UI controls. */
@@ -394,6 +418,7 @@ export const FormViewSchema = Schema.Struct({
 	/** Indices of the fields already answered in the conversation. */
 	answered: Schema.Array(Schema.Number),
 });
+
 export type FormView = typeof FormViewSchema.Type;
 
 // --- Provider catalogue --------------------------------------------------------
@@ -431,6 +456,7 @@ export const ProviderFieldSchema = Schema.Struct({
 	...ProviderFieldBase,
 	type: Schema.Literals(["string", "number", "integer", "boolean"]),
 });
+
 export type ProviderField = typeof ProviderFieldSchema.Type;
 
 /**
@@ -442,6 +468,7 @@ export const HostProviderFieldSchema = Schema.Struct({
 	...ProviderFieldBase,
 	type: Schema.String,
 });
+
 export type HostProviderField = typeof HostProviderFieldSchema.Type;
 
 export const IntegrationMethodOptionSchema = Schema.Struct({
@@ -453,6 +480,7 @@ export const IntegrationMethodOptionSchema = Schema.Struct({
 	supported: Schema.Boolean,
 	fields: Schema.optional(Schema.Array(ProviderFieldSchema)),
 });
+
 export type IntegrationMethodOption = typeof IntegrationMethodOptionSchema.Type;
 
 /** A provider a guild could connect, and what connecting it would take. */
@@ -462,6 +490,7 @@ export const IntegrationOptionSchema = Schema.Struct({
 	connected: Schema.Boolean,
 	methods: Schema.Array(IntegrationMethodOptionSchema),
 });
+
 export type IntegrationOption = typeof IntegrationOptionSchema.Type;
 
 /** A model the picker can offer, normalised from the host's catalogue. */
@@ -473,6 +502,7 @@ export const ModelOptionSchema = Schema.Struct({
 	enabled: Schema.Boolean,
 	connected: Schema.Boolean,
 });
+
 export type ModelOption = typeof ModelOptionSchema.Type;
 
 /** A sign-in the host has started, and where to send the user. */
@@ -482,6 +512,7 @@ export const OAuthAttemptSchema = Schema.Struct({
 	instructions: Schema.String,
 	mode: Schema.Literals(["auto", "code"]),
 });
+
 export type OAuthAttempt = typeof OAuthAttemptSchema.Type;
 
 /** How a sign-in attempt is doing. */
@@ -489,6 +520,7 @@ export const OAuthStatusSchema = Schema.Struct({
 	status: Schema.Literals(["pending", "complete", "failed", "expired"]),
 	message: Schema.optional(Schema.String),
 });
+
 export type OAuthStatus = typeof OAuthStatusSchema.Type;
 
 /**
@@ -503,6 +535,7 @@ export const PendingOAuthSchema = Schema.Struct({
 	attemptID: Schema.String,
 	createdAt: Schema.Number,
 });
+
 export type PendingOAuth = typeof PendingOAuthSchema.Type;
 
 // --- Internal route bodies -----------------------------------------------------
@@ -523,6 +556,7 @@ export const ProviderConnectRequestSchema = guildScoped({
 	code: Schema.optional(Schema.String),
 	answer: Schema.optional(Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Number, Schema.Boolean]))),
 });
+
 export type ProviderConnectRequest = typeof ProviderConnectRequestSchema.Type;
 
 export const ProviderConnectResponseSchema = Schema.Struct({
@@ -534,6 +568,7 @@ export const ProviderConnectResponseSchema = Schema.Struct({
 	status: Schema.optional(OAuthStatusSchema),
 	error: Schema.optional(Schema.String),
 });
+
 export type ProviderConnectResponse = typeof ProviderConnectResponseSchema.Type;
 
 export const ModelRequestSchema = guildScoped({ model: Schema.String });
@@ -541,12 +576,21 @@ export const ModelRequestSchema = guildScoped({ model: Schema.String });
 export const DisconnectRequestSchema = guildScoped({ integrationID: Schema.String });
 
 export const LinkAddRequestSchema = guildScoped({ link: McpLinkSchema });
+
 export const LinkRemoveRequestSchema = guildScoped({ linkId: Schema.String });
+
+export const LinkElicitationRequestSchema = guildScoped({
+	linkId: Schema.String,
+	elicitation: Schema.Literals(["off", "discord", "browser", "agent"]),
+});
+
 export const McpProbeRequestSchema = guildScoped({
 	url: Schema.String,
 	token: Schema.optional(Schema.String),
 });
+
 export const McpTestRequestSchema = guildScoped({ linkId: Schema.String });
+
 export const McpAuthStartRequestSchema = guildScoped({
 	name: Schema.String,
 	url: Schema.String,
@@ -557,9 +601,11 @@ export const McpAuthStartRequestSchema = guildScoped({
 	resourceMetadataUrl: Schema.optional(Schema.String),
 	scope: Schema.optional(Schema.String),
 });
+
 export const McpAuthAttemptRequestSchema = guildScoped({
 	attemptId: Schema.String,
 });
+
 export const McpAuthCompleteRequestSchema = guildScoped({
 	attemptId: Schema.String,
 	code: Schema.optional(Schema.String),
@@ -574,6 +620,7 @@ export const PromptAttachmentSchema = Schema.Struct({
 	contentType: Schema.optional(Schema.String),
 	size: Schema.optional(Schema.Number),
 });
+
 export type PromptAttachment = typeof PromptAttachmentSchema.Type;
 
 /** A Discord account the model may need to identify in a message. */
@@ -583,6 +630,7 @@ export const PromptUserSchema = Schema.Struct({
 	id: Schema.optional(Schema.String),
 	bot: Schema.optional(Schema.Boolean),
 });
+
 export type PromptUser = typeof PromptUserSchema.Type;
 
 export const PromptRequestSchema = guildScoped({
@@ -603,6 +651,7 @@ export const PromptRequestSchema = guildScoped({
 	/** Files attached to the message, for the model to read. */
 	attachments: Schema.optional(Schema.Array(PromptAttachmentSchema)),
 });
+
 export type PromptRequest = typeof PromptRequestSchema.Type;
 
 /** Run one of this guild's OpenCode commands. */
@@ -616,12 +665,14 @@ export const CommandRequestSchema = guildScoped({
 	author: Schema.optional(PromptUserSchema),
 	discord: Schema.optional(DiscordContextSchema),
 });
+
 export type CommandRequest = typeof CommandRequestSchema.Type;
 
 export const CommandResponseSchema = Schema.Struct({
 	ok: Schema.Boolean,
 	message: Schema.optional(Schema.String),
 });
+
 export type CommandResponse = typeof CommandResponseSchema.Type;
 
 /** List the commands available in one conversation's project. */
@@ -633,6 +684,7 @@ export const CommandInfoSchema = Schema.Struct({
 	name: Schema.String,
 	description: Schema.optional(Schema.String),
 });
+
 export type CommandInfo = typeof CommandInfoSchema.Type;
 
 export const CommandListResponseSchema = Schema.Struct({
@@ -665,6 +717,7 @@ export const InteractResponseSchema = Schema.Struct({
 	ok: Schema.Boolean,
 	message: Schema.optional(Schema.String),
 });
+
 export type InteractResponse = typeof InteractResponseSchema.Type;
 
 /** Trigger a manual compaction of one conversation's history. */
@@ -676,12 +729,14 @@ export const CompactResponseSchema = Schema.Struct({
 	ok: Schema.Boolean,
 	message: Schema.optional(Schema.String),
 });
+
 export type CompactResponse = typeof CompactResponseSchema.Type;
 
 /** The number of files removed before the defaults were restored. */
 export const ResetResponseSchema = Schema.Struct({
 	files: Schema.Number,
 });
+
 export type ResetResponse = typeof ResetResponseSchema.Type;
 
 export const PolicyGetRequestSchema = guildScoped({
@@ -780,6 +835,7 @@ export const FormTextResponseSchema = Schema.Struct({
 	consumed: Schema.Boolean,
 	message: Schema.optional(Schema.String),
 });
+
 export type FormTextResponse = typeof FormTextResponseSchema.Type;
 
 export const FormReplyResponseSchema = Schema.Struct({

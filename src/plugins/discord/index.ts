@@ -40,6 +40,7 @@ export function discordPlugin(
 	// One per host/guild. A cache shared across guilds would let a role id from
 	// one server be read as a role in another.
 	const authority = new DiscordAuthority(rest, guildId);
+
 	const tools = discordTools(
 		rest,
 		guildId,
@@ -63,9 +64,12 @@ export function discordPlugin(
 				appendToSystemPrompt(ctx, DISCORD_MARKER, async (sessionID) => {
 					const session = await ctx.session.get({ sessionID }).catch((error) => {
 						log("discord-plugin", `could not read the session, so no Discord context was added: ${describeError(error)}`);
+
 						return undefined;
 					});
+
 					const context = readDiscordContext(session?.metadata);
+
 					return context ? describeDiscordContext(context) : undefined;
 				}),
 			]);

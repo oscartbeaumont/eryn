@@ -53,12 +53,15 @@ export function requestedProviders(path: string): string[] {
 	const rest = path.slice(CATALOGUE_PATH.length).replace(/^\/+/, "");
 	const segment = rest.split("/")[0] ?? "";
 	let decoded: string;
+
 	try {
 		decoded = decodeURIComponent(segment);
 	} catch {
 		return [];
 	}
+
 	const ids = decoded.split(",").filter((id) => PROVIDER_ID.test(id));
+
 	return [...new Set(ids)].slice(0, MAX_PROVIDERS);
 }
 
@@ -66,12 +69,14 @@ export function requestedProviders(path: string): string[] {
 function endOfString(text: string, i: number): number {
 	for (i += 1; i < text.length; i++) {
 		const char = text[i];
+
 		if (char === "\\") {
 			i += 1;
 		} else if (char === '"') {
 			return i + 1;
 		}
 	}
+
 	throw new Error("unterminated string in the catalogue");
 }
 
@@ -80,20 +85,25 @@ function endOfContainer(text: string, i: number): number {
 	const open = text[i];
 	const close = open === "{" ? "}" : "]";
 	let depth = 0;
+
 	for (; i < text.length; i++) {
 		const char = text[i];
+
 		if (char === '"') {
 			i = endOfString(text, i) - 1;
 		} else if (char === "{" || char === "[") {
 			depth += 1;
 		} else if (char === "}" || char === "]") {
 			depth -= 1;
+
 			if (depth === 0) {
 				if (char !== close) throw new Error("mismatched brackets in the catalogue");
+
 				return i + 1;
 			}
 		}
 	}
+
 	throw new Error("unterminated object in the catalogue");
 }
 
@@ -105,23 +115,31 @@ function endOfContainer(text: string, i: number): number {
  */
 function withoutModels(provider: string): string {
 	let i = 0;
+
 	if (provider[i] !== "{") return provider;
 	i += 1;
+
 	while (i < provider.length) {
 		while (i < provider.length && /[\s,]/.test(provider[i] ?? "")) i += 1;
+
 		if (provider[i] === "}") return provider;
+
 		if (provider[i] !== '"') return provider;
 		const keyEnd = endOfString(provider, i);
 		const key = provider.slice(i + 1, keyEnd - 1);
 		i = keyEnd;
+
 		while (i < provider.length && provider[i] !== ":") i += 1;
 		i += 1;
 		const valueStart = i;
+
 		if (provider[i] === "{" || provider[i] === "[") {
 			const valueEnd = endOfContainer(provider, i);
+
 			if (key === "models") {
 				return `${provider.slice(0, valueStart)}{}${provider.slice(valueEnd)}`;
 			}
+
 			i = valueEnd;
 		} else if (provider[i] === '"') {
 			i = endOfString(provider, i);
@@ -129,6 +147,7 @@ function withoutModels(provider: string): string {
 			while (i < provider.length && provider[i] !== "," && provider[i] !== "}") i += 1;
 		}
 	}
+
 	return provider;
 }
 
@@ -140,22 +159,30 @@ function withoutModels(provider: string): string {
 export function filterCatalogue(text: string, keep: readonly string[]): string {
 	const kept = new Set(keep);
 	let i = 0;
+
 	while (i < text.length && text[i] !== "{") i += 1;
+
 	if (i === text.length) throw new Error("the catalogue is not a JSON object");
 	i += 1;
 
 	const entries: string[] = [];
+
 	while (i < text.length) {
 		while (i < text.length && /[\s,]/.test(text[i] ?? "")) i += 1;
+
 		if (text[i] === "}") break;
+
 		if (text[i] !== '"') throw new Error("expected a provider name in the catalogue");
 		const keyEnd = endOfString(text, i);
 		const key = text.slice(i + 1, keyEnd - 1);
 		i = keyEnd;
+
 		while (i < text.length && text[i] !== ":") i += 1;
 		i += 1;
+
 		while (i < text.length && /\s/.test(text[i] ?? "")) i += 1;
 		const valueStart = i;
+
 		if (text[i] !== "{") throw new Error("expected a provider object in the catalogue");
 		const valueEnd = endOfContainer(text, i);
 		const provider = text.slice(valueStart, valueEnd);
@@ -175,18 +202,23 @@ export function filterCatalogue(text: string, keep: readonly string[]): string {
  */
 async function loadCatalogue(keep: readonly string[]): Promise<string> {
 	let cache: Cache | undefined;
+
 	try {
 		cache = caches.default;
 	} catch {
 		// Durable Objects have no Cache API; a direct call still works.
 	}
+
 	const key = new Request(CATALOGUE_URL);
 	const hit = await cache?.match(key);
+
 	if (hit) return filterCatalogue(await hit.text(), keep);
 
 	const response = await fetch(CATALOGUE_URL, { headers: { accept: "application/json" } });
+
 	if (!response.ok) throw new Error(`models.dev returned HTTP ${response.status}`);
 	const text = await response.text();
+
 	try {
 		await cache?.put(
 			key,
@@ -197,6 +229,7 @@ async function loadCatalogue(keep: readonly string[]): Promise<string> {
 	} catch {
 		// A cache miss costs one upstream request; it must not fail the host.
 	}
+
 	return filterCatalogue(text, keep);
 }
 
@@ -209,6 +242,7 @@ async function loadCatalogue(keep: readonly string[]): Promise<string> {
  */
 export async function catalogueResponse(request: Request): Promise<Response> {
 	const keep = requestedProviders(new URL(request.url).pathname);
+
 	try {
 		return new Response(await loadCatalogue(keep), {
 			headers: CATALOGUE_HEADERS,

@@ -13,6 +13,7 @@ test("an exhausted provider account gets the usage hint", () => {
 	const rendered = renderFailure(
 		"OpenCode Go weekly usage limit reached. Switch to a free model, or turn on Extra Usage on the Go page in OpenCode Console to keep going.",
 	);
+
 	assert.match(rendered, /out of credit or usage/);
 	assert.match(rendered, /Extra Usage/);
 	assert.match(rendered, /weekly usage limit reached/);

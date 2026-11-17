@@ -29,6 +29,7 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
  */
 export function optional(env: Env, name: string): string | undefined {
 	const value = (env as unknown as Record<string, unknown>)[name];
+
 	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
@@ -46,8 +47,10 @@ export function configuredOrigin(env: Env): string | undefined {
  */
 export function sessionSecret(env: Env): string | undefined {
 	const configured = optional(env, "SESSION_SECRET");
+
 	if (configured) return configured;
 	const encryption = optional(env, "ENCRYPTION_KEY");
+
 	return encryption ? `${encryption}:mcp-state` : undefined;
 }
 

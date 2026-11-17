@@ -33,12 +33,14 @@ export async function resetScreen(request: InteractionRequest): Promise<void> {
 
 export async function resetComponent(request: InteractionRequest, customId: string): Promise<boolean> {
 	if (customId !== RESET_CONFIRM_ID) return false;
+
 	return await claim(request, "update", () => resetFiles(request));
 }
 
 async function resetFiles(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
+
 	try {
 		const { files } = await request.session.reset();
 		await answer.update(

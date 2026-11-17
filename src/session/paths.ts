@@ -16,6 +16,7 @@ export const ROUTES = {
 	links: "/links",
 	linkAdd: "/link/add",
 	linkRemove: "/link/remove",
+	linkElicitation: "/link/elicitation",
 	linkProbe: "/link/probe",
 	linkTest: "/link/test",
 	linkOauthStart: "/link/oauth/start",

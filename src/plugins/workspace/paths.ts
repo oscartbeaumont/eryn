@@ -6,11 +6,14 @@ import type { FileStore } from "./store.ts";
 export function resolvePath(cwd: string, input: string): string {
 	const base = input.startsWith("/") ? input : `${cwd}/${input}`;
 	const parts: string[] = [];
+
 	for (const segment of base.split("/")) {
 		if (segment === "" || segment === ".") continue;
+
 		if (segment === "..") parts.pop();
 		else parts.push(segment);
 	}
+
 	return `/${parts.join("/")}`;
 }
 
@@ -29,11 +32,14 @@ export async function resolveToolPath(
 ): Promise<string> {
 	if (!input.startsWith("/") && skillDirectory) {
 		const candidate = resolvePath(skillDirectory, input);
+
 		const exists =
 			kind === "file"
 				? (await store.get(candidate)) !== undefined
 				: (await store.get(candidate)) === undefined && (await store.list(candidate)).length > 0;
+
 		if (exists) return candidate;
 	}
+
 	return resolvePath(root, input);
 }

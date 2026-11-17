@@ -62,6 +62,7 @@ test("a role with Administrator implies every permission", () => {
 		roles: [role(GUILD, 0, 0n), role("admin", 1, Permission.Administrator)],
 		memberRoleIds: ["admin"],
 	});
+
 	assert.equal(permissions, ALL_PERMISSIONS);
 });
 
@@ -70,6 +71,7 @@ test("an @everyone ViewChannel deny removes the bit", () => {
 		...base,
 		channel: channel(0, [{ id: GUILD, type: 0, allow: "0", deny: Permission.ViewChannel.toString() }]),
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -83,6 +85,7 @@ test("a role allow overrides an @everyone deny", () => {
 			{ id: "viewer", type: 0, allow: Permission.ViewChannel.toString(), deny: "0" },
 		]),
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), true);
 });
 
@@ -96,6 +99,7 @@ test("a member overwrite deny overrides a role allow", () => {
 			{ id: "user-1", type: 1, allow: "0", deny: Permission.ViewChannel.toString() },
 		]),
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -106,6 +110,7 @@ test("a deny wins when one overwrite allows and denies the same bit", () => {
 			{ id: GUILD, type: 0, allow: Permission.ViewChannel.toString(), deny: Permission.ViewChannel.toString() },
 		]),
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -120,6 +125,7 @@ test("a role deny wins over another role's allow, as Discord unions them", () =>
 			EVERYONE_VIEW,
 		]),
 	});
+
 	// Discord unions every role's allow and deny bits and applies them together,
 	// so the deny wins regardless of role position.
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
@@ -136,6 +142,7 @@ test("a higher role deny beats a lower role allow", () => {
 			EVERYONE_VIEW,
 		]),
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -151,6 +158,7 @@ test("a thread without its own overwrites uses its parent's", () => {
 			],
 		},
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -166,6 +174,7 @@ test("a thread's own overwrites take precedence over its parent's", () => {
 			],
 		},
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), true);
 });
 
@@ -181,6 +190,7 @@ test("an empty thread overwrite list still inherits the parent's deny", () => {
 			],
 		},
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -204,6 +214,7 @@ test("thread overwrites are applied on top of the parent's, not instead of them"
 			],
 		},
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 	assert.equal(hasPermission(permissions, Permission.SendMessages), true);
 	assert.equal(hasPermission(permissions, Permission.AddReactions), false);
@@ -217,6 +228,7 @@ test("a non-member cannot view a private thread", () => {
 		parent: { id: "parent-1", type: 0 },
 		isThreadMember: false,
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
 
@@ -228,6 +240,7 @@ test("a private thread member can view it", () => {
 		parent: { id: "parent-1", type: 0 },
 		isThreadMember: true,
 	});
+
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), true);
 });
 
@@ -238,6 +251,7 @@ test("a member whose role permissions are missing gets no permission", () => {
 		memberRoleIds: ["broken"],
 		channel: channel(0),
 	});
+
 	assert.equal(permissions, 0n);
 	assert.equal(hasPermission(permissions, Permission.ViewChannel), false);
 });
@@ -249,5 +263,6 @@ test("a member whose role was not returned gets no permission", () => {
 		memberRoleIds: ["gone"],
 		channel: channel(0),
 	});
+
 	assert.equal(permissions, 0n);
 });

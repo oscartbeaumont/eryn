@@ -33,6 +33,7 @@ test("a wide comparison becomes an embed with one field per option", () => {
 		"| Nights | Thu–Sun (3) | Wed–Sun (4) | Thu–Sun (3) |",
 		"| Wins | cheapest, walk home after the show | everything is walkable, one extra day | proper hotel, breakfast, rooftop |",
 	].join("\n");
+
 	const formatted = formatMessage(input);
 	assert.equal(formatted.content, "");
 	assert.deepEqual(formatted.embeds, [
@@ -66,6 +67,7 @@ test("a wide three-column table is transposed into three fields", () => {
 		"| Cheap and close to the venue | $1,220 | a short walk home after the show |",
 		"| Nicer hotel in the CBD | $2,080 | proper hotel, breakfast, rooftop |",
 	].join("\n");
+
 	assert.deepEqual(formatMessage(input).embeds, [
 		{
 			color: 0xa1a1aa,
@@ -87,6 +89,7 @@ test("text before a table stays in the message, above the embed", () => {
 		"| Nights | Thu–Sun (3) | Wed–Sun (4) | Thu–Sun (3) |",
 		"| Wins | cheapest, walk home after the show | everything is walkable, one extra day | proper hotel, breakfast, rooftop |",
 	].join("\n");
+
 	const formatted = formatMessage(input);
 	assert.equal(formatted.content, "Here are the options:");
 	assert.equal(formatted.embeds.length, 1);
@@ -101,6 +104,7 @@ test("a table followed by more text keeps the labelled layout", () => {
 		"",
 		"Which one?",
 	].join("\n");
+
 	const formatted = formatMessage(input);
 	assert.equal(formatted.embeds.length, 0);
 	assert.match(formatted.content, /^\*\*Nights\*\*\n- \*\*Cheap:\*\* Thu–Sun \(3\)/);
@@ -168,6 +172,7 @@ test("formatting a message twice changes nothing", () => {
 		"| --- | --- | --- |",
 		"| One | $1,220 | a walk of ten minutes past the station and up the hill to the venue |",
 	].join("\n");
+
 	const once = formatMessage(input);
 	const twice = formatMessage(once.content);
 	assert.equal(twice.content, once.content);

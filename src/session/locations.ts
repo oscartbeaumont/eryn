@@ -19,12 +19,19 @@ export const WORKSPACE_ROOT = "/workspace";
 
 /** The guild's editable OpenCode files, outside the agent's project. */
 export const CONFIG_ROOT = LOCATION;
+
 export const CONFIG_PATH = `${CONFIG_ROOT}/opencode.jsonc`;
+
 export const LEGACY_CONFIG_PATH = `${CONFIG_ROOT}/opencode.json`;
+
 export const COMMANDS_ROOT = `${CONFIG_ROOT}/.opencode/commands`;
+
 export const SKILLS_ROOT = `${CONFIG_ROOT}/.opencode/skills`;
+
 export const AGENTS_ROOT = `${CONFIG_ROOT}/.opencode/agents`;
+
 export const LEGACY_AGENTS_ROOT = `${CONFIG_ROOT}/.opencode/agent`;
+
 export const INSTRUCTIONS_PATH = `${CONFIG_ROOT}/AGENTS.md`;
 
 /**
@@ -36,5 +43,6 @@ export const INSTRUCTIONS_PATH = `${CONFIG_ROOT}/AGENTS.md`;
  */
 export function channelProjectDirectory(channelId: string | undefined): string {
 	if (!channelId || !/^\d{1,32}$/.test(channelId)) return LOCATION;
+
 	return `${LOCATION}/channels/${channelId}`;
 }
