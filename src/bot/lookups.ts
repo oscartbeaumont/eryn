@@ -61,13 +61,13 @@ export class DiscordLookups {
 	remember(channel: DiscordChannel): DiscordChannelRef | undefined {
 		if (!isNumber(channel.type)) return undefined;
 
-		const ref: DiscordChannelRef = {
-			id: channel.id,
-			type: channel.type,
-			...(channel.guild_id ? { guild_id: channel.guild_id } : {}),
-			...(channel.parent_id ? { parent_id: channel.parent_id } : {}),
-			...(channel.name ? { name: channel.name } : {}),
-		};
+		const ref: DiscordChannelRef = { id: channel.id, type: channel.type };
+
+		if (channel.guild_id) ref.guild_id = channel.guild_id;
+
+		if (channel.parent_id) ref.parent_id = channel.parent_id;
+
+		if (channel.name) ref.name = channel.name;
 
 		if (this.channels.size > MAX_CACHED_CHANNELS) this.channels.clear();
 		this.channels.set(ref.id, ref);

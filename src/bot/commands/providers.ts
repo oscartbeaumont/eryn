@@ -180,19 +180,7 @@ export async function providerScreen(request: InteractionRequest, notice?: strin
 	const providers = connectable(await request.session.providers());
 
 	if (!providers.length) {
-		await answer.reply(
-			[
-				...(notice ? [notice, ""] : []),
-				"**Providers**",
-				connected.length
-					? `Connected: **${connected.join("**, **")}**`
-					: "No provider is connected yet — Eryn needs one to answer.",
-				connected.length
-					? "This deployment has no other provider it can connect right now."
-					: "Eryn cannot connect any inference provider in this deployment right now.",
-			].join("\n"),
-			[buttonRow(navigation)],
-		);
+		await answer.reply(emptyProviderLines(connected, notice).join("\n"), [buttonRow(navigation)]);
 
 		return;
 	}
@@ -230,25 +218,57 @@ export async function providerScreen(request: InteractionRequest, notice?: strin
 	);
 	components.push(buttonRow(navigation));
 
-	await answer.reply(
-		[
-			...(notice ? [notice, ""] : []),
-			"**Providers**",
-			connected.length
-				? `Connected: **${connected.join("**, **")}**`
-				: "No provider is connected yet — Eryn needs one to answer.",
-			connected.length
-				? "Pick another to add it, or a connected one to replace its credentials."
-				: "Pick a provider below.",
-			...(providers.length > MAX_SELECT_OPTIONS
-				? [`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search all providers** for the rest.`]
-				: []),
-			...(providers.some((provider) => provider.id === "opencode")
-				? ["OpenCode Go models are included with the OpenCode Console connection."]
-				: []),
-		].join("\n"),
-		components,
-	);
+	await answer.reply(providerScreenLines(connected, providers, notice).join("\n"), components);
+}
+
+/** The text above the provider list when nothing can be connected right now. */
+function emptyProviderLines(connected: readonly string[], notice: string | undefined): string[] {
+	const lines: string[] = [];
+
+	if (notice) lines.push(notice, "");
+
+	lines.push("**Providers**");
+
+	if (connected.length) {
+		lines.push(`Connected: **${connected.join("**, **")}**`);
+		lines.push("This deployment has no other provider it can connect right now.");
+	} else {
+		lines.push("No provider is connected yet — Eryn needs one to answer.");
+		lines.push("Eryn cannot connect any inference provider in this deployment right now.");
+	}
+
+	return lines;
+}
+
+/** The text above the provider list, including the search and OpenCode hints. */
+function providerScreenLines(
+	connected: readonly string[],
+	providers: readonly IntegrationOption[],
+	notice: string | undefined,
+): string[] {
+	const lines: string[] = [];
+
+	if (notice) lines.push(notice, "");
+
+	lines.push("**Providers**");
+
+	if (connected.length) {
+		lines.push(`Connected: **${connected.join("**, **")}**`);
+		lines.push("Pick another to add it, or a connected one to replace its credentials.");
+	} else {
+		lines.push("No provider is connected yet — Eryn needs one to answer.");
+		lines.push("Pick a provider below.");
+	}
+
+	if (providers.length > MAX_SELECT_OPTIONS) {
+		lines.push(`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search all providers** for the rest.`);
+	}
+
+	if (providers.some((provider) => provider.id === "opencode")) {
+		lines.push("OpenCode Go models are included with the OpenCode Console connection.");
+	}
+
+	return lines;
 }
 
 /** Show the providers matching a search, as a select of at most 25. */
@@ -431,30 +451,30 @@ async function startProviderMethod(
 		if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Open sign-in page", result.url));
 		buttons.push(actionButton("Enter code", CODE_ID.of(integrationID, request.dmGuildId), 1));
 		buttons.push(actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
-		await answer.update(
-			[
-				`**${integrationID}** needs a code to finish signing in.`,
-				...(result.instructions ? [result.instructions] : []),
-				...(result.url.length > MAX_LINK_URL ? ["", result.url] : []),
-				"",
-				"Open the page, then choose **Enter code**.",
-			].join("\n"),
-			[buttonRow(buttons)],
-		);
+		const lines = [`**${integrationID}** needs a code to finish signing in.`];
+
+		if (result.instructions) lines.push(result.instructions);
+
+		if (result.url.length > MAX_LINK_URL) lines.push("", result.url);
+
+		lines.push("", "Open the page, then choose **Enter code**.");
+
+		await answer.update(lines.join("\n"), [buttonRow(buttons)]);
 
 		return;
 	}
 
-	await answer.update(
-		[
-			`**${integrationID}** signs in through your browser.`,
-			...(result.instructions ? [result.instructions] : []),
-			...(result.url.length > MAX_LINK_URL ? ["", result.url] : []),
-			"",
-			"Finish the flow, then confirm here.",
-		].join("\n"),
-		[signInRow(request, integrationID, result.attemptID, result.url)],
-	);
+	const browserLines = [`**${integrationID}** signs in through your browser.`];
+
+	if (result.instructions) browserLines.push(result.instructions);
+
+	if (result.url.length > MAX_LINK_URL) browserLines.push("", result.url);
+
+	browserLines.push("", "Finish the flow, then confirm here.");
+
+	await answer.update(browserLines.join("\n"), [
+		signInRow(request, integrationID, result.attemptID, result.url),
+	]);
 }
 
 /** The "I've finished" button on a browser sign-in. */
@@ -616,11 +636,14 @@ async function removeProvider(request: InteractionRequest, integrationID: string
 	}
 
 	const status = await request.session.config().catch(() => undefined);
+	const removedLines = [`Removed **${integrationID}**.`];
+
+	if (status?.ready === false) {
+		removedLines.push("No provider is connected now, so Eryn cannot run until you connect another.");
+	}
+
 	await answer.reply(
-		[
-			`Removed **${integrationID}**.`,
-			...(status?.ready === false ? ["No provider is connected now, so Eryn cannot run until you connect another."] : []),
-		].join("\n"),
+		removedLines.join("\n"),
 		[
 			buttonRow([
 				actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2),

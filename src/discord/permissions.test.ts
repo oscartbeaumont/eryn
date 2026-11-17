@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { type Mutable } from "../mutable.ts";
 import {
 	ALL_PERMISSIONS,
 	effectivePermissions,
@@ -24,11 +25,11 @@ const GUILD = "guild-1";
 const EVERYONE_VIEW = { id: GUILD, type: 0, allow: Permission.ViewChannel.toString(), deny: "0" };
 
 function role(id: string, position: number, permissions: bigint | undefined): PermissionRole {
-	return {
-		id,
-		position,
-		...(permissions === undefined ? {} : { permissions: permissions.toString() }),
-	};
+	const role: Mutable<PermissionRole> = { id, position };
+
+	if (permissions !== undefined) role.permissions = permissions.toString();
+
+	return role;
 }
 
 function channel(
@@ -36,12 +37,13 @@ function channel(
 	overwrites?: readonly PermissionOverwriteLike[],
 	parentId?: string,
 ): PermissionChannel {
-	return {
-		id: "channel-1",
-		type,
-		...(parentId ? { parent_id: parentId } : {}),
-		...(overwrites ? { permission_overwrites: overwrites } : {}),
-	};
+	const channel: Mutable<PermissionChannel> = { id: "channel-1", type };
+
+	if (parentId) channel.parent_id = parentId;
+
+	if (overwrites) channel.permission_overwrites = overwrites;
+
+	return channel;
 }
 
 const base = {

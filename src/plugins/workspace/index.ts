@@ -43,29 +43,33 @@ type ReadInput = FileInput & { offset?: number; limit?: number };
 
 type EditInput = FileInput & { oldString: string; newString: string; replaceAll?: boolean };
 
-export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: ReadonlyMap<string, string>) {
-	const store = fileStore(storage);
-
-	/**
-	 * Resolve a tool's path argument (`filePath` for files, `path` for a listing).
-	 *
-	 * A relative path is first tried against the skill the session is currently
-	 * using, then against the workspace root. That makes a skill's own
-	 * `references/foo.md` work without the model having to know the absolute
-	 * `/eryn/...` path.
-	 */
-	const resolve = (
+/**
+ * Resolve a tool's path argument (`filePath` for files, `path` for a listing).
+ *
+ * A relative path is first tried against the skill the session is currently
+ * using, then against the workspace root. That makes a skill's own
+ * `references/foo.md` work without the model having to know the absolute
+ * `/eryn/...` path.
+ */
+function toolPath(store: FileStore, activeSkills: ReadonlyMap<string, string> | undefined) {
+	return (
 		input: { filePath?: string; path?: string },
 		call: ToolCall | undefined,
 		kind: "file" | "dir" = "file",
 	): Promise<string> =>
-		resolveToolPath(
+		resolveToolPath({
 			store,
-			WORKSPACE_ROOT,
-			call && activeSkills ? activeSkills.get(call.sessionID) : undefined,
-			input.filePath ?? input.path ?? ".",
+			root: WORKSPACE_ROOT,
+			skillDirectory: call && activeSkills ? activeSkills.get(call.sessionID) : undefined,
+			input: input.filePath ?? input.path ?? ".",
 			kind,
-		);
+		});
+}
+
+export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: ReadonlyMap<string, string>) {
+	const store = fileStore(storage);
+
+	const resolve = toolPath(store, activeSkills);
 
 	const tools: ToolSpec[] = [
 		{
@@ -190,9 +194,9 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 		id: "eryn.workspace",
 		async setup(ctx) {
 			await ctx.tool.transform((editor) => {
-				for (const name of OVERRIDDEN) editor.remove(name);
+				OVERRIDDEN.forEach((name) => editor.remove(name));
 
-				for (const spec of tools) {
+				tools.forEach((spec) => {
 					editor.add({
 						name: spec.name,
 						description: spec.description,
@@ -201,7 +205,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 						// reaches `execute`, so the object matches the declared schema.
 						execute: (input, context) => toolRun(spec, ctx)(input as Schema.JsonObject, context),
 					});
-				}
+				});
 			});
 		},
 	});

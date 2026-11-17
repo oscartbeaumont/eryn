@@ -66,77 +66,89 @@ async function readCapped(response: Response, limit: number): Promise<Uint8Array
 export async function fetchAttachmentFiles(
 	attachments: readonly PromptAttachment[] | undefined,
 ): Promise<AttachmentFiles> {
-	const files: AttachmentFile[] = [];
-	const notes: string[] = [];
+	const outcomes = await Promise.all((attachments ?? []).map((attachment) => fetchAttachment(attachment)));
 
-	for (const attachment of attachments ?? []) {
-		const name = attachment.name?.trim() || "attachment";
-		let url: URL;
+	return {
+		files: outcomes.flatMap((outcome) => (outcome.file ? [outcome.file] : [])),
+		notes: outcomes.flatMap((outcome) => (outcome.note ? [outcome.note] : [])),
+	};
+}
 
-		try {
-			url = new URL(attachment.url);
-		} catch {
-			notes.push(`${name}: invalid link`);
-			continue;
-		}
+/** One attachment's outcome: the file that was read, or why it was left out. */
+interface AttachmentOutcome {
+	readonly file?: AttachmentFile;
+	readonly note?: string;
+}
 
-		if (url.protocol !== "https:" || !ATTACHMENT_HOSTS.has(url.hostname)) {
-			notes.push(`${name}: unsupported link`);
-			continue;
-		}
+/** Read one attachment, or report the single reason it was left out. */
+async function fetchAttachment(attachment: PromptAttachment): Promise<AttachmentOutcome> {
+	const name = attachment.name?.trim() || "attachment";
+	const url = parseAttachmentUrl(attachment.url);
 
-		const declared = attachment.contentType?.split(";")[0]?.trim().toLowerCase();
+	if (!url) return { note: `${name}: invalid link` };
 
-		if (declared && !ATTACHMENT_TYPES.has(declared)) {
-			notes.push(`${name}: only images can be attached`);
-			continue;
-		}
-
-		if (attachment.size !== undefined && attachment.size > MAX_ATTACHMENT_BYTES) {
-			notes.push(`${name}: larger than 5 MB`);
-			continue;
-		}
-
-		try {
-			const response = await fetchWithRedirects(url, {
-				headers: { accept: "image/*" },
-				// A slow CDN must not hold a turn (or a tool call) open forever.
-				signal: AbortSignal.timeout(20_000),
-			});
-
-			if (!response.ok) {
-				notes.push(`${name}: download failed (HTTP ${response.status})`);
-				continue;
-			}
-
-			const served = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-			const type = served && ATTACHMENT_TYPES.has(served) ? served : declared;
-
-			if (!type || !ATTACHMENT_TYPES.has(type)) {
-				notes.push(`${name}: unsupported type ${served ?? declared ?? "unknown"}`);
-				continue;
-			}
-
-			const declaredLength = Number(response.headers.get("content-length") ?? "");
-
-			if (Number.isFinite(declaredLength) && declaredLength > MAX_ATTACHMENT_BYTES) {
-				await response.body?.cancel().catch(() => undefined);
-				notes.push(`${name}: larger than 5 MB`);
-				continue;
-			}
-
-			const bytes = await readCapped(response, MAX_ATTACHMENT_BYTES);
-
-			if (!bytes) {
-				notes.push(`${name}: larger than 5 MB`);
-				continue;
-			}
-
-			files.push({ uri: `data:${type};base64,${Base64.encode(bytes)}`, name, mime: type });
-		} catch (error) {
-			notes.push(`${name}: ${describeError(error)}`);
-		}
+	if (url.protocol !== "https:" || !ATTACHMENT_HOSTS.has(url.hostname)) {
+		return { note: `${name}: unsupported link` };
 	}
 
-	return { files, notes };
+	const declared = attachment.contentType?.split(";")[0]?.trim().toLowerCase();
+
+	if (declared && !ATTACHMENT_TYPES.has(declared)) {
+		return { note: `${name}: only images can be attached` };
+	}
+
+	if (attachment.size !== undefined && attachment.size > MAX_ATTACHMENT_BYTES) {
+		return { note: `${name}: larger than 5 MB` };
+	}
+
+	try {
+		return await downloadAttachment(url, name, declared);
+	} catch (error) {
+		return { note: `${name}: ${describeError(error)}` };
+	}
+}
+
+/** The attachment's link, or undefined when it does not parse. */
+function parseAttachmentUrl(value: string): URL | undefined {
+	try {
+		return new URL(value);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Download one image and encode it as a prompt file, or say why it was skipped. */
+async function downloadAttachment(
+	url: URL,
+	name: string,
+	declared: string | undefined,
+): Promise<AttachmentOutcome> {
+	const response = await fetchWithRedirects(url, {
+		headers: { accept: "image/*" },
+		// A slow CDN must not hold a turn (or a tool call) open forever.
+		signal: AbortSignal.timeout(20_000),
+	});
+
+	if (!response.ok) return { note: `${name}: download failed (HTTP ${response.status})` };
+
+	const served = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+	const type = served && ATTACHMENT_TYPES.has(served) ? served : declared;
+
+	if (!type || !ATTACHMENT_TYPES.has(type)) {
+		return { note: `${name}: unsupported type ${served ?? declared ?? "unknown"}` };
+	}
+
+	const declaredLength = Number(response.headers.get("content-length") ?? "");
+
+	if (Number.isFinite(declaredLength) && declaredLength > MAX_ATTACHMENT_BYTES) {
+		await response.body?.cancel().catch(() => undefined);
+
+		return { note: `${name}: larger than 5 MB` };
+	}
+
+	const bytes = await readCapped(response, MAX_ATTACHMENT_BYTES);
+
+	if (!bytes) return { note: `${name}: larger than 5 MB` };
+
+	return { file: { uri: `data:${type};base64,${Base64.encode(bytes)}`, name, mime: type } };
 }

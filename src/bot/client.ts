@@ -10,6 +10,7 @@ import { Option, Schema } from "effect";
 import { botError } from "../errors";
 import { stringField } from "../json.ts";
 import { withDeploy } from "../deploy";
+import { type Mutable } from "../mutable.ts";
 import { ROUTES } from "../session/paths";
 import {
 	ApprovalReplyResponseSchema,
@@ -161,10 +162,11 @@ export class SessionClient {
 
 	/** Ask a URL what it offers before it is linked, and how it wants to be authed. */
 	probe(url: string, token?: string): Promise<McpProbeResponse> {
-		return this.call(ROUTES.linkProbe, McpProbeResponseSchema, {
-			url,
-			...(token ? { token } : {}),
-		});
+		const payload: Mutable<Schema.JsonObject> = { url };
+
+		if (token) payload.token = token;
+
+		return this.call(ROUTES.linkProbe, McpProbeResponseSchema, payload);
 	}
 
 	/** Test a link that is already stored, refreshing its token if needed. */
@@ -197,11 +199,13 @@ export class SessionClient {
 
 	/** Finish a sign-in from the browser callback or the "I've finished" button. */
 	mcpAuthComplete(attemptId: string, code?: string, error?: string): Promise<McpAuthCompleteResponse> {
-		return this.call(ROUTES.linkOauthComplete, McpAuthCompleteResponseSchema, {
-			attemptId,
-			...(code ? { code } : {}),
-			...(error ? { error } : {}),
-		});
+		const payload: Mutable<Schema.JsonObject> = { attemptId };
+
+		if (code) payload.code = code;
+
+		if (error) payload.error = error;
+
+		return this.call(ROUTES.linkOauthComplete, McpAuthCompleteResponseSchema, payload);
 	}
 
 	async prompt(body: Omit<PromptRequest, "guildId">): Promise<void> {
@@ -298,12 +302,15 @@ export class SessionClient {
 		auth: { userId?: string; manager?: boolean } = {},
 		submit = false,
 	): Promise<{ ok: boolean; message?: string }> {
-		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, {
-			formId,
-			values,
-			...(submit ? { submit } : {}),
-			...auth,
-		});
+		const payload: Mutable<Schema.JsonObject> = { formId, values };
+
+		if (submit) payload.submit = submit;
+
+		if (auth.userId) payload.userId = auth.userId;
+
+		if (auth.manager !== undefined) payload.manager = auth.manager;
+
+		return this.call(ROUTES.formReply, ApprovalReplyResponseSchema, payload);
 	}
 
 	cancelForm(
@@ -319,13 +326,17 @@ export class SessionClient {
 		answer: { option?: number; values?: readonly string[] },
 		auth: { userId?: string; manager?: boolean } = {},
 	): Promise<{ ok: boolean; message?: string }> {
-		return this.call(ROUTES.formField, ApprovalReplyResponseSchema, {
-			formId,
-			field,
-			...(answer.option !== undefined ? { option: answer.option } : {}),
-			...(answer.values !== undefined ? { values: answer.values } : {}),
-			...auth,
-		});
+		const payload: Mutable<Schema.JsonObject> = { formId, field };
+
+		if (answer.option !== undefined) payload.option = answer.option;
+
+		if (answer.values !== undefined) payload.values = answer.values;
+
+		if (auth.userId) payload.userId = auth.userId;
+
+		if (auth.manager !== undefined) payload.manager = auth.manager;
+
+		return this.call(ROUTES.formField, ApprovalReplyResponseSchema, payload);
 	}
 
 	answerFormText(input: {

@@ -10,6 +10,7 @@
 import { Option, Schema } from "effect";
 
 import { isString } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 
 import {
 	HostProviderFieldSchema,
@@ -60,25 +61,29 @@ function describeField(field: HostProviderField): ProviderField | undefined {
 
 	if (!type) return undefined;
 
-	const common = {
-		key: field.key,
-		...(field.title ? { title: field.title } : {}),
-		...(field.description ? { description: field.description } : {}),
-		...(field.required ? { required: true } : {}),
-		...(field.when ? { when: field.when } : {}),
-	};
+	const described: Mutable<ProviderField> = { key: field.key, type };
 
-	if (type !== "string") {
-		return { ...common, type, ...(field.default === undefined ? {} : { default: field.default }) };
+	if (field.title) described.title = field.title;
+
+	if (field.description) described.description = field.description;
+
+	if (field.required) described.required = true;
+
+	if (field.when) described.when = field.when;
+
+	if (type === "string") {
+		if (field.placeholder) described.placeholder = field.placeholder;
+
+		if (isString(field.default)) described.default = field.default;
+
+		if (field.options) described.options = field.options;
+
+		return described;
 	}
 
-	return {
-		...common,
-		type,
-		...(field.placeholder ? { placeholder: field.placeholder } : {}),
-		...(isString(field.default) ? { default: field.default } : {}),
-		...(field.options ? { options: field.options } : {}),
-	};
+	if (field.default !== undefined) described.default = field.default;
+
+	return described;
 }
 
 /**

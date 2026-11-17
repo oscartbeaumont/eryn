@@ -14,8 +14,14 @@ import type { Schema } from "effect";
 import { parse, type ParseError } from "jsonc-parser";
 
 import { log } from "../config.ts";
+import { type Mutable } from "../mutable.ts";
 import { base64ToBytes, bytesToText } from "../plugins/workspace/bytes.ts";
-import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
+import {
+	fileStore,
+	type FileStore,
+	type StoredEntry,
+	type WorkspaceStorage,
+} from "../plugins/workspace/store.ts";
 
 import {
 	AGENTS_ROOT,
@@ -169,99 +175,128 @@ function safe(value: Schema.Json | undefined, field: string, source: string): st
 }
 
 async function commands(store: FileStore): Promise<Record<string, CommandConfig>> {
-	const result: Record<string, CommandConfig> = {};
+	const entries = await store.list(COMMANDS_ROOT);
+	const pairs = await Promise.all(entries.map((entry) => commandEntry(store, entry)));
 
-	for (const entry of await store.list(COMMANDS_ROOT)) {
-		if (!entry.path.endsWith(".md")) continue;
-		const name = entry.path.slice(COMMANDS_ROOT.length + 1).replace(/\.md$/, "");
+	return Object.fromEntries(pairs.filter((pair): pair is [string, CommandConfig] => pair !== undefined));
+}
 
-		if (name.split("/").some((part) => part.startsWith("."))) continue;
-		const source = await text(store, entry.path);
+/** One command file, or undefined when it cannot be used. */
+async function commandEntry(store: FileStore, entry: StoredEntry): Promise<[string, CommandConfig] | undefined> {
+	if (!entry.path.endsWith(".md")) return undefined;
 
-		if (!source) continue;
-		const markdown = ConfigMarkdown.parseOption(source);
+	const name = entry.path.slice(COMMANDS_ROOT.length + 1).replace(/\.md$/, "");
 
-		if (!markdown) {
-			log("session", `ignored command ${name}: invalid Markdown`);
-			continue;
-		}
+	if (name.split("/").some((part) => part.startsWith("."))) return undefined;
 
-		const data = record(markdown.data) ?? {};
-		const template = protectShellBlocks(markdown.content.trim());
+	const source = await text(store, entry.path);
 
-		if (!template) {
-			log("session", `ignored command ${name}: empty template`);
-			continue;
-		}
+	if (!source) return undefined;
 
-		const model = string(data.model);
-		const description = safe(data.description, "description", `command ${name}`);
-		const agent = safe(data.agent, "agent", `command ${name}`);
-		const subagent = boolean(data.subagent);
-		const subtask = boolean(data.subtask);
+	const markdown = ConfigMarkdown.parseOption(source);
 
-		const info: CommandConfig = {
-			template,
-			...(description ? { description } : {}),
-			...(agent ? { agent } : {}),
-			...(model ? { model } : {}),
-			...(subagent === undefined ? {} : { subagent }),
-			...(subtask === undefined ? {} : { subtask }),
-		};
+	if (!markdown) {
+		log("session", `ignored command ${name}: invalid Markdown`);
 
-		result[name] = info;
+		return undefined;
 	}
 
-	return result;
+	const data = record(markdown.data) ?? {};
+	const template = protectShellBlocks(markdown.content.trim());
+
+	if (!template) {
+		log("session", `ignored command ${name}: empty template`);
+
+		return undefined;
+	}
+
+	const info: CommandConfig = { template, ...commandFields(data, name) };
+
+	return [name, info];
+}
+
+/** The optional fields a command's frontmatter sets, in config form. */
+function commandFields(data: ConfigObject, name: string): Omit<CommandConfig, "template"> {
+	const model = string(data.model);
+	const description = safe(data.description, "description", `command ${name}`);
+	const agent = safe(data.agent, "agent", `command ${name}`);
+	const subagent = boolean(data.subagent);
+	const subtask = boolean(data.subtask);
+	const fields: Mutable<Omit<CommandConfig, "template">> = {};
+
+	if (description) fields.description = description;
+
+	if (agent) fields.agent = agent;
+
+	if (model) fields.model = model;
+
+	if (subagent !== undefined) fields.subagent = subagent;
+
+	if (subtask !== undefined) fields.subtask = subtask;
+
+	return fields;
 }
 
 async function skills(store: FileStore): Promise<WorkspaceSkill[]> {
-	const found: WorkspaceSkill[] = [];
+	const entries = await store.list(SKILLS_ROOT);
+	const found = await Promise.all(entries.map((entry) => skillEntry(store, entry)));
 
-	for (const entry of await store.list(SKILLS_ROOT)) {
-		if (!entry.path.endsWith(".md")) continue;
-		const relative = entry.path.slice(SKILLS_ROOT.length + 1);
-		const parts = relative.split("/");
+	return found.filter((skill): skill is WorkspaceSkill => skill !== undefined);
+}
 
-		if (parts.some((part) => part.startsWith("."))) continue;
-		const filename = parts.at(-1) ?? "";
+/** One skill file, or undefined when it cannot be used. */
+async function skillEntry(store: FileStore, entry: StoredEntry): Promise<WorkspaceSkill | undefined> {
+	if (!entry.path.endsWith(".md")) return undefined;
 
-		const id =
-			filename === "SKILL.md"
-				? parts.at(-2)
-				: parts.length === 1
-					? filename.replace(/\.md$/, "")
-					: undefined;
+	const relative = entry.path.slice(SKILLS_ROOT.length + 1);
+	const parts = relative.split("/");
 
-		if (!id || id === "SKILL.md") continue;
-		const source = await text(store, entry.path);
+	if (parts.some((part) => part.startsWith("."))) return undefined;
 
-		if (!source) continue;
-		const markdown = ConfigMarkdown.parseOption(source);
+	const filename = parts.at(-1) ?? "";
 
-		if (!markdown) {
-			log("session", `ignored skill ${id}: invalid Markdown`);
-			continue;
-		}
+	const id =
+		filename === "SKILL.md"
+			? parts.at(-2)
+			: parts.length === 1
+				? filename.replace(/\.md$/, "")
+				: undefined;
 
-		const data = record(markdown.data) ?? {};
-		const metadata = record(data.metadata);
+	if (!id || id === "SKILL.md") return undefined;
 
-		const autoinvoke =
-			boolean(metadata?.["opencode/autoinvoke"]) ??
-			(boolean(data["disable-model-invocation"]) === true ? false : undefined);
+	const source = await text(store, entry.path);
 
-		found.push({
-			id,
-			name: string(data.name) ?? id,
-			...(string(data.description) ? { description: string(data.description) } : {}),
-			...(autoinvoke === undefined ? {} : { autoinvoke }),
-			path: entry.path,
-			content: markdown.content.trim(),
-		});
+	if (!source) return undefined;
+
+	const markdown = ConfigMarkdown.parseOption(source);
+
+	if (!markdown) {
+		log("session", `ignored skill ${id}: invalid Markdown`);
+
+		return undefined;
 	}
 
-	return found;
+	const data = record(markdown.data) ?? {};
+	const metadata = record(data.metadata);
+
+	const autoinvoke =
+		boolean(metadata?.["opencode/autoinvoke"]) ??
+		(boolean(data["disable-model-invocation"]) === true ? false : undefined);
+
+	const description = string(data.description);
+
+	const skill: Mutable<WorkspaceSkill> = {
+		id,
+		name: string(data.name) ?? id,
+		path: entry.path,
+		content: markdown.content.trim(),
+	};
+
+	if (description) skill.description = description;
+
+	if (autoinvoke !== undefined) skill.autoinvoke = autoinvoke;
+
+	return skill;
 }
 
 /** The fields a Markdown agent may set; matches OpenCode's agent frontmatter. */
@@ -288,62 +323,82 @@ const AGENT_FIELDS = new Set([
  * whole host config.
  */
 async function markdownAgents(store: FileStore): Promise<Record<string, ConfigObject>> {
-	const found: Record<string, ConfigObject> = {};
+	const roots = [AGENTS_ROOT, LEGACY_AGENTS_ROOT];
 
-	for (const root of [AGENTS_ROOT, LEGACY_AGENTS_ROOT]) {
-		for (const entry of await store.list(root)) {
-			if (!entry.path.endsWith(".md")) continue;
-			const relative = entry.path.slice(root.length + 1).replace(/\.md$/, "");
+	const perRoot = await Promise.all(
+		roots.map(async (root) => {
+			const entries = await store.list(root);
 
-			if (!relative || relative.split("/").some((part) => part.startsWith("."))) continue;
-			const source = await text(store, entry.path);
+			return await Promise.all(entries.map((entry) => agentEntry(store, root, entry)));
+		}),
+	);
 
-			if (!source) continue;
-			const markdown = ConfigMarkdown.parseOption(source);
+	const found = perRoot.flat().filter((pair): pair is [string, ConfigObject] => pair !== undefined);
 
-			if (!markdown) {
-				log("session", `ignored agent ${relative}: invalid Markdown`);
-				continue;
-			}
+	return Object.fromEntries(found);
+}
 
-			const data = Object.fromEntries(
-				Object.entries(record(markdown.data) ?? {}).filter(([key]) => AGENT_FIELDS.has(key)),
-			);
+/** One Markdown agent, or undefined when it cannot be used. */
+async function agentEntry(
+	store: FileStore,
+	root: string,
+	entry: StoredEntry,
+): Promise<[string, ConfigObject] | undefined> {
+	if (!entry.path.endsWith(".md")) return undefined;
 
-			const model = string(data.model);
-			const variant = string(data.variant);
+	const relative = entry.path.slice(root.length + 1).replace(/\.md$/, "");
 
-			if (model && variant && !model.includes("#") && /^[^#]+$/.test(variant)) {
-				data.model = `${model}#${variant}`;
-			}
+	if (!relative || relative.split("/").some((part) => part.startsWith("."))) return undefined;
 
-			delete data.variant;
-			const system = markdown.content.trim();
-			found[relative] = {
-				...data,
-				...(system ? { system } : {}),
-			};
-		}
+	const source = await text(store, entry.path);
+
+	if (!source) return undefined;
+
+	const markdown = ConfigMarkdown.parseOption(source);
+
+	if (!markdown) {
+		log("session", `ignored agent ${relative}: invalid Markdown`);
+
+		return undefined;
 	}
 
-	return found;
+	const data = Object.fromEntries(
+		Object.entries(record(markdown.data) ?? {}).filter(([key]) => AGENT_FIELDS.has(key)),
+	);
+
+	const model = string(data.model);
+	const variant = string(data.variant);
+
+	if (model && variant && !model.includes("#") && /^[^#]+$/.test(variant)) {
+		data.model = `${model}#${variant}`;
+	}
+
+	delete data.variant;
+	const system = markdown.content.trim();
+	const agent: ConfigObject = { ...data };
+
+	if (system) agent.system = system;
+
+	return [relative, agent];
 }
 
 /** Protect command shell blocks in inline config before OpenCode sees them. */
 function protectInlineCommands(value: Schema.Json | undefined): ConfigObject | undefined {
 	if (!isJsonObject(value)) return undefined;
-	const result: ConfigObject = {};
 
-	for (const [name, item] of Object.entries(value)) {
+	const entries = Object.entries(value).map(([name, item]): [string, Schema.Json | undefined] => {
 		const command = isJsonObject(item) ? item : undefined;
 		const template = command !== undefined && isString(command.template) ? command.template : undefined;
-		result[name] =
+
+		return [
+			name,
 			command !== undefined && template !== undefined
 				? { ...command, template: protectShellBlocks(template) }
-				: item;
-	}
+				: item,
+		];
+	});
 
-	return result;
+	return Object.fromEntries(entries);
 }
 
 /**
@@ -383,8 +438,9 @@ function assembleConfig(
 	const skillUrls = urls(userSkills);
 	const instructionUrls = urls(userInstructions);
 	const userAgentConfig = record(userAgents);
+	const extraPermissions: readonly Schema.Json[] = Array.isArray(userPermissions) ? userPermissions : [];
 
-	return {
+	const config: Mutable<Configuration> = {
 		...BASE_CONFIG,
 		// SAFETY: OpenCode validates the leftover keys; this module only strips its own.
 		...(rest as Configuration),
@@ -394,7 +450,7 @@ function assembleConfig(
 		// validates the action, resource, and effect strings.
 		permissions: [
 			...BASE_CONFIG.permissions,
-			...(Array.isArray(userPermissions) ? userPermissions : []),
+			...extraPermissions,
 		] as never,
 		// SAFETY: OpenCode validates the agent table; this merge picks the winners.
 		agents: {
@@ -414,18 +470,21 @@ function assembleConfig(
 			schedules: true,
 			mcp_events: true,
 		} as never,
-		...(skillUrls ? { skills: skillUrls } : {}),
-		...(instructionUrls ? { instructions: instructionUrls } : {}),
-		...(Object.keys(inlineCommands ?? {}).length || Object.keys(localCommands).length
-			? {
-					// SAFETY: both halves hold commands with string templates.
-					commands: {
-						...inlineCommands,
-						...localCommands,
-					} as never,
-				}
-			: {}),
 	};
+
+	if (skillUrls) config.skills = skillUrls;
+
+	if (instructionUrls) config.instructions = instructionUrls;
+
+	if (Object.keys(inlineCommands ?? {}).length || Object.keys(localCommands).length) {
+		// SAFETY: both halves hold commands with string templates.
+		config.commands = {
+			...inlineCommands,
+			...localCommands,
+		} as never;
+	}
+
+	return config;
 }
 
 /** Read every file that shapes a guild's host. */

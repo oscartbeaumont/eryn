@@ -13,9 +13,18 @@ import type { Schema } from "effect";
 
 import { analytics as productAnalytics, type Analytics } from "../analytics";
 import { KEYS, log } from "../config";
-import { actionButton, buttonRow, linkButton, selectRow, type DiscordActionRow, type DiscordButton } from "../discord/components";
+import {
+	actionButton,
+	buttonRow,
+	linkButton,
+	selectRow,
+	type DiscordActionRow,
+	type DiscordButton,
+	type DiscordSelectOption,
+} from "../discord/components";
 import { classifyError, describeError } from "../errors";
 import { isJsonObject, isString, jsonField, numberField, stringField, toJsonObject } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 import {
 	DEFAULT_THREAD_NAME,
 	DiscordError,
@@ -36,6 +45,7 @@ import type {
 	CompactResponse,
 	DiscordContext,
 	FormField,
+	FormFieldOption,
 	FormView,
 	IntegrationOption,
 	InteractResponse,
@@ -252,6 +262,342 @@ export interface GuildAgent {
 	close(): Promise<void>;
 }
 
+/** The model and provider an analytics capture names, when a turn ran one. */
+type ModelProperties = { provider?: string; model?: string };
+
+/** The model and provider properties a capture carries. */
+function modelProperties(provider: string | undefined, model: string | undefined): ModelProperties {
+	const properties: ModelProperties = {};
+
+	if (provider) properties.provider = provider;
+
+	if (model) properties.model = model;
+
+	return properties;
+}
+
+/** One command list entry, with its description when the host gave one. */
+function commandEntry(name: string, description: string | undefined): [string, CommandInfo] {
+	const info: Mutable<CommandInfo> = { name };
+
+	if (description) info.description = description;
+
+	return [name, info];
+}
+
+/** The value the server expects for one answered field. */
+type FormValue = string | number | boolean | readonly string[];
+
+/** A parsed answer, or the reason the text cannot be one. */
+type ParsedAnswer = { readonly value: FormAnswer } | { readonly error: string };
+
+/** An encoded answer, or the reason it cannot be sent. */
+type EncodedAnswer = { readonly value: FormValue } | { readonly error: string };
+
+/** One field type's reading of typed text and encoding for the server. */
+interface FieldCodec {
+	readonly parse: (field: FormField, raw: string) => ParsedAnswer;
+	readonly encode: (field: FormField, answer: FormAnswer) => EncodedAnswer;
+}
+
+const YES = /^(yes|true|1|y)$/i;
+
+const NO = /^(no|false|0|n)$/i;
+
+/**
+ * How each field type with its own syntax reads text and encodes an answer.
+ *
+ * A field type outside this table takes its raw text, or the option its text
+ * named, which is what a select or a free-text field wants.
+ */
+const FIELD_CODECS = new Map<string, FieldCodec>([
+	[
+		"boolean",
+		{
+			parse: (field, raw) => {
+				if (YES.test(raw)) return { value: true };
+
+				if (NO.test(raw)) return { value: false };
+
+				return { error: `**${field.title}** must be yes or no.` };
+			},
+			encode: (_field, answer) => ({ value: answer === true }),
+		},
+	],
+	[
+		"number",
+		{
+			parse: (field, raw) => numberAnswer(field, raw),
+			encode: (field, answer) => numberValue(field, answer, false),
+		},
+	],
+	[
+		"integer",
+		{
+			parse: (field, raw) => numberAnswer(field, raw),
+			encode: (field, answer) => numberValue(field, answer, true),
+		},
+	],
+	[
+		"multiselect",
+		{
+			parse: (_field, raw) => ({
+				value: raw
+					.split(",")
+					.map((part) => part.trim())
+					.filter(Boolean),
+			}),
+			encode: (_field, answer) => ({ value: Array.isArray(answer) ? answer : [String(answer)] }),
+		},
+	],
+]);
+
+/** A numeric typed answer, or the refusal that says how it falls short. */
+function numberAnswer(field: FormField, raw: string): ParsedAnswer {
+	if (!Number.isFinite(Number(raw))) return { error: `**${field.title}** must be a number.` };
+
+	return { value: raw };
+}
+
+/** A parsed numeric answer as the number the server takes, truncated for an integer. */
+function numberValue(field: FormField, answer: FormAnswer, integer: boolean): EncodedAnswer {
+	const number = Number(isString(answer) ? answer : Number.NaN);
+
+	if (!Number.isFinite(number)) return { error: `**${field.title}** must be a number.` };
+
+	return { value: integer ? Math.trunc(number) : number };
+}
+
+/** Parse the text someone typed for a field. */
+function parseFieldAnswer(field: FormField, raw: string): ParsedAnswer {
+	const codec = FIELD_CODECS.get(field.type);
+
+	if (codec) return codec.parse(field, raw);
+
+	if (field.options?.length && field.custom !== true) {
+		const option = field.options.find(
+			(candidate) => candidate.value === raw || candidate.label.toLowerCase() === raw.toLowerCase(),
+		);
+
+		if (!option) {
+			return {
+				error: `**${field.title}** must be one of: ${field.options.map((candidate) => candidate.label).join(", ")}.`,
+			};
+		}
+
+		return { value: option.value };
+	}
+
+	return { value: raw };
+}
+
+/** Encode one parsed answer for the server, or say what is still missing. */
+function encodeFieldAnswer(field: FormField, answer: FormAnswer | undefined): EncodedAnswer | undefined {
+	if (field.type === "external") return { value: true };
+
+	if (answer === undefined) {
+		if (field.required) return { error: `**${field.title}** is required.` };
+
+		return undefined;
+	}
+
+	const codec = FIELD_CODECS.get(field.type);
+
+	if (codec) return codec.encode(field, answer);
+
+	return { value: Array.isArray(answer) ? answer.join(", ") : String(answer) };
+}
+
+/** The index of the next field a free-text reply answers, or -1. */
+function nextTextField(pending: PendingForm): number {
+	return pending.fields.findIndex(
+		(field, index) => formExpectsText(field) && pending.answers[index] === undefined,
+	);
+}
+
+/** The lines one field contributes to the question message. */
+function formFieldLines(field: FormField, index: number, pending: PendingForm, final: boolean): string[] {
+	const answer = pending.answers[index];
+	const optional = field.required ? "" : " _(optional)_";
+	const prefix = pending.fields.length === 1 ? "" : `${index + 1}. `;
+	const heading = `**${prefix}${field.title}**${optional}`;
+
+	if (answer !== undefined) {
+		const label = formAnswerLabel(field, answer);
+		const shown = label.length > 300 ? `${label.slice(0, 299)}…` : label;
+
+		return [`${heading} — **${shown}**`];
+	}
+
+	if (final) return [`${heading} — _not answered_`];
+
+	const lines = [heading];
+
+	if (field.description) lines.push(field.description);
+
+	if (field.type === "external" && field.url) {
+		lines.push(field.url);
+
+		return lines;
+	}
+
+	if (!formExpectsText(field)) {
+		lines.push("_Choose an option below._");
+
+		return lines;
+	}
+
+	if (nextTextField(pending) === index) lines.push("_Reply in this conversation with your answer._");
+
+	return lines;
+}
+
+/** The scope whose deleted channels are being pruned. */
+interface PruneScopeInput {
+	readonly host: HostInterface;
+	readonly sessionID: string;
+	readonly threadId: string;
+	readonly scope: NonNullable<DiscordContext["scheduleScope"]>;
+	readonly missing: readonly string[];
+}
+
+/** Whether the speaker can use every channel a schedule scope names. */
+type ScopeCheck =
+	| {
+			readonly ok: true;
+			readonly actual: Record<string, ChannelCapabilities | undefined>;
+			readonly missing: string[];
+	  }
+	| { readonly ok: false; readonly response: InteractResponse };
+
+/** The refusal every unreadable-permission case shares. */
+function unverifiableAccess(): InteractResponse {
+	return { ok: false, message: "Eryn could not verify your access to this conversation." };
+}
+
+/** The context an adopted turn runs under, and where to write it. */
+interface AdoptContextInput {
+	readonly host: HostInterface;
+	readonly sessionID: string;
+	readonly threadId: string;
+	readonly metadata: Schema.JsonObject | undefined;
+	readonly stored: DiscordContext | undefined;
+	readonly context: DiscordContext;
+}
+
+/** The conversation a created form belongs to. */
+interface FormTarget {
+	readonly threadId: string;
+	readonly context: DiscordContext;
+}
+
+/** A created form, as Discord needs it. */
+interface FormRequest {
+	readonly formId: string;
+	readonly sessionID: string;
+	readonly title: string;
+	readonly server: string;
+	readonly mode: "off" | "discord" | "browser" | "agent";
+	readonly message?: string;
+	readonly fields: readonly FormField[];
+}
+
+/** Which scope a policy card or reapply targets. */
+interface ScopeTarget {
+	readonly scope: "guild" | "channel" | "thread";
+	readonly channelId: string;
+	readonly threadId?: string;
+}
+
+/** A scope with its thread id only when it names a thread. */
+function scopeTarget(
+	scope: "guild" | "channel" | "thread",
+	channelId: string,
+	threadId: string | undefined,
+): ScopeTarget {
+	const target: Mutable<ScopeTarget> = { scope, channelId };
+
+	if (scope === "thread") target.threadId = threadId;
+
+	return target;
+}
+
+/** Whether a message was consumed as a form answer, and what to say if not. */
+interface FormAnswerOutcome {
+	readonly consumed: boolean;
+	readonly message?: string;
+}
+
+/** One select entry for a form field's option. */
+function selectOption(option: FormFieldOption, index: number): DiscordSelectOption {
+	const entry: Mutable<DiscordSelectOption> = {
+		label: (option.label || option.value).slice(0, 100),
+		value: String(index),
+	};
+
+	if (option.description) entry.description = option.description.slice(0, 100);
+
+	return entry;
+}
+
+/** One option a form field offers, as Discord needs it. */
+function formOption(option: Schema.Json): FormFieldOption[] {
+	if (isString(option)) return [{ value: option, label: option }];
+
+	const value = stringField(option, "value");
+
+	if (value === undefined) return [];
+
+	const entry: Mutable<FormFieldOption> = { value, label: stringField(option, "label") ?? value };
+	const description = stringField(option, "description");
+
+	if (description !== undefined) entry.description = description;
+
+	return [entry];
+}
+
+/** Everything the guild agent needs from the object that owns it. */
+export interface GuildAgentInput {
+	readonly env: Env;
+	readonly storage: DurableObjectStorage;
+	readonly rest: DiscordRest;
+	readonly store: GuildStore;
+	readonly guildId: string;
+	readonly waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+/** The same, plus the turn deadline the constructor takes. */
+interface GuildAgentOptions extends GuildAgentInput {
+	readonly turnTimeoutMs: number;
+}
+
+/** Who a prompt acts as, and what the session already knows about it. */
+interface PromptContextInput {
+	readonly host: HostInterface;
+	readonly sessionID: string;
+	readonly base: DiscordContext | undefined;
+	readonly authorId: string | undefined;
+	readonly considerUnsettled: boolean;
+}
+
+/** The session whose permission rules are being written. */
+interface ApplyPolicyInput {
+	readonly host: HostInterface;
+	readonly threadId: string;
+	readonly sessionID: string;
+	readonly discord: DiscordContext | undefined;
+	readonly config: HostConfig;
+}
+
+/** The conversation a session is being found or created for. */
+interface EnsureSessionInput {
+	readonly host: HostInterface;
+	readonly threadId: string;
+	readonly title: string;
+	readonly directory: string;
+	readonly model: string;
+}
+
 class GuildAgentImpl implements GuildAgent {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
@@ -311,17 +657,22 @@ class GuildAgentImpl implements GuildAgent {
 	/** Product analytics for this guild; disabled unless the deployment opts in. */
 	private readonly analytics: Analytics;
 
-	constructor(
-		private readonly env: Env,
-		private readonly storage: DurableObjectStorage,
-		private readonly rest: DiscordRest,
-		private readonly store: GuildStore,
-		private readonly turnTimeoutMs: number,
-		private readonly guildId: string,
-		waitUntil?: (promise: Promise<unknown>) => void,
-	) {
-		this.authority = new DiscordAuthority(rest, guildId);
-		this.analytics = productAnalytics(env, guildId, waitUntil);
+	private readonly env: Env;
+	private readonly storage: DurableObjectStorage;
+	private readonly rest: DiscordRest;
+	private readonly store: GuildStore;
+	private readonly turnTimeoutMs: number;
+	private readonly guildId: string;
+
+	constructor(input: GuildAgentOptions) {
+		this.env = input.env;
+		this.storage = input.storage;
+		this.rest = input.rest;
+		this.store = input.store;
+		this.turnTimeoutMs = input.turnTimeoutMs;
+		this.guildId = input.guildId;
+		this.authority = new DiscordAuthority(input.rest, input.guildId);
+		this.analytics = productAnalytics(input.env, input.guildId, input.waitUntil);
 	}
 
 	// --- Host -----------------------------------------------------------------
@@ -478,8 +829,18 @@ class GuildAgentImpl implements GuildAgent {
 		this.requesterByThread.clear();
 		this.turnFloor.clear();
 		this.principalLocks.clear();
+		this.cancelWaiting();
 
+		if (!host) return;
+		await host.promise
+			.then((running) => running.close())
+			.catch((error) => log("session", `could not close the host: ${describeError(error)}`));
+	}
+
+	/** Drop the cards and forms that were waiting on the host that is going away. */
+	private cancelWaiting(): void {
 		for (const pending of this.pendingApprovals.values()) clearTimeout(pending.timer);
+
 		this.pendingApprovals.clear();
 
 		for (const pending of this.pendingForms.values()) {
@@ -489,30 +850,30 @@ class GuildAgentImpl implements GuildAgent {
 
 		this.pendingForms.clear();
 		this.discarded.clear();
-
-		if (!host) return;
-		await host.promise
-			.then((running) => running.close())
-			.catch((error) => log("session", `could not close the host: ${describeError(error)}`));
 	}
 
 	async integrations(config: HostConfig): Promise<IntegrationOption[]> {
 		const host = await this.hostFor(config);
 		const listed = await host.integration.list({ location: { directory: LOCATION } });
-		const integrations: IntegrationOption[] = [];
 
-		for (const entry of Array.isArray(listed.data) ? listed.data : []) {
-			try {
-				integrations.push({
-					id: String(entry.id),
-					name: entry.name || String(entry.id),
-					connected: Array.isArray(entry.connections) && entry.connections.length > 0,
-					methods: describeMethods(entry.methods),
-				});
-			} catch (error) {
-				log("session", `could not describe ${String(entry.id)}: ${describeError(error)}`);
-			}
-		}
+		const integrations = (Array.isArray(listed.data) ? listed.data : []).flatMap(
+			(entry): IntegrationOption[] => {
+				try {
+					const option: Mutable<IntegrationOption> = {
+						id: String(entry.id),
+						name: entry.name || String(entry.id),
+						connected: Array.isArray(entry.connections) && entry.connections.length > 0,
+						methods: describeMethods(entry.methods),
+					};
+
+					return [option];
+				} catch (error) {
+					log("session", `could not describe ${String(entry.id)}: ${describeError(error)}`);
+
+					return [];
+				}
+			},
+		);
 
 		integrations.sort((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name));
 
@@ -616,15 +977,19 @@ class GuildAgentImpl implements GuildAgent {
 
 		const providers = await host.provider.list({ location: { directory: LOCATION } }).catch(() => undefined);
 
-		for (const provider of providers?.data ?? []) {
+		// A provider can be supplied by a provider that was itself supplied by a
+		// connected integration, so the reachability set grows as it is scanned.
+		const reachable = (providers?.data ?? []).reduce((found, provider) => {
 			const suppliedBy = provider.integrationID;
 
-			if (provider.activation === "enabled" && suppliedBy && connected.has(String(suppliedBy))) {
-				connected.add(String(provider.id));
+			if (provider.activation === "enabled" && suppliedBy && found.has(String(suppliedBy))) {
+				found.add(String(provider.id));
 			}
-		}
 
-		return connected;
+			return found;
+		}, connected);
+
+		return new Set(reachable);
 	}
 
 	// --- Provider sign-in -----------------------------------------------------
@@ -739,13 +1104,9 @@ class GuildAgentImpl implements GuildAgent {
 	 * speaker's Discord permissions. An unreadable inbox fails closed the same
 	 * way: the turn is restricted rather than granted.
 	 */
-	private async promptContext(
-		host: HostInterface,
-		sessionID: string,
-		base: DiscordContext | undefined,
-		authorId: string | undefined,
-		considerUnsettled: boolean,
-	): Promise<DiscordContext | undefined> {
+	private async promptContext(input: PromptContextInput): Promise<DiscordContext | undefined> {
+		const { host, sessionID, base, authorId, considerUnsettled } = input;
+
 		if (!base) return undefined;
 		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
 		const stored = readDiscordContext(session?.metadata);
@@ -774,12 +1135,15 @@ class GuildAgentImpl implements GuildAgent {
 
 		const keepSchedule = pending !== false || unfinishedSchedule;
 
-		return {
+		const context: Mutable<DiscordContext> = {
 			...base,
 			authorId: keepSchedule ? undefined : authorId,
 			scheduleTurn: keepSchedule ? true : undefined,
-			...(scope ? { scheduleScope: scope } : {}),
 		};
+
+		if (scope) context.scheduleScope = scope;
+
+		return context;
 	}
 
 	/**
@@ -820,13 +1184,20 @@ class GuildAgentImpl implements GuildAgent {
 		// enqueued between them, and if it joins this turn its scope must not be
 		// overwritten by the speaker's context.
 		const discord = await this.withPrincipalLock(sessionID, async () => {
-			const context = await this.promptContext(host, sessionID, base, authorId, !interrupted);
+			const context = await this.promptContext({
+				host,
+				sessionID,
+				base,
+				authorId,
+				considerUnsettled: !interrupted,
+			});
+
 			await this.applyDiscord(host, threadId, sessionID, context);
 
 			return context;
 		});
 
-		await this.applyPolicy(host, threadId, sessionID, discord, config);
+		await this.applyPolicy({ host, threadId, sessionID, discord, config });
 
 		// Approvals during a scheduled turn must not name, or be approved by,
 		// whoever happened to speak last.
@@ -850,13 +1221,13 @@ class GuildAgentImpl implements GuildAgent {
 		// died since the last turn has to be replaced before this one starts.
 		this.startConsuming(host);
 
-		const sessionID = await this.ensureSession(
+		const sessionID = await this.ensureSession({
 			host,
-			request.threadId,
-			request.title ?? DEFAULT_THREAD_NAME,
-			channelProjectDirectory(request.discord?.channel.id),
-			config.model,
-		);
+			threadId: request.threadId,
+			title: request.title ?? DEFAULT_THREAD_NAME,
+			directory: channelProjectDirectory(request.discord?.channel.id),
+			model: config.model,
+		});
 
 		// A schedule may be running in this session. A prompt is delivered with
 		// `steer`, so without this the human message would join the schedule's
@@ -896,11 +1267,11 @@ class GuildAgentImpl implements GuildAgent {
 						? `${body}\n\n[Attachments not included: ${attached.notes.join("; ")}]`
 						: body;
 
-				await host.sessions.prompt({
-					sessionID,
-					text,
-					...(attached.files.length > 0 ? { files: attached.files } : {}),
-				});
+				const prompt: Mutable<Parameters<typeof host.sessions.prompt>[0]> = { sessionID, text };
+
+				if (attached.files.length > 0) prompt.files = attached.files;
+
+				await host.sessions.prompt(prompt);
 				// The assistant's own text is deliberately ignored: the reply is
 				// whatever it posted through discord_send_message.
 			},
@@ -922,13 +1293,13 @@ class GuildAgentImpl implements GuildAgent {
 		const host = await this.hostFor(config, request.threadId);
 		this.startConsuming(host);
 
-		const sessionID = await this.ensureSession(
+		const sessionID = await this.ensureSession({
 			host,
-			request.threadId,
-			request.title ?? request.command,
-			channelProjectDirectory(request.discord?.channel.id),
-			config.model,
-		);
+			threadId: request.threadId,
+			title: request.title ?? request.command,
+			directory: channelProjectDirectory(request.discord?.channel.id),
+			model: config.model,
+		});
 
 		const interrupted = await this.stopRunningTurn(host, sessionID, request.threadId);
 		const before = await host.sessions.get({ sessionID }).catch(() => undefined);
@@ -975,11 +1346,23 @@ class GuildAgentImpl implements GuildAgent {
 
 	/** The commands available in one conversation's project. */
 	async commands(config: HostConfig, directory: string): Promise<CommandInfo[]> {
-		// Read the guild files first: they work without a provider or a host, so
-		// `/eryn commands` still answers when a host build fails.
+		// The guild files are read first: they work without a provider or a host,
+		// so `/eryn commands` still answers when a host build fails. They also win
+		// by name, and are always current.
 		const workspace = await readWorkspaceConfig(this.storage);
-		const merged = new Map<string, CommandInfo>();
 
+		const fileCommands = Object.entries(workspace.config.commands ?? {}).map(([name, info]) =>
+			commandEntry(name, info.description),
+		);
+
+		const hostCommands = await this.hostCommands(config, directory);
+		const merged = new Map([...hostCommands, ...fileCommands]);
+
+		return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/** The host's commands, or none when the host cannot be listed. */
+	private async hostCommands(config: HostConfig, directory: string): Promise<Array<[string, CommandInfo]>> {
 		try {
 			const host = await this.hostFor(config);
 			// `command.list` does not wait for a cold Location's plugins, but
@@ -990,25 +1373,12 @@ class GuildAgentImpl implements GuildAgent {
 			});
 			const listed = await host.command.list({ location: { directory } });
 
-			for (const command of listed.data) {
-				merged.set(command.name, {
-					name: command.name,
-					...(command.description ? { description: command.description } : {}),
-				});
-			}
+			return listed.data.map((command) => commandEntry(command.name, command.description));
 		} catch (error) {
 			log("session", `could not list the host's commands: ${describeError(error)}`);
-		}
 
-		// File-backed commands win by name and are always current.
-		for (const [name, info] of Object.entries(workspace.config.commands ?? {})) {
-			merged.set(name, {
-				name,
-				...(info.description ? { description: info.description } : {}),
-			});
+			return [];
 		}
-
-		return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	/**
@@ -1240,12 +1610,7 @@ class GuildAgentImpl implements GuildAgent {
 		const provider = model?.split("/")[0];
 		const duration = Date.now() - startedAt;
 
-		const base = {
-			outcome,
-			duration_ms: duration,
-			...(provider ? { provider } : {}),
-			...(model ? { model } : {}),
-		};
+		const base = { outcome, duration_ms: duration, ...modelProperties(provider, model) };
 
 		const events: Promise<void>[] = [this.analytics.capture("turn_finished", base)];
 
@@ -1263,8 +1628,7 @@ class GuildAgentImpl implements GuildAgent {
 				this.analytics.capture("reply_sent", {
 					messages: turn.spoke,
 					duration_ms: duration,
-					...(provider ? { provider } : {}),
-					...(model ? { model } : {}),
+					...modelProperties(provider, model),
 				}),
 			);
 		}
@@ -1383,16 +1747,22 @@ class GuildAgentImpl implements GuildAgent {
 		const effective = resolvePolicy([guild, channel, thread], custom);
 		const links = await this.store.links();
 
-		return {
+		const state: Mutable<PolicyState> = {
 			scope: threadId ? "thread" : "channel",
 			channelId,
-			...(threadId ? { threadId } : {}),
-			...(threadId ? (thread ? { own: thread } : {}) : channel ? { own: channel } : {}),
 			effective,
 			mcpServers: links.map((link) => link.name),
 			profiles: profileList(custom),
 			defaultProfile: guild?.profile ?? "standard",
 		};
+
+		if (threadId) state.threadId = threadId;
+
+		const own = threadId ? thread : channel;
+
+		if (own) state.own = own;
+
+		return state;
 	}
 
 	async policyState(input: { channelId: string; threadId?: string }): Promise<PolicyState> {
@@ -1513,13 +1883,8 @@ class GuildAgentImpl implements GuildAgent {
 	 * previous session rules, so tightening a conversation takes effect for the
 	 * next call even when it happens mid-turn.
 	 */
-	private async applyPolicy(
-		host: HostInterface,
-		threadId: string,
-		sessionID: string,
-		discord: DiscordContext | undefined,
-		config: HostConfig,
-	): Promise<void> {
+	private async applyPolicy(input: ApplyPolicyInput): Promise<void> {
+		const { host, threadId, sessionID, discord, config } = input;
 		// A prompt with no message context still belongs to a conversation. Fall
 		// back to what the session already knows; if there is nothing, fail the
 		// turn rather than run it under the host's allow-all base.
@@ -1572,16 +1937,14 @@ class GuildAgentImpl implements GuildAgent {
 			if (input.scope === "channel" && context.channel.id !== input.channelId) continue;
 
 			if (input.scope === "thread" && threadId !== input.threadId) continue;
-			await this.applyPolicy(host, threadId, value, context, config).catch((error) =>
+			await this.applyPolicy({ host, threadId, sessionID: value, discord: context, config }).catch((error) =>
 				log("session", `could not update ${threadId}: ${describeError(error)}`),
 			);
 
 			if (input.scope === "guild") {
-				await this.syncCard({
-					scope: context.kind === "channel" ? "channel" : "thread",
-					channelId: context.channel.id,
-					...(context.kind === "channel" ? {} : { threadId }),
-				});
+				const scope = context.kind === "channel" ? "channel" : "thread";
+
+				await this.syncCard(scopeTarget(scope, context.channel.id, threadId));
 			}
 		}
 	}
@@ -1676,40 +2039,20 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (!host) return { ok: false, message: "Eryn is not running right now. Try again." };
 
-		if (input.decision !== "once") {
-			try {
-				const effect: PolicyEffect = input.decision === "always" ? "allow" : "block";
+		const failure = await this.applyDecision(pending, input.decision);
 
-				const key = this.scopeKey(
-					pending.kind === "thread" ? "thread" : "channel",
-					pending.channelId,
-					pending.threadId,
-				);
-
-				const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect));
-				await this.store.putPolicy(key, patch);
-				await this.reapplyScope({
-					scope: pending.kind === "thread" ? "thread" : "channel",
-					channelId: pending.channelId,
-					...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
-				});
-				await this.syncCard({
-					scope: pending.kind === "thread" ? "thread" : "channel",
-					channelId: pending.channelId,
-					...(pending.kind === "thread" ? { threadId: pending.threadId } : {}),
-				});
-			} catch (error) {
-				return { ok: false, message: `Could not change the policy: ${describeError(error)}` };
-			}
-		}
+		if (failure) return { ok: false, message: failure };
 
 		try {
-			await host.permission.reply({
+			const reply: Mutable<Parameters<typeof host.permission.reply>[0]> = {
 				sessionID: pending.sessionID,
 				requestID: pending.requestId,
 				decision: input.decision === "block" ? "reject" : "once",
-				...(input.decision === "block" ? { message: "Blocked by a manager in this conversation." } : {}),
-			});
+			};
+
+			if (input.decision === "block") reply.message = "Blocked by a manager in this conversation.";
+
+			await host.permission.reply(reply);
 		} catch (error) {
 			this.pendingApprovals.delete(pending.requestId);
 			clearTimeout(pending.timer);
@@ -1730,6 +2073,33 @@ class GuildAgentImpl implements GuildAgent {
 		if (input.decision === "block") this.cancelPendingForSession(pending.sessionID, "another request was blocked");
 
 		return { ok: true };
+	}
+
+	/** Write the policy override an always/block decision implies, or say why not. */
+	private async applyDecision(
+		pending: PendingApproval,
+		decision: "once" | "always" | "block",
+	): Promise<string | undefined> {
+		if (decision === "once") return undefined;
+
+		try {
+			const effect: PolicyEffect = decision === "always" ? "allow" : "block";
+			const scope = pending.kind === "thread" ? "thread" : "channel";
+			const key = this.scopeKey(scope, pending.channelId, pending.threadId);
+
+			const patch = withOverride(await this.store.policy(key), overrideFor(pending.action, effect));
+
+			await this.store.putPolicy(key, patch);
+
+			const target = scopeTarget(scope, pending.channelId, pending.threadId);
+
+			await this.reapplyScope(target);
+			await this.syncCard(target);
+
+			return undefined;
+		} catch (error) {
+			return `Could not change the policy: ${describeError(error)}`;
+		}
 	}
 
 	private settleApproval(pending: PendingApproval, result: string): void {
@@ -1784,7 +2154,9 @@ class GuildAgentImpl implements GuildAgent {
 
 		// A question whose turn has ended can never receive its answer, and a
 		// blocked tool must not wait out the full timeout.
-		for (const pending of [...this.pendingForms.values()]) {
+		const pendingForms = [...this.pendingForms.values()];
+
+		for (const pending of pendingForms) {
 			if (pending.threadId !== threadId) continue;
 			await this.cancelPendingForm(pending, "the turn ended before anyone answered.");
 		}
@@ -1798,14 +2170,16 @@ class GuildAgentImpl implements GuildAgent {
 		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
 
 		if (!host) return;
-		await host.permission
-			.reply({
-				sessionID: pending.sessionID,
-				requestID: pending.requestId,
-				decision,
-				...(message ? { message } : {}),
-			})
-			.catch(() => undefined);
+
+		const reply: Mutable<Parameters<typeof host.permission.reply>[0]> = {
+			sessionID: pending.sessionID,
+			requestID: pending.requestId,
+			decision,
+		};
+
+		if (message) reply.message = message;
+
+		await host.permission.reply(reply).catch(() => undefined);
 	}
 
 	private async onPermissionAsked(data: Schema.JsonObject): Promise<void> {
@@ -1873,7 +2247,7 @@ class GuildAgentImpl implements GuildAgent {
 			return;
 		}
 
-		const pending: PendingApproval = {
+		const pending: Mutable<PendingApproval> = {
 			requestId,
 			sessionID,
 			threadId: found.threadId,
@@ -1881,10 +2255,11 @@ class GuildAgentImpl implements GuildAgent {
 			kind: found.context.kind === "channel" ? "channel" : "thread",
 			action,
 			content,
-			...(requester ? { requesterId: requester } : {}),
 			messageId: sent.id,
 			timer: setTimeout(() => void this.timeoutApproval(requestId), 90_000),
 		};
+
+		if (requester) pending.requesterId = requester;
 
 		this.pendingApprovals.set(requestId, pending);
 	}
@@ -2166,52 +2541,18 @@ class GuildAgentImpl implements GuildAgent {
 		if (!sessionID) return { ok: true };
 
 		try {
-			let host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+			const host = await this.hostForCheck();
 
-			if (!host) {
-				const config = await this.loadHostConfig();
-
-				if (config.connections.length === 0) return { ok: true };
-				host = await this.hostFor(config, undefined, false);
-			}
-
+			if (!host) return { ok: true };
 			const session = await host.sessions.get({ sessionID });
 			const context = readDiscordContext(session.metadata);
 			const scope = context?.scheduleScope;
 
 			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
+			const check = await this.scopeCapabilities(scope, userId);
 
-			const actual: Record<string, ChannelCapabilities | undefined> = {};
-			const missing: string[] = [];
-
-			for (const channelId of Object.keys(scope.channels)) {
-				let info: DiscordChannelRef | undefined;
-
-				try {
-					info = await this.rest.channel(channelId);
-				} catch (error) {
-					// A 403/404 means the bot cannot use the channel at all, so it
-					// grants nothing; drop it instead of blocking every member of
-					// the conversation forever. Anything else is transient: keep
-					// the requirement and deny this attempt.
-					if (
-						error instanceof DiscordError &&
-						(error.status === 403 || error.status === 404)
-					) {
-						missing.push(channelId);
-						continue;
-					}
-
-					return { ok: false, message: "Eryn could not verify your access to this conversation." };
-				}
-
-				if (!info) {
-					missing.push(channelId);
-					continue;
-				}
-
-				actual[channelId] = await this.authority.scopeCapabilities(userId, info);
-			}
+			if (!check.ok) return check.response;
+			const missing = check.missing;
 
 			// The conversation itself is not a channel the scope may drop: if it
 			// cannot be read, the conversation is over as far as Discord is
@@ -2222,51 +2563,11 @@ class GuildAgentImpl implements GuildAgent {
 				return { ok: false, message: "Eryn could not verify your access to this conversation." };
 			}
 
-			let effective: typeof scope | undefined = scope;
+			const effective = await this.pruneScope({ host, sessionID, threadId, scope, missing });
 
-			if (missing.length > 0) {
-				// Re-read under the write lock so a concurrent scope expansion or
-				// a deleted last schedule is not overwritten by this prune.
-				effective = await this.withPrincipalLock(sessionID, async () => {
-					const fresh = await host.sessions.get({ sessionID }).catch(() => undefined);
+			if (!effective) return { ok: true };
 
-					if (!fresh) return undefined;
-
-					const freshContext = readDiscordContext(
-						fresh.metadata,
-					);
-
-					// The last schedule was deleted while this check ran. Do not
-					// write the old scope back; there is nothing left to enforce.
-					if (!freshContext?.scheduleScope) return undefined;
-					const channels = { ...freshContext.scheduleScope.channels };
-
-					for (const channelId of missing) delete channels[channelId];
-
-					const pruned = {
-						...freshContext.scheduleScope,
-						channels,
-						updatedAt: Date.now(),
-					};
-
-					await this.saveDiscordContext(host, sessionID, fresh.metadata, {
-						...freshContext,
-						scheduleScope: pruned,
-					}).catch((error) =>
-						log(
-							"session",
-							`could not prune deleted scope channels for ${threadId}: ${describeError(error)}`,
-						),
-					);
-					this.appliedContext.delete(threadId);
-
-					return pruned;
-				});
-
-				if (!effective) return { ok: true };
-			}
-
-			if (scopeCoveredBy(effective, actual)) return { ok: true };
+			if (scopeCoveredBy(effective, check.actual)) return { ok: true };
 
 			return {
 				ok: false,
@@ -2277,6 +2578,96 @@ class GuildAgentImpl implements GuildAgent {
 
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };
 		}
+	}
+
+	/** The running host, built on demand when a connection exists; none otherwise. */
+	private async hostForCheck(): Promise<HostInterface | undefined> {
+		const running = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
+		if (running) return running;
+
+		const config = await this.loadHostConfig();
+
+		if (config.connections.length === 0) return undefined;
+
+		return await this.hostFor(config, undefined, false);
+	}
+
+	/** The speaker's capabilities in each channel a schedule scope names. */
+	private async scopeCapabilities(
+		scope: NonNullable<DiscordContext["scheduleScope"]>,
+		userId: string,
+	): Promise<ScopeCheck> {
+		const actual: Record<string, ChannelCapabilities | undefined> = {};
+		const missing: string[] = [];
+
+		for (const channelId of Object.keys(scope.channels)) {
+			let info: DiscordChannelRef | undefined;
+
+			try {
+				info = await this.rest.channel(channelId);
+			} catch (error) {
+				// A 403/404 means the bot cannot use the channel at all, so it
+				// grants nothing; drop it instead of blocking every member of
+				// the conversation forever. Anything else is transient: keep
+				// the requirement and deny this attempt.
+				if (error instanceof DiscordError && (error.status === 403 || error.status === 404)) {
+					missing.push(channelId);
+					continue;
+				}
+
+				return { ok: false, response: unverifiableAccess() };
+			}
+
+			if (!info) {
+				missing.push(channelId);
+				continue;
+			}
+
+			actual[channelId] = await this.authority.scopeCapabilities(userId, info);
+		}
+
+		return { ok: true, actual, missing };
+	}
+
+	/** Drop channels the bot can no longer see, under the principal lock. */
+	private async pruneScope(input: PruneScopeInput): Promise<NonNullable<DiscordContext["scheduleScope"]> | undefined> {
+		const { host, sessionID, threadId, scope, missing } = input;
+
+		if (missing.length === 0) return scope;
+
+		// Re-read under the write lock so a concurrent scope expansion or a
+		// deleted last schedule is not overwritten by this prune.
+		return await this.withPrincipalLock(sessionID, async () => {
+			const fresh = await host.sessions.get({ sessionID }).catch(() => undefined);
+
+			if (!fresh) return undefined;
+
+			const freshContext = readDiscordContext(fresh.metadata);
+
+			// The last schedule was deleted while this check ran. Do not write the
+			// old scope back; there is nothing left to enforce.
+			if (!freshContext?.scheduleScope) return undefined;
+			const channels = { ...freshContext.scheduleScope.channels };
+
+			for (const channelId of missing) delete channels[channelId];
+
+			const pruned = {
+				...freshContext.scheduleScope,
+				channels,
+				updatedAt: Date.now(),
+			};
+
+			await this.saveDiscordContext(host, sessionID, fresh.metadata, {
+				...freshContext,
+				scheduleScope: pruned,
+			}).catch((error) =>
+				log("session", `could not prune deleted scope channels for ${threadId}: ${describeError(error)}`),
+			);
+			this.appliedContext.delete(threadId);
+
+			return pruned;
+		});
 	}
 
 	// --- MCP forms ------------------------------------------------------------
@@ -2422,8 +2813,11 @@ class GuildAgentImpl implements GuildAgent {
 
 		pending.answers[index] = text;
 		const result = await this.advanceForm(pending);
+		const outcome: Mutable<FormAnswerOutcome> = { consumed: true };
 
-		return { consumed: true, ...(result.message ? { message: result.message } : {}) };
+		if (result.message) outcome.message = result.message;
+
+		return outcome;
 	}
 
 	/** Submit a modal that carried every field, keyed `f0`, `f1`, … */
@@ -2447,34 +2841,11 @@ class GuildAgentImpl implements GuildAgent {
 
 			if (!raw || field.type === "external") continue;
 
-			if (field.type === "boolean") {
-				if (/^(yes|true|1|y)$/i.test(raw)) pending.answers[index] = true;
-				else if (/^(no|false|0|n)$/i.test(raw)) pending.answers[index] = false;
-				else return { ok: false, message: `**${field.title}** must be yes or no.` };
-			} else if (field.type === "number" || field.type === "integer") {
-				const value = Number(raw);
+			const parsed = parseFieldAnswer(field, raw);
 
-				if (!Number.isFinite(value)) return { ok: false, message: `**${field.title}** must be a number.` };
-				pending.answers[index] = raw;
-			} else if (field.type === "multiselect") {
-				pending.answers[index] = raw.split(",").map((part) => part.trim()).filter(Boolean);
-			} else if (field.options?.length && field.custom !== true) {
-				const option = field.options.find(
-					(candidate) =>
-						candidate.value === raw || candidate.label.toLowerCase() === raw.toLowerCase(),
-				);
+			if ("error" in parsed) return { ok: false, message: parsed.error };
 
-				if (!option) {
-					return {
-						ok: false,
-						message: `**${field.title}** must be one of: ${field.options.map((candidate) => candidate.label).join(", ")}.`,
-					};
-				}
-
-				pending.answers[index] = option.value;
-			} else {
-				pending.answers[index] = raw;
-			}
+			pending.answers[index] = parsed.value;
 		}
 
 		return input.submit === true ? await this.submitForm(pending) : await this.advanceForm(pending);
@@ -2482,33 +2853,16 @@ class GuildAgentImpl implements GuildAgent {
 
 	/** The answers are complete: send them and settle the message. */
 	private async submitForm(pending: PendingForm): Promise<{ ok: boolean; message?: string }> {
-		const answer: Record<string, string | number | boolean | readonly string[]> = {};
+		const answer: Record<string, FormValue> = {};
 
 		for (const [index, field] of pending.fields.entries()) {
-			const value = pending.answers[index];
+			const encoded = encodeFieldAnswer(field, pending.answers[index]);
 
-			if (field.type === "external") {
-				answer[field.key] = true;
-				continue;
-			}
+			if (encoded === undefined) continue;
 
-			if (value === undefined) {
-				if (field.required) return { ok: false, message: `**${field.title}** is required.` };
-				continue;
-			}
+			if ("error" in encoded) return { ok: false, message: encoded.error };
 
-			if (field.type === "boolean") {
-				answer[field.key] = value === true;
-			} else if (field.type === "number" || field.type === "integer") {
-				const number = isString(value) ? Number(value) : Number.NaN;
-
-				if (!Number.isFinite(number)) return { ok: false, message: `**${field.title}** must be a number.` };
-				answer[field.key] = field.type === "integer" ? Math.trunc(number) : number;
-			} else if (field.type === "multiselect") {
-				answer[field.key] = Array.isArray(value) ? value : [String(value)];
-			} else {
-				answer[field.key] = Array.isArray(value) ? value.join(", ") : String(value);
-			}
+			answer[field.key] = encoded.value;
 		}
 
 		// An MCP form is the only kind of pending answer; the agent's own
@@ -2578,37 +2932,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (pending.message) lines.push(pending.message);
 
-		for (const [index, field] of pending.fields.entries()) {
-			const answer = pending.answers[index];
-			const optional = field.required ? "" : " _(optional)_";
-			const prefix = pending.fields.length === 1 ? "" : `${index + 1}. `;
-			const heading = `**${prefix}${field.title}**${optional}`;
-
-			if (answer !== undefined) {
-				const label = formAnswerLabel(field, answer);
-				lines.push(`${heading} — **${label.length > 300 ? `${label.slice(0, 299)}…` : label}**`);
-				continue;
-			}
-
-			if (final) {
-				lines.push(`${heading} — _not answered_`);
-				continue;
-			}
-
-			lines.push(heading);
-
-			if (field.description) lines.push(field.description);
-
-			if (field.type === "external" && field.url) {
-				lines.push(field.url);
-			} else if (formExpectsText(field)) {
-				if (this.nextTextField(pending) === index) {
-					lines.push("_Reply in this conversation with your answer._");
-				}
-			} else {
-				lines.push("_Choose an option below._");
-			}
-		}
+		lines.push(...pending.fields.flatMap((field, index) => formFieldLines(field, index, pending, final)));
 
 		if (!final && pending.fields.length > 1) {
 			lines.push("_Answer each question here; it is sent when every required answer is in._");
@@ -2617,12 +2941,6 @@ class GuildAgentImpl implements GuildAgent {
 		const content = lines.join("\n");
 
 		return content.length > 2_000 ? `${content.slice(0, 1_990)}…` : content;
-	}
-
-	private nextTextField(pending: PendingForm): number {
-		return pending.fields.findIndex(
-			(field, index) => formExpectsText(field) && pending.answers[index] === undefined,
-		);
 	}
 
 	private formComponents(pending: PendingForm): DiscordActionRow[] {
@@ -2696,46 +3014,77 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (this.pendingForms.has(formId)) return;
 
-		let found: { threadId: string; context: DiscordContext } | undefined;
-
-		if (formSessionID === "global") {
-			const active = [...this.runs].filter(([, run]) => run.turn && !run.turn.done);
-
-			if (active.length !== 1) {
-				// OpenCode attributes MCP forms to a global owner, not the session
-				// that called the tool. With more than one live turn there is no
-				// honest way to pick a conversation, so fail closed.
-				const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
-				await host?.sessions.form
-					.cancel({ sessionID: "global", formID: formId, message: "Eryn could not tell which conversation asked." })
-					.catch(() => undefined);
-
-				return;
-			}
-
-			const threadId = active[0]?.[0];
-			const context = threadId ? this.contextByThread.get(threadId) : undefined;
-
-			if (threadId && context) found = { threadId, context };
-		} else {
-			found = await this.contextForSession(formSessionID);
-		}
+		const found = await this.formTarget(formSessionID);
 
 		if (!found) {
 			// A form nobody can be shown must be answered, not left pending: the
 			// tool that raised it would block the turn until the deadline.
-			const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
-			await host?.sessions.form
-				.cancel({
-					sessionID: formSessionID,
-					formID: formId,
-					message: "Eryn could not tell which conversation asked.",
-				})
-				.catch(() => undefined);
+			await this.cancelUnshownForm(formSessionID, formId, "Eryn could not tell which conversation asked.");
 
 			return;
 		}
 
+		const request = await this.readFormRequest(form, formId, formSessionID);
+
+		if (request.mode === "off") {
+			await this.cancelPendingForm(
+				this.formDraft(request, found),
+				"approvals are turned off in this conversation.",
+			);
+
+			return;
+		}
+
+		if (request.fields.length > 5) {
+			await this.cancelPendingForm(
+				this.formDraft(request, found),
+				"the form has more fields than Discord can show.",
+			);
+
+			return;
+		}
+
+		const external = request.fields.find((field) => field.type === "external");
+
+		if (request.fields.length === 0 || external) {
+			await this.postFormCard(request, found, external);
+
+			return;
+		}
+
+		await this.postFormFields(request, found);
+	}
+
+	/** The conversation a form belongs to, or undefined when none can be picked. */
+	private async formTarget(formSessionID: string): Promise<FormTarget | undefined> {
+		if (formSessionID !== "global") return await this.contextForSession(formSessionID);
+
+		const active = [...this.runs].filter(([, run]) => run.turn && !run.turn.done);
+
+		// OpenCode attributes MCP forms to a global owner, not the session that
+		// called the tool. With more than one live turn there is no honest way to
+		// pick a conversation, so fail closed.
+		if (active.length !== 1) return undefined;
+
+		const threadId = active[0]?.[0];
+		const context = threadId ? this.contextByThread.get(threadId) : undefined;
+
+		return threadId && context ? { threadId, context } : undefined;
+	}
+
+	/** Cancel a form Discord will never show, so its tool does not block the turn. */
+	private async cancelUnshownForm(sessionID: string, formId: string, message: string): Promise<void> {
+		const host = this.host ? await this.host.promise.catch(() => undefined) : undefined;
+
+		await host?.sessions.form.cancel({ sessionID, formID: formId, message }).catch(() => undefined);
+	}
+
+	/** The fields, title, and delivery mode a created form carries. */
+	private async readFormRequest(
+		form: Schema.JsonObject | undefined,
+		formId: string,
+		sessionID: string,
+	): Promise<FormRequest> {
 		const metadata = form === undefined ? undefined : toJsonObject(form.metadata);
 		const isMcp = metadata?.kind === "mcp-elicitation";
 		const server = (isMcp ? stringField(metadata, "server") : undefined) ?? "Eryn";
@@ -2743,103 +3092,92 @@ class GuildAgentImpl implements GuildAgent {
 		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
 		const rawFields = form === undefined ? undefined : jsonField(form, "fields");
 		const fields = Array.isArray(rawFields) ? rawFields.flatMap((field) => formField(field) ?? []) : [];
+		const title = stringField(form, "title")?.trim() || `${server} needs some information`;
+		const request: Mutable<FormRequest> = { formId, sessionID, server, mode, title, fields };
 		const message = stringField(metadata, "message");
 
-		const title = stringField(form, "title")?.trim() || `${server} needs some information`;
+		if (message) request.message = message;
 
-		const requester = this.requesterByThread.get(found.threadId);
+		return request;
+	}
 
-		const base = {
-			formId,
-			sessionID: formSessionID,
+	/** The pending form a created form starts from, before its message exists. */
+	private formDraft(request: FormRequest, found: FormTarget): PendingForm {
+		const pending: Mutable<PendingForm> = {
+			formId: request.formId,
+			sessionID: request.sessionID,
 			threadId: found.threadId,
 			channelId: found.context.channel.id,
-			kind: found.context.kind === "channel" ? ("channel" as const) : ("thread" as const),
-			title,
-			server,
-			...(message ? { message } : {}),
-			fields,
+			kind: found.context.kind === "channel" ? "channel" : "thread",
+			title: request.title,
+			server: request.server,
+			fields: request.fields,
 			answers: {},
-			...(requester ? { requesterId: requester } : {}),
-		};
-
-		if (mode === "off") {
-			const pending: PendingForm = {
-				...base,
-				content: `**${server} asked for input**`,
-				timer: setTimeout(() => undefined, 0),
-			};
-
-			await this.cancelPendingForm(pending, "approvals are turned off in this conversation.");
-
-			return;
-		}
-
-		if (fields.length > 5) {
-			const pending: PendingForm = {
-				...base,
-				content: `**${server} asked for input**`,
-				timer: setTimeout(() => undefined, 0),
-			};
-
-			await this.cancelPendingForm(pending, "the form has more fields than Discord can show.");
-
-			return;
-		}
-
-		const external = fields.find((field) => field.type === "external");
-
-		if (fields.length === 0 || external) {
-			const content =
-				fields.length === 0
-					? [`✅ **${server} is ready to continue**`, message].filter(Boolean).join("\n")
-					: [`🔗 **${server} needs you to open a link**`, message, external?.url ?? ""].filter(Boolean).join("\n");
-
-			const components = [
-				buttonRow(
-					fields.length === 0
-						? [actionButton("Continue", `form:done:${formId}`, 3)]
-						: [
-								...(external?.url && external.url.length <= 512 ? [linkButton("Open link", external.url)] : []),
-								// A URL-mode elicitation is confirmed by the server out of
-								// band. Never turn a Discord click into an `accept`.
-								actionButton("Cancel", `form:cancel:${formId}`, 2),
-							],
-				),
-			];
-
-			const sent = await this.rest
-				.sendMessage(found.threadId, content, { components })
-				.catch((error) => {
-					log("session", `could not post an MCP form card: ${describeError(error)}`);
-
-					return undefined;
-				});
-
-			if (!sent) {
-				const pending: PendingForm = { ...base, content, timer: setTimeout(() => undefined, 0) };
-				await this.cancelPendingForm(pending, "Eryn could not ask here.");
-
-				return;
-			}
-
-			this.pendingForms.set(formId, {
-				...base,
-				content,
-				messageId: sent.id,
-				timer: setTimeout(() => void this.expireForm(formId), FORM_TIMEOUT_MS),
-			});
-
-			return;
-		}
-
-		// Ask in the conversation itself. Buttons and selects carry the
-		// choices; free text is answered by replying to this message.
-		const pending: PendingForm = {
-			...base,
 			content: "",
 			timer: setTimeout(() => undefined, 0),
 		};
+
+		if (request.message) pending.message = request.message;
+
+		const requester = this.requesterByThread.get(found.threadId);
+
+		if (requester) pending.requesterId = requester;
+
+		return pending;
+	}
+
+	/** Post the one-line card a form with nothing to fill in shows. */
+	private async postFormCard(
+		request: FormRequest,
+		found: FormTarget,
+		external: FormField | undefined,
+	): Promise<void> {
+		const content =
+			request.fields.length === 0
+				? [`✅ **${request.server} is ready to continue**`, request.message].filter(Boolean).join("\n")
+				: [`🔗 **${request.server} needs you to open a link**`, request.message, external?.url ?? ""]
+						.filter(Boolean)
+						.join("\n");
+
+		const link = external?.url && external.url.length <= 512 ? linkButton("Open link", external.url) : undefined;
+
+		const doneButtons = [link, actionButton("Cancel", `form:cancel:${request.formId}`, 2)].filter(
+			(button): button is DiscordButton => button !== undefined,
+		);
+
+		// A URL-mode elicitation is confirmed by the server out of band. Never
+		// turn a Discord click into an `accept`.
+		const components = [
+			buttonRow(
+				request.fields.length === 0
+					? [actionButton("Continue", `form:done:${request.formId}`, 3)]
+					: doneButtons,
+			),
+		];
+
+		const pending = this.formDraft(request, found);
+
+		const sent = await this.rest.sendMessage(found.threadId, content, { components }).catch((error) => {
+			log("session", `could not post an MCP form card: ${describeError(error)}`);
+
+			return undefined;
+		});
+
+		if (!sent) {
+			await this.cancelPendingForm(pending, "Eryn could not ask here.");
+
+			return;
+		}
+
+		pending.content = content;
+		pending.messageId = sent.id;
+		pending.timer = setTimeout(() => void this.expireForm(request.formId), FORM_TIMEOUT_MS);
+		this.pendingForms.set(request.formId, pending);
+	}
+
+	/** Ask in the conversation itself, with buttons and selects for its fields. */
+	private async postFormFields(request: FormRequest, found: FormTarget): Promise<void> {
+		const pending = this.formDraft(request, found);
 
 		pending.content = this.formContent(pending, false);
 
@@ -2858,7 +3196,7 @@ class GuildAgentImpl implements GuildAgent {
 		}
 
 		pending.messageId = sent.id;
-		this.pendingForms.set(formId, pending);
+		this.pendingForms.set(request.formId, pending);
 		this.armFormTimer(pending);
 	}
 
@@ -2914,14 +3252,15 @@ class GuildAgentImpl implements GuildAgent {
 		// who may act nor drops the schedules' capability scope.
 		const existing = readDiscordContext(session.metadata);
 
-		const merged: DiscordContext = {
-			...discord,
-			...(!discord.authorId && existing?.authorId ? { authorId: existing.authorId } : {}),
-			...(discord.scheduleTurn === undefined && existing?.scheduleTurn !== undefined
-				? { scheduleTurn: existing.scheduleTurn }
-				: {}),
-			...(!discord.scheduleScope && existing?.scheduleScope ? { scheduleScope: existing.scheduleScope } : {}),
-		};
+		const merged: Mutable<DiscordContext> = { ...discord };
+
+		if (!discord.authorId && existing?.authorId) merged.authorId = existing.authorId;
+
+		if (discord.scheduleTurn === undefined && existing?.scheduleTurn !== undefined) {
+			merged.scheduleTurn = existing.scheduleTurn;
+		}
+
+		if (!discord.scheduleScope && existing?.scheduleScope) merged.scheduleScope = existing.scheduleScope;
 
 		await this.saveDiscordContext(host, sessionID, session.metadata, merged);
 		// The prompt path keeps the last signature it wrote; drop it so a stale
@@ -3174,13 +3513,8 @@ class GuildAgentImpl implements GuildAgent {
 		this.requesterByThread.delete(threadId);
 	}
 
-	private async ensureSession(
-		host: HostInterface,
-		threadId: string,
-		title: string,
-		directory: string,
-		model: string,
-	): Promise<string> {
+	private async ensureSession(input: EnsureSessionInput): Promise<string> {
+		const { host, threadId, title, directory, model } = input;
 		const existing = await this.sessionFor(threadId);
 
 		if (existing) {
@@ -3199,11 +3533,11 @@ class GuildAgentImpl implements GuildAgent {
 		// so the user-editable config is not shadowed by Eryn's guild choice.
 		const ref = parseModelRef(model);
 
-		const session = await host.sessions.create({
-			title,
-			location: { directory },
-			...(ref ? { model: ref } : {}),
-		});
+		const request: Mutable<Parameters<typeof host.sessions.create>[0]> = { title, location: { directory } };
+
+		if (ref) request.model = ref;
+
+		const session = await host.sessions.create(request);
 
 		if (ref) this.appliedModels.set(threadId, model);
 		this.remember(threadId, session.id);
@@ -3261,25 +3595,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (type === undefined || data === undefined) return;
 
-		if (type === "form.created") {
-			void this.onFormCreated(data).catch((error) =>
-				log("session", `could not show an MCP form: ${describeError(error)}`),
-			);
-
-			return;
-		}
-
-		if (type === "permission.replied") {
-			this.onPermissionReplied(data);
-
-			return;
-		}
-
-		if (type === "form.replied" || type === "form.cancelled") {
-			this.onFormSettled(data, type === "form.replied" ? "replied" : "cancelled");
-
-			return;
-		}
+		if (await this.handleFormEvent(type, data)) return;
 
 		if (type === "session.inbox.enqueued") {
 			await this.onScheduleSteered(data);
@@ -3291,10 +3607,42 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (sessionID === undefined) return;
 
+		if (this.handleSessionEvent(type, data)) return;
+
+		await this.handleTurnEvent(type, data, sessionID, created);
+	}
+
+	/** The form and permission events that settle a card this object posted. */
+	private async handleFormEvent(type: string, data: Schema.JsonObject): Promise<boolean> {
+		if (type === "form.created") {
+			void this.onFormCreated(data).catch((error) =>
+				log("session", `could not show an MCP form: ${describeError(error)}`),
+			);
+
+			return true;
+		}
+
+		if (type === "permission.replied") {
+			this.onPermissionReplied(data);
+
+			return true;
+		}
+
+		if (type === "form.replied" || type === "form.cancelled") {
+			this.onFormSettled(data, type === "form.replied" ? "replied" : "cancelled");
+
+			return true;
+		}
+
+		return false;
+	}
+
+	/** The events that change bookkeeping for one session without a turn. */
+	private handleSessionEvent(type: string, data: Schema.JsonObject): boolean {
 		if (type === "session.compaction.ended" || type === "session.compaction.failed") {
 			this.settleCompaction(data, type === "session.compaction.ended");
 
-			return;
+			return true;
 		}
 
 		if (type === "permission.asked") {
@@ -3302,9 +3650,19 @@ class GuildAgentImpl implements GuildAgent {
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
 
-			return;
+			return true;
 		}
 
+		return false;
+	}
+
+	/** Attribute a turn this object did not start, or apply the event to ours. */
+	private async handleTurnEvent(
+		type: string,
+		data: Schema.JsonObject,
+		sessionID: string,
+		created: number | undefined,
+	): Promise<void> {
 		// A start event with no turn of ours is either a schedule firing or a
 		// prompt this object did not see. Attribute or clear the speaker before
 		// adopting, so the tools never read the previous speaker's access.
@@ -3331,6 +3689,7 @@ class GuildAgentImpl implements GuildAgent {
 		const turn = this.runs.get(threadId)?.turn;
 
 		if (!turn || turn.done) return;
+
 		// Ignore events from an execution that was interrupted just before this
 		// turn: its late `execution.interrupted` must not complete the new turn.
 		const floor = this.turnFloor.get(threadId);
@@ -3341,6 +3700,47 @@ class GuildAgentImpl implements GuildAgent {
 		if (created !== undefined && created < turn.createdAt - 1_000) return;
 
 		applyTurnEvent(turn, type, data);
+	}
+
+	/**
+	 * Record the context an adopted turn runs under, and write its policy.
+	 *
+	 * Returns false when the attribution write failed: without it the tools would
+	 * read the previous speaker, so the caller must stop the turn.
+	 */
+	private async adoptContext(input: AdoptContextInput): Promise<boolean> {
+		const { host, sessionID, threadId, metadata, stored, context } = input;
+
+		if (stored && JSON.stringify(stored) !== JSON.stringify(context)) {
+			try {
+				await this.saveDiscordContext(host, sessionID, metadata, context);
+			} catch (error) {
+				// Without the attribution write the tools would read the
+				// previous speaker. Stop the turn instead of running it with
+				// authority that may not belong to it.
+				log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
+				await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+
+				return false;
+			}
+		}
+
+		// This context was written outside the prompt path, so the next human
+		// prompt must not trust a matching signature.
+		this.appliedContext.delete(threadId);
+
+		this.remember(threadId, sessionID);
+		// Approvals during a scheduled turn must not name, or be approved by,
+		// whoever happened to speak last.
+		this.requesterByThread.delete(threadId);
+
+		this.contextByThread.set(threadId, context);
+
+		if (this.currentConfig) {
+			await this.applyPolicy({ host, threadId, sessionID, discord: context, config: this.currentConfig });
+		}
+
+		return true;
 	}
 
 	/**
@@ -3392,34 +3792,16 @@ class GuildAgentImpl implements GuildAgent {
 
 			if (!threadId || this.runs.get(threadId)?.turn || this.discarded.has(sessionID)) return;
 
-			if (stored && context && JSON.stringify(stored) !== JSON.stringify(context)) {
-				try {
-					await this.saveDiscordContext(host, sessionID, session.metadata, context);
-				} catch (error) {
-					// Without the attribution write the tools would read the
-					// previous speaker. Stop the turn instead of running it with
-					// authority that may not belong to it.
-					log("session", `could not record the renamed context for ${sessionID}: ${describeError(error)}`);
-					await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+			const adopted = await this.adoptContext({
+				host,
+				sessionID,
+				threadId,
+				metadata: session.metadata,
+				stored,
+				context,
+			});
 
-					return;
-				}
-			}
-
-			// This context was written outside the prompt path, so the next
-			// human prompt must not trust a matching signature.
-			this.appliedContext.delete(threadId);
-
-			this.remember(threadId, sessionID);
-			// Approvals during a scheduled turn must not name, or be approved
-			// by, whoever happened to speak last.
-			this.requesterByThread.delete(threadId);
-
-			if (context) {
-				this.contextByThread.set(threadId, context);
-
-				if (this.currentConfig) await this.applyPolicy(host, threadId, sessionID, context, this.currentConfig);
-			}
+			if (!adopted) return;
 
 			// `runTurn` creates the turn synchronously, so the event loop resumes
 			// with a mapping it can apply the events already queued for it to.
@@ -3548,11 +3930,7 @@ function formFieldRow(
 		// Send the index, not the label or value: the session maps it back to
 		// the option it offered, and Discord's 100-character value limit cannot
 		// truncate a real value.
-		options: shown.map((option, optionIndex) => ({
-			label: (option.label || option.value).slice(0, 100),
-			value: String(optionIndex),
-			...(option.description ? { description: option.description.slice(0, 100) } : {}),
-		})),
+		options: shown.map((option, optionIndex) => selectOption(option, optionIndex)),
 		min_values: 1,
 		max_values:
 			field.type === "multiselect"
@@ -3588,19 +3966,7 @@ function formField(raw: Schema.Json): FormField | undefined {
 
 	const listed = jsonField(raw, "options");
 
-	const options = Array.isArray(listed)
-		? listed.flatMap((option) => {
-				if (isString(option)) return [{ value: option, label: option }];
-
-				const value = stringField(option, "value");
-
-				if (value === undefined) return [];
-				const label = stringField(option, "label") ?? value;
-				const description = stringField(option, "description");
-
-				return [{ value, label, ...(description === undefined ? {} : { description }) }];
-			})
-		: undefined;
+	const options = Array.isArray(listed) ? listed.flatMap(formOption) : undefined;
 
 	const description = stringField(raw, "description");
 	const placeholder = stringField(raw, "placeholder");
@@ -3608,29 +3974,31 @@ function formField(raw: Schema.Json): FormField | undefined {
 	const minItems = numberField(raw, "minItems");
 	const maxItems = numberField(raw, "maxItems");
 
-	return {
+	const field: Mutable<FormField> = {
 		key,
 		title: stringField(raw, "title") ?? key,
 		type: stringField(raw, "type") ?? "string",
 		required: raw.required === true,
-		...(description === undefined ? {} : { description }),
-		...(placeholder === undefined ? {} : { placeholder }),
-		...(url === undefined ? {} : { url }),
-		...(options?.length ? { options } : {}),
-		...(raw.custom === true ? { custom: true } : {}),
-		...(minItems === undefined ? {} : { minItems }),
-		...(maxItems === undefined ? {} : { maxItems }),
 	};
+
+	if (description !== undefined) field.description = description;
+
+	if (placeholder !== undefined) field.placeholder = placeholder;
+
+	if (url !== undefined) field.url = url;
+
+	if (options?.length) field.options = options;
+
+	if (raw.custom === true) field.custom = true;
+
+	if (minItems !== undefined) field.minItems = minItems;
+
+	if (maxItems !== undefined) field.maxItems = maxItems;
+
+	return field;
 }
 
 /** Build the guild's agent, sharing the object's storage and Discord client. */
-export function createGuildAgent(
-	env: Env,
-	storage: DurableObjectStorage,
-	rest: DiscordRest,
-	store: GuildStore,
-	guildId: string,
-	waitUntil?: (promise: Promise<unknown>) => void,
-): GuildAgent {
-	return new GuildAgentImpl(env, storage, rest, store, TURN_TIMEOUT_MS, guildId, waitUntil);
+export function createGuildAgent(input: GuildAgentInput): GuildAgent {
+	return new GuildAgentImpl({ ...input, turnTimeoutMs: TURN_TIMEOUT_MS });
 }

@@ -10,10 +10,12 @@
 import { Equal } from "effect";
 
 import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
+import type { DiscordTextInput } from "../../discord/components";
 import type { DiscordCommandOptionPayload, DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
 import { describeError } from "../../errors";
 import { isString } from "../../json.ts";
+import { type Mutable } from "../../mutable.ts";
 import type { PromptUser } from "../../session/models";
 import { scopedId, unmarshalId } from "../ids";
 import {
@@ -205,15 +207,19 @@ function authorOf(interaction: DiscordInteraction): PromptUser | undefined {
 	if (!user) return undefined;
 	const username = user.username?.trim();
 
-	return {
+	const author: Mutable<PromptUser> = {
 		name:
 			interaction.member?.nick?.trim() ||
 			user.global_name?.trim() ||
 			username ||
 			"someone",
-		...(username ? { username } : {}),
-		...(user.id ? { id: user.id } : {}),
 	};
+
+	if (username) author.username = username;
+
+	if (user.id) author.id = user.id;
+
+	return author;
 }
 
 /** Discord's 2,000-character message limit, with room for the ellipsis. */
@@ -355,14 +361,17 @@ async function handleCommand(ctx: CommandContext, interaction: DiscordInteractio
 				// its config plugins yet, while `session.command` waits for them.
 				const author = authorOf(interaction);
 
-				const result = await request.session.command({
+				const command: Mutable<Parameters<ReturnType<CommandContext["session"]>["command"]>[0]> = {
 					threadId: channelId,
 					title: name,
 					command: name,
 					text: argumentsText,
-					...(author ? { author } : {}),
 					discord,
-				});
+				};
+
+				if (author) command.author = author;
+
+				const result = await request.session.command(command);
 
 				await answer.reply(
 					result.ok ? `Ran \`/${name}\`.` : truncate(result.message ?? "That command failed."),
@@ -471,15 +480,18 @@ async function handleApproval(
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
 	const userId = interaction.member?.user?.id ?? interaction.user?.id;
 
+	const approval: Mutable<Parameters<ReturnType<CommandContext["session"]>["replyApproval"]>[0]> = {
+		threadId: channelId,
+		requestId,
+		decision,
+		manager: canManage(interaction),
+	};
+
+	if (userId) approval.userId = userId;
+
 	const result = await ctx
 		.session(guildId)
-		.replyApproval({
-			threadId: channelId,
-			requestId,
-			decision,
-			...(userId ? { userId } : {}),
-			manager: canManage(interaction),
-		})
+		.replyApproval(approval)
 		.catch((error) => ({ ok: false, message: describeError(error) }));
 
 	const message = result.ok
@@ -500,6 +512,115 @@ async function handleApproval(
  * `form:select:<field>:<formId>` for a select. The form id comes last so a
  * server-assigned id containing a colon survives the split.
  */
+/** The user and permission a form action is checked against. */
+interface FormAuth {
+	readonly userId?: string;
+	readonly manager?: boolean;
+}
+
+/** The user behind an interaction, and whether they manage the server. */
+function formAuth(interaction: DiscordInteraction): FormAuth {
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const auth: Mutable<FormAuth> = { manager: canManage(interaction) };
+
+	if (userId) auth.userId = userId;
+
+	return auth;
+}
+
+/** One form component click, and everything acting on it needs. */
+interface FormClick {
+	readonly ctx: CommandContext;
+	readonly interaction: DiscordInteraction;
+	readonly session: ReturnType<CommandContext["session"]>;
+	readonly parts: readonly string[];
+	readonly values: readonly string[];
+	readonly auth: FormAuth;
+}
+
+/** Show a form's next unanswered fields in a modal. */
+async function openForm(click: FormClick): Promise<void> {
+	const { ctx, interaction, session, parts, auth } = click;
+	const formId = parts.slice(2).join(":");
+
+	if (!formId) return;
+	const view = await session.form(formId, auth).catch(() => undefined);
+
+	if (!view) {
+		await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
+
+		return;
+	}
+
+	const fields = view.fields
+		.map((field, index) => ({ field, index }))
+		.filter(({ index }) => !view.answered.includes(index))
+		.slice(0, 5);
+
+	if (fields.length === 0) {
+		await rejectInteraction(ctx, interaction, "That form is already answered.");
+
+		return;
+	}
+
+	const hint = (field: (typeof fields)[number]["field"]) =>
+		field.type === "boolean"
+			? " (yes/no)"
+			: field.type === "number" || field.type === "integer"
+				? " (number)"
+				: "";
+
+	const inputs = fields.map(({ field, index }): DiscordTextInput => {
+		const input: Mutable<NonNullable<Parameters<typeof textInput>[0]>> = {
+			custom_id: `f${index}`,
+			label: `${field.title}${hint(field)}`.slice(0, 45),
+			// A field with options is answered by its buttons; forcing text entry
+			// for it would make the modal block a user who only wanted to type the
+			// free-text question.
+			required: field.required && (field.options?.length ?? 0) === 0,
+			max_length: 1_000,
+		};
+
+		if (field.description || field.placeholder) {
+			input.placeholder = (field.description ?? field.placeholder ?? "").slice(0, 100);
+		}
+
+		return textInput(input);
+	});
+
+	await ctx.rest
+		.interactionModal(interaction.id, interaction.token, textModal(`form:modal:${formId}`, view.title.slice(0, 45), inputs))
+		.catch(() => undefined);
+}
+
+/** Answer one field of a form from a button or select. */
+async function answerFormComponent(click: FormClick): Promise<void> {
+	const { ctx, interaction, session, parts, values, auth } = click;
+	const action = parts[1];
+	const field = Number(parts[2]);
+
+	if (!Number.isInteger(field)) return;
+
+	const formId = action === "pick" ? parts.slice(4).join(":") : parts.slice(3).join(":");
+
+	if (!formId) return;
+	const option = action === "pick" && parts[3] !== "" ? Number(parts[3]) : undefined;
+
+	if (action === "pick" && option !== undefined && !Number.isInteger(option)) return;
+
+	const answer: Mutable<FormFieldAnswer> = action === "pick" ? {} : { values: [...values] };
+
+	if (action === "pick" && option !== undefined) answer.option = option;
+
+	await answerForm(ctx, interaction, () => session.answerFormField(formId, field, answer, auth));
+}
+
+/** The answer a field component carries: an option index or select values. */
+interface FormFieldAnswer {
+	readonly option?: number;
+	readonly values?: readonly string[];
+}
+
 async function handleFormComponent(
 	ctx: CommandContext,
 	interaction: DiscordInteraction,
@@ -513,88 +634,24 @@ async function handleFormComponent(
 	const action = parts[1];
 
 	if (!action) return;
-	const session = ctx.session(guildId);
-	const userId = interaction.member?.user?.id ?? interaction.user?.id;
-	const manager = canManage(interaction);
-	const auth = { ...(userId ? { userId } : {}), manager };
+
+	const click: FormClick = {
+		ctx,
+		interaction,
+		session: ctx.session(guildId),
+		parts,
+		values,
+		auth: formAuth(interaction),
+	};
 
 	if (action === "open") {
-		const formId = parts.slice(2).join(":");
-
-		if (!formId) return;
-		const view = await session.form(formId, auth).catch(() => undefined);
-
-		if (!view) {
-			await rejectInteraction(ctx, interaction, "That form is no longer waiting.");
-
-			return;
-		}
-
-		const fields = view.fields
-			.map((field, index) => ({ field, index }))
-			.filter(({ index }) => !view.answered.includes(index))
-			.slice(0, 5);
-
-		if (fields.length === 0) {
-			await rejectInteraction(ctx, interaction, "That form is already answered.");
-
-			return;
-		}
-
-		const hint = (field: (typeof fields)[number]["field"]) =>
-			field.type === "boolean"
-				? " (yes/no)"
-				: field.type === "number" || field.type === "integer"
-					? " (number)"
-					: "";
-
-		await ctx.rest
-			.interactionModal(
-				interaction.id,
-				interaction.token,
-				textModal(
-					`form:modal:${formId}`,
-					view.title.slice(0, 45),
-					fields.map(({ field, index }) =>
-						textInput({
-							custom_id: `f${index}`,
-							label: `${field.title}${hint(field)}`.slice(0, 45),
-							// A field with options is answered by its buttons; forcing
-							// text entry for it would make the modal block a user who
-							// only wanted to type the free-text question.
-							required: field.required && (field.options?.length ?? 0) === 0,
-							max_length: 1_000,
-							...(field.description || field.placeholder
-								? { placeholder: (field.description ?? field.placeholder ?? "").slice(0, 100) }
-								: {}),
-						}),
-					),
-				),
-			)
-			.catch(() => undefined);
+		await openForm(click);
 
 		return;
 	}
 
 	if (action === "pick" || action === "select") {
-		const field = Number(parts[2]);
-
-		if (!Number.isInteger(field)) return;
-
-		const formId =
-			action === "pick" ? parts.slice(4).join(":") : parts.slice(3).join(":");
-
-		if (!formId) return;
-		const option = action === "pick" && parts[3] !== "" ? Number(parts[3]) : undefined;
-
-		if (action === "pick" && option !== undefined && !Number.isInteger(option)) return;
-
-		const answer =
-			action === "pick"
-				? (option !== undefined ? { option } : {})
-				: { values: [...values] };
-
-		await answerForm(ctx, interaction, () => session.answerFormField(formId, field, answer, auth));
+		await answerFormComponent(click);
 
 		return;
 	}
@@ -605,13 +662,13 @@ async function handleFormComponent(
 	if (!formId) return;
 
 	if (action === "done" || action === "submit") {
-		await answerForm(ctx, interaction, () => session.replyForm(formId, {}, auth, true));
+		await answerForm(click.ctx, interaction, () => click.session.replyForm(formId, {}, click.auth, true));
 
 		return;
 	}
 
 	if (action === "cancel") {
-		await answerForm(ctx, interaction, () => session.cancelForm(formId, auth));
+		await answerForm(click.ctx, interaction, () => click.session.cancelForm(formId, click.auth));
 	}
 }
 
@@ -655,12 +712,11 @@ async function handleFormModal(
 
 	if (!guildId) return;
 	const formId = customId.slice("form:modal:".length);
-	const userId = interaction.member?.user?.id ?? interaction.user?.id;
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
 
 	const result = await ctx
 		.session(guildId)
-		.replyForm(formId, values, { ...(userId ? { userId } : {}), manager: canManage(interaction) })
+		.replyForm(formId, values, formAuth(interaction))
 		.catch((error) => ({ ok: false, message: describeError(error) }));
 
 	await ctx.rest

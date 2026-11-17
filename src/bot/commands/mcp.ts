@@ -20,7 +20,9 @@ import {
 } from "../../discord/components";
 import { describeTools } from "../../mcp/describe";
 import { applyElicitation, elicitationOf, parseElicitation } from "../../mcp/elicitation";
+import { type Mutable } from "../../mutable.ts";
 import type { ElicitationMode, McpLink, McpProbeResponse, PublicLink } from "../../session/models";
+import type { SessionClient } from "../client";
 import { SETUP_MENU_ID, payloadId } from "../ids";
 import {
 	claim,
@@ -394,7 +396,7 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 		// A 401 with a Bearer challenge is the server saying it supports a
 		// sign-in. If discovery finds nothing, the reply falls back to a token.
 		if (probe.needsAuth) {
-			await startAuth(request, name, url, probe, elicitation);
+			await startAuth({ request, name, url, probe, elicitation });
 
 			return;
 		}
@@ -406,14 +408,15 @@ async function addLink(request: InteractionRequest, values: Record<string, strin
 		return;
 	}
 
-	const link: McpLink = {
+	const link: Mutable<McpLink> = {
 		id: crypto.randomUUID(),
 		name,
 		url,
 		elicitation,
 		createdAt: Date.now(),
-		...(token ? { token } : {}),
 	};
+
+	if (token) link.token = token;
 
 	await request.session.addLink(link);
 	await answer.reply(
@@ -445,25 +448,33 @@ function signInRow(attemptId: string, url?: string) {
 	return buttonRow(buttons);
 }
 
+/** Everything starting a server's sign-in needs from the form that asked for it. */
+interface StartAuthInput {
+	readonly request: InteractionRequest;
+	readonly name: string;
+	readonly url: string;
+	readonly probe: McpProbeResponse;
+	readonly elicitation: ElicitationMode;
+}
+
 /** Send the admin to the server's sign-in page, or explain why one cannot start. */
-async function startAuth(
-	request: InteractionRequest,
-	name: string,
-	url: string,
-	probe: McpProbeResponse,
-	elicitation: ElicitationMode,
-): Promise<void> {
+async function startAuth(input: StartAuthInput): Promise<void> {
+	const { request, name, probe } = input;
 	const answer = responder(request);
 
-	const started = await request.session.mcpAuthStart({
-		name,
-		url,
-		elicitation,
+	const payload: Mutable<Parameters<SessionClient["mcpAuthStart"]>[0]> = {
+		name: input.name,
+		url: input.url,
+		elicitation: input.elicitation,
 		applicationId: request.interaction.application_id,
 		interactionToken: request.interaction.token,
-		...(probe.resourceMetadataUrl ? { resourceMetadataUrl: probe.resourceMetadataUrl } : {}),
-		...(probe.scope ? { scope: probe.scope } : {}),
-	});
+	};
+
+	if (probe.resourceMetadataUrl) payload.resourceMetadataUrl = probe.resourceMetadataUrl;
+
+	if (probe.scope) payload.scope = probe.scope;
+
+	const started = await request.session.mcpAuthStart(payload);
 
 	if (!started.ok || !started.url || !started.attemptId) {
 		await answer.reply(
@@ -484,15 +495,13 @@ async function startAuth(
 	// The callback lands on the Worker, not this interaction, so the start link
 	// carries a signed attempt rather than the server's own URL.
 	const signInUrl = started.startUrl ?? started.url;
-	await answer.reply(
-		[
-			`**${name}** needs you to sign in before Eryn can use it.`,
-			...(signInUrl.length > MAX_LINK_URL ? ["", signInUrl] : []),
-			"",
-			"Open the link, approve the access, then press **I've finished**.",
-		].join("\n"),
-		[signInRow(started.attemptId, signInUrl)],
-	);
+	const lines = [`**${name}** needs you to sign in before Eryn can use it.`];
+
+	if (signInUrl.length > MAX_LINK_URL) lines.push("", signInUrl);
+
+	lines.push("", "Open the link, approve the access, then press **I've finished**.");
+
+	await answer.reply(lines.join("\n"), [signInRow(started.attemptId, signInUrl)]);
 }
 
 /**
@@ -508,13 +517,14 @@ async function checkAuth(request: InteractionRequest, attemptId: string): Promis
 
 	if (status.status === "complete") {
 		const name = status.link?.name ?? "The server";
+		const connectedLines = [`**${name} is connected.** Eryn will use it on the next turn.`];
+
+		if (status.link) {
+			connectedLines.push("", `**Where should ${name}'s requests for approval go?**`, ...approvalLegend());
+		}
+
 		await answer.update(
-			[
-				`**${name} is connected.** Eryn will use it on the next turn.`,
-				...(status.link
-					? ["", `**Where should ${name}'s requests for approval go?**`, ...approvalLegend()]
-					: []),
-			].join("\n"),
+			connectedLines.join("\n"),
 			status.link
 				? approvalRows(status.link, [
 						actionButton("Test", TEST_ID.of(status.link.id), 2),
@@ -546,15 +556,29 @@ async function checkAuth(request: InteractionRequest, attemptId: string): Promis
 	// Still pending: keep the sign-in reachable, because replacing the message
 	// would otherwise take the link away with it.
 	const url = await request.session.mcpAuthUrl(attemptId).catch(() => undefined);
-	await answer.update(
-		[
-			url
-				? "Still waiting for the sign-in. Finish it in your browser, then press **I've finished** again."
-				: "Still waiting for the sign-in, but its link could not be reloaded. Go **Back** and link the server again if the browser page is gone.",
-			...(url && url.length > MAX_LINK_URL ? ["", url] : []),
-		].join("\n"),
-		[signInRow(attemptId, url)],
-	);
+
+	const pendingLines = [
+		url
+			? "Still waiting for the sign-in. Finish it in your browser, then press **I've finished** again."
+			: "Still waiting for the sign-in, but its link could not be reloaded. Go **Back** and link the server again if the browser page is gone.",
+	];
+
+	if (url && url.length > MAX_LINK_URL) pendingLines.push("", url);
+
+	await answer.update(pendingLines.join("\n"), [signInRow(attemptId, url)]);
+}
+
+/** Describe each link in turn, so ten probes never hit one server at once. */
+async function describeLinkTests(
+	request: InteractionRequest,
+	links: readonly McpLink[],
+): Promise<string[]> {
+	if (links.length === 0) return [];
+
+	const [link, ...rest] = links;
+	const line = `• **${link.name}** — ${await describeLinkTest(request, link)}`;
+
+	return [line, ...(await describeLinkTests(request, rest))];
 }
 
 /** Test every link, one at a time, and report each in a line. */
@@ -569,12 +593,8 @@ async function testAllLinks(request: InteractionRequest): Promise<void> {
 		return;
 	}
 
-	const results: string[] = [];
 	const shown = links.slice(0, 10);
-
-	for (const link of shown) {
-		results.push(`• **${link.name}** — ${await describeLinkTest(request, link)}`);
-	}
+	const results = await describeLinkTests(request, shown);
 
 	if (links.length > shown.length) results.push(`…and ${links.length - shown.length} more.`);
 	await answer.reply(clamp(["**MCP server test**", ...results].join("\n"), 1_900), [

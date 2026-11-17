@@ -12,13 +12,16 @@
  * denied, never granted.
  */
 
-import { THREAD_TYPES, type DiscordChannelRef, type DiscordRest, type DiscordRole } from "./api";
+import { type Mutable } from "../mutable.ts";
+import { THREAD_TYPES, type DiscordChannelRef, type DiscordRest, type DiscordRole } from "./api.ts";
 import {
 	effectivePermissions,
+	type EffectivePermissionInput,
 	guildPermissions,
+	type GuildPermissionInput,
 	hasPermission,
 	Permission,
-} from "./permissions";
+} from "./permissions.ts";
 
 /** How long the guild's roles and owner are trusted. These change rarely. */
 const GUILD_TTL_MS = 5 * 60_000;
@@ -56,11 +59,13 @@ export class DiscordAuthority {
 	private readonly channels = new Map<string, CacheEntry<DiscordChannelRef | undefined>>();
 	/** Private-thread membership, keyed by `threadId:userId`. */
 	private readonly threadMembers = new Map<string, CacheEntry<boolean>>();
+	private readonly rest: DiscordRest;
+	private readonly guildId: string;
 
-	constructor(
-		private readonly rest: DiscordRest,
-		private readonly guildId: string,
-	) {}
+	constructor(rest: DiscordRest, guildId: string) {
+		this.rest = rest;
+		this.guildId = guildId;
+	}
 
 	private fresh<T>(entry: CacheEntry<T> | undefined, now: number): entry is CacheEntry<T> {
 		return entry !== undefined && entry.expiresAt > now;
@@ -78,10 +83,9 @@ export class DiscordAuthority {
 				this.rest.guildInfo(this.guildId),
 			]);
 
-			const value: GuildPermissions = {
-				roles,
-				...(info?.ownerId ? { ownerId: info.ownerId } : {}),
-			};
+			const value: Mutable<GuildPermissions> = { roles };
+
+			if (info?.ownerId) value.ownerId = info.ownerId;
 
 			this.guild = { value, expiresAt: now + GUILD_TTL_MS };
 
@@ -185,16 +189,20 @@ export class DiscordAuthority {
 			const isThreadMember =
 				found.channel.type === 12 ? await this.threadMember(channelId, userId) : false;
 
-			const permissions = effectivePermissions({
+			const request: Mutable<EffectivePermissionInput> = {
 				guildId: this.guildId,
-				...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
 				userId,
 				roles: guild.roles,
 				memberRoleIds: member,
 				channel: found.channel,
-				...(found.parent ? { parent: found.parent } : {}),
 				isThreadMember,
-			});
+			};
+
+			if (guild.ownerId) request.ownerId = guild.ownerId;
+
+			if (found.parent) request.parent = found.parent;
+
+			const permissions = effectivePermissions(request);
 
 			return hasPermission(permissions, required);
 		} catch {
@@ -209,13 +217,16 @@ export class DiscordAuthority {
 
 			if (!member || !guild) return false;
 
-			const permissions = guildPermissions({
+			const request: Mutable<GuildPermissionInput> = {
 				guildId: this.guildId,
-				...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
 				userId,
 				roles: guild.roles,
 				memberRoleIds: member,
-			});
+			};
+
+			if (guild.ownerId) request.ownerId = guild.ownerId;
+
+			const permissions = guildPermissions(request);
 
 			return hasPermission(permissions, Permission.ManageGuild);
 		} catch {
@@ -311,36 +322,49 @@ export class DiscordAuthority {
 				this.channels.set(channel.id, { value: channel, expiresAt: now + CHANNEL_TTL_MS });
 			}
 
-			const visible: DiscordChannelRef[] = [];
+			// Resolve each distinct parent once. The threads below share parents, and
+			// `channelInfo` only fills its cache after the fetch resolves, so letting
+			// the map issue them would send one identical request per thread.
+			const parents = new Set(
+				channels.flatMap((channel) =>
+					THREAD_TYPES.has(channel.type) && channel.parent_id ? [channel.parent_id] : [],
+				),
+			);
 
-			for (const channel of channels) {
-				const parent =
-					THREAD_TYPES.has(channel.type) && channel.parent_id
-						? await this.channelInfo(channel.parent_id)
-						: undefined;
+			await Promise.all([...parents].map((parentId) => this.channelInfo(parentId)));
 
-				// A thread cannot be evaluated without its parent: the parent holds
-				// the overwrites when the thread has none of its own.
-				if (THREAD_TYPES.has(channel.type) && channel.parent_id && !parent) continue;
+			const evaluated = await Promise.all(
+				channels.map(async (channel) => {
+					const parent =
+						THREAD_TYPES.has(channel.type) && channel.parent_id
+							? await this.channelInfo(channel.parent_id)
+							: undefined;
 
-				const isThreadMember =
-					channel.type === 12 ? await this.threadMember(channel.id, userId) : false;
+					// A thread cannot be evaluated without its parent: the parent holds
+					// the overwrites when the thread has none of its own.
+					if (THREAD_TYPES.has(channel.type) && channel.parent_id && !parent) return undefined;
 
-				const permissions = effectivePermissions({
-					guildId: this.guildId,
-					...(guild.ownerId ? { ownerId: guild.ownerId } : {}),
-					userId,
-					roles: guild.roles,
-					memberRoleIds: member,
-					channel,
-					...(parent ? { parent } : {}),
-					isThreadMember,
-				});
+					const isThreadMember =
+						channel.type === 12 ? await this.threadMember(channel.id, userId) : false;
 
-				if (hasPermission(permissions, Permission.ViewChannel)) visible.push(channel);
-			}
+					const request: Mutable<EffectivePermissionInput> = {
+						guildId: this.guildId,
+						userId,
+						roles: guild.roles,
+						memberRoleIds: member,
+						channel,
+						isThreadMember,
+					};
 
-			return visible;
+					if (guild.ownerId) request.ownerId = guild.ownerId;
+
+					if (parent) request.parent = parent;
+
+					return hasPermission(effectivePermissions(request), Permission.ViewChannel) ? channel : undefined;
+				}),
+			);
+
+			return evaluated.filter((channel): channel is DiscordChannelRef => channel !== undefined);
 		} catch {
 			return [];
 		}

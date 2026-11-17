@@ -28,20 +28,25 @@ import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./co
 import { registerScheduleScope } from "./schedule";
 import { discordTools, type SetMessageSubscription } from "./tools";
 
-export function discordPlugin(
-	rest: DiscordRest,
-	guildId: string,
-	store: FileStore,
-	setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>,
-	setMessageSubscription: SetMessageSubscription,
-	onMessageSent?: (threadId: string) => void,
-	onScheduleCreated?: (threadId: string) => void,
-) {
+/** Everything the Discord plugin needs from the host that builds it. */
+export interface DiscordPluginInput {
+	readonly rest: DiscordRest;
+	readonly guildId: string;
+	readonly store: FileStore;
+	readonly setSubscription: (kind: "thread" | "channel", id: string, subscribed: boolean) => Promise<void>;
+	readonly setMessageSubscription: SetMessageSubscription;
+	readonly onMessageSent?: (threadId: string) => void;
+	readonly onScheduleCreated?: (threadId: string) => void;
+}
+
+export function discordPlugin(input: DiscordPluginInput) {
+	const { rest, guildId, store, setSubscription, setMessageSubscription, onMessageSent, onScheduleCreated } = input;
+
 	// One per host/guild. A cache shared across guilds would let a role id from
 	// one server be read as a role in another.
 	const authority = new DiscordAuthority(rest, guildId);
 
-	const tools = discordTools(
+	const tools = discordTools({
 		rest,
 		guildId,
 		store,
@@ -49,14 +54,14 @@ export function discordPlugin(
 		setMessageSubscription,
 		authority,
 		onMessageSent,
-	);
+	});
 
 	return Plugin.define({
 		id: "eryn.discord",
 		async setup(ctx) {
 			await Promise.all([
 				tools.setup(ctx),
-				registerScheduleScope(ctx, rest, guildId, authority, onScheduleCreated),
+				registerScheduleScope({ ctx, rest, guildId, authority, onCreated: onScheduleCreated }),
 				// The hook carries no session metadata, so it is read from the session
 				// itself. A failure to read it must not fail the request: a missing
 				// context only costs the agent some awareness, while a thrown error

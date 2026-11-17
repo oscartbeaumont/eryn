@@ -62,17 +62,24 @@ async function readContext(ctx: Plugin.Context, sessionID: string): Promise<Disc
  * do more in the conversation than the person who created it.
  */
 async function conversationCapabilities(
-	rest: DiscordRest,
-	guildId: string,
-	authority: DiscordAuthority,
+	input: ScheduleScopeInput,
 	context: DiscordContext,
 	authorId: string,
 ): Promise<ScopeChannelCapabilities | undefined> {
-	const info = await rest.channel(context.thread.id).catch(() => undefined);
+	const info = await input.rest.channel(context.thread.id).catch(() => undefined);
 
-	if (!info || info.guild_id !== guildId) return undefined;
+	if (!info || info.guild_id !== input.guildId) return undefined;
 
-	return await authority.scopeCapabilities(authorId, info);
+	return await input.authority.scopeCapabilities(authorId, info);
+}
+
+/** Everything the schedule-scope plugin needs from the host that registers it. */
+export interface ScheduleScopeInput {
+	readonly ctx: Plugin.Context;
+	readonly rest: DiscordRest;
+	readonly guildId: string;
+	readonly authority: DiscordAuthority;
+	readonly onCreated?: (threadId: string) => void;
 }
 
 /** A write `writeScope` should make: `undefined` means nothing to change. */
@@ -120,13 +127,9 @@ async function writeScope(
 	});
 }
 
-export async function registerScheduleScope(
-	ctx: Plugin.Context,
-	rest: DiscordRest,
-	guildId: string,
-	authority: DiscordAuthority,
-	onCreated?: (threadId: string) => void,
-): Promise<void> {
+export async function registerScheduleScope(input: ScheduleScopeInput): Promise<void> {
+	const { ctx, onCreated } = input;
+
 	await ctx.tool.hook("execute.before", async (event) => {
 		if (scheduleTool(event.tool) !== "create") return;
 		const context = await readContext(ctx, event.sessionID);
@@ -143,7 +146,7 @@ export async function registerScheduleScope(
 
 		// A schedule may not read or send where its creator cannot. Fail before
 		// the schedule exists rather than storing a scope it cannot justify.
-		const capabilities = await conversationCapabilities(rest, guildId, authority, context, authorId);
+		const capabilities = await conversationCapabilities(input, context, authorId);
 
 		if (!capabilities) {
 			throw new Error("Eryn could not verify your Discord access to this conversation.");
@@ -179,7 +182,7 @@ export async function registerScheduleScope(
 
 			if (!ownerId || !canCreateSchedule(context.scheduleScope, ownerId)) return;
 			const now = Date.now();
-			const capabilities = await conversationCapabilities(rest, guildId, authority, context, ownerId);
+			const capabilities = await conversationCapabilities(input, context, ownerId);
 
 			// Without at least one capability there is no justified scope. The
 			// schedule exists, but its turns fail closed as no-speaker turns.

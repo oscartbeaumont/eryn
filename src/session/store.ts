@@ -72,12 +72,16 @@ class GuildStoreImpl {
 		read: (key: string, sealed: Sealed) => Promise<T | undefined>,
 	): Promise<T[]> {
 		const entries = await this.storage.list<Sealed>({ prefix });
-		const values = await Promise.all([...entries].map(([key, sealed]) => read(key, sealed)));
-		const found: T[] = [];
 
-		for (const value of values) if (value !== undefined) found.push(value);
+		const found = await Promise.all(
+			[...entries].map(async ([key, sealed]) => {
+				const value = await read(key, sealed);
 
-		return found;
+				return value === undefined ? [] : [value];
+			}),
+		);
+
+		return found.flat();
 	}
 
 	private async sealedList<S extends Schema.ConstraintDecoder<unknown>>(prefix: string, schema: S): Promise<S["Type"][]> {
@@ -172,13 +176,12 @@ class GuildStoreImpl {
 
 	async profiles(): Promise<PolicyProfile[]> {
 		const entries = await this.storage.list<unknown>({ prefix: KEYS.policyProfile });
-		const profiles: PolicyProfile[] = [];
 
-		for (const value of entries.values()) {
+		const profiles = [...entries.values()].flatMap((value) => {
 			const profile = Option.getOrUndefined(Schema.decodeUnknownOption(PolicyProfileSchema)(value));
 
-			if (profile) profiles.push(profile);
-		}
+			return profile ? [profile] : [];
+		});
 
 		return profiles.sort((a, b) => a.createdAt - b.createdAt || a.name.localeCompare(b.name));
 	}

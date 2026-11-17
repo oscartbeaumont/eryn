@@ -31,16 +31,22 @@ export async function runShell(store: FileStore, command: string, cwd: string, r
 	const bash = new Bash({ fs, cwd, env: { HOME: root, PWD: cwd, PATH: "/usr/bin:/bin" } });
 	const result = await bash.exec(command);
 
-	const after = new Map<string, StoredFile>();
+	const harvested = await Promise.all(
+		fs
+			.getAllPaths()
+			.filter((path) => path.startsWith(`${root}/`))
+			.map(async (path): Promise<[string, StoredFile] | undefined> => {
+				const stat = await fs.stat(path).catch(() => undefined);
 
-	for (const path of fs.getAllPaths()) {
-		if (!path.startsWith(`${root}/`)) continue;
-		const stat = await fs.stat(path).catch(() => undefined);
+				if (!stat?.isFile) return undefined;
 
-		if (!stat?.isFile) continue;
-		const bytes = await fs.readFileBuffer(path);
-		after.set(path, { b: bytesToBase64(bytes), m: stat.mtime.getTime() });
-	}
+				const bytes = await fs.readFileBuffer(path);
+
+				return [path, { b: bytesToBase64(bytes), m: stat.mtime.getTime() }];
+			}),
+	);
+
+	const after = new Map(harvested.filter((entry): entry is [string, StoredFile] => entry !== undefined));
 
 	for (const [path, file] of after) {
 		const previous = before.get(path);

@@ -79,12 +79,7 @@ export class McpOAuthError extends Error {
 export async function discover(resourceUrl: string, resourceMetadataUrl?: string): Promise<McpDiscovery> {
 	requireTransport(resourceUrl, "MCP server URL");
 
-	const info = await discoverOAuthServerInfo(resourceUrl, {
-		...(resourceMetadataUrl
-			? { resourceMetadataUrl: requireTransport(resourceMetadataUrl, "resource metadata") }
-			: {}),
-		fetchFn,
-	}).catch(fail);
+	const info = await discoverOAuthServerInfo(resourceUrl, discoveryOptions(resourceMetadataUrl)).catch(fail);
 
 	const metadata = info.authorizationServerMetadata;
 
@@ -96,13 +91,29 @@ export async function discover(resourceUrl: string, resourceMetadataUrl?: string
 		requireTransport(metadata.registration_endpoint, "client registration");
 	}
 
-	return {
+	const result: McpDiscovery = {
 		authorizationServerUrl: info.authorizationServerUrl,
 		authorizationServerMetadata: metadata,
-		...(metadata.registration_endpoint ? { registrationEndpoint: metadata.registration_endpoint } : {}),
 		resource: info.resourceMetadata?.resource ?? resourceUrlFromServerUrl(resourceUrl).href,
 		scopesSupported: metadata.scopes_supported ?? info.resourceMetadata?.scopes_supported ?? [],
 	};
+
+	if (metadata.registration_endpoint) result.registrationEndpoint = metadata.registration_endpoint;
+
+	return result;
+}
+
+/** Discovery takes an optional metadata URL only when the server's challenge gave one. */
+function discoveryOptions(
+	resourceMetadataUrl: string | undefined,
+): NonNullable<Parameters<typeof discoverOAuthServerInfo>[1]> {
+	const options: NonNullable<Parameters<typeof discoverOAuthServerInfo>[1]> = { fetchFn };
+
+	if (resourceMetadataUrl) {
+		options.resourceMetadataUrl = requireTransport(resourceMetadataUrl, "resource metadata");
+	}
+
+	return options;
 }
 
 export interface InitiateInput {
@@ -112,15 +123,21 @@ export interface InitiateInput {
 	scope?: string;
 }
 
+/** What the caller keeps from a started sign-in until the browser returns. */
+export interface InitiatedAuthorization {
+	url: string;
+	clientId: string;
+	clientSecret?: string;
+	codeVerifier: string;
+}
+
 /**
  * Register this deployment as an OAuth client and build the authorization URL.
  *
  * The returned verifier and client credentials are the only OAuth state the
  * caller has to keep until the browser comes back.
  */
-export async function initiate(
-	input: InitiateInput,
-): Promise<{ url: string; clientId: string; clientSecret?: string; codeVerifier: string }> {
+export async function initiate(input: InitiateInput): Promise<InitiatedAuthorization> {
 	if (!input.discovery.registrationEndpoint) {
 		throw new McpOAuthError(
 			"This server does not support automatic client registration. Add it with a token instead.",
@@ -131,31 +148,40 @@ export async function initiate(
 
 	const metadata = input.discovery.authorizationServerMetadata;
 
-	const client = await registerClient(input.discovery.authorizationServerUrl, {
+	const registration: NonNullable<Parameters<typeof registerClient>[1]> = {
 		metadata,
 		clientMetadata: resolveClientMetadata({
 			clientMetadata: clientMetadata(input.redirectUri, input.scope),
 			redirectUrl: input.redirectUri,
 		}),
-		...(input.scope ? { scope: input.scope } : {}),
 		fetchFn,
-	}).catch(fail);
+	};
 
-	const started = await startAuthorization(input.discovery.authorizationServerUrl, {
+	if (input.scope) registration.scope = input.scope;
+
+	const client = await registerClient(input.discovery.authorizationServerUrl, registration).catch(fail);
+
+	const authorization: NonNullable<Parameters<typeof startAuthorization>[1]> = {
 		metadata,
 		clientInformation: client,
 		redirectUrl: input.redirectUri,
 		state: input.state,
-		...(input.scope ? { scope: input.scope } : {}),
 		resource: input.discovery.resource,
-	}).catch(fail);
+	};
 
-	return {
+	if (input.scope) authorization.scope = input.scope;
+
+	const started = await startAuthorization(input.discovery.authorizationServerUrl, authorization).catch(fail);
+
+	const result: InitiatedAuthorization = {
 		url: started.authorizationUrl.toString(),
 		clientId: client.client_id,
-		...(client.client_secret ? { clientSecret: client.client_secret } : {}),
 		codeVerifier: started.codeVerifier,
 	};
+
+	if (client.client_secret) result.clientSecret = client.client_secret;
+
+	return result;
 }
 
 /** Exchange the code the browser brought back for a token pair. */
@@ -170,15 +196,18 @@ export async function exchangeCode(input: {
 }): Promise<McpTokens> {
 	const { authorizationServerUrl, metadata } = tokenRequest(input.tokenEndpoint);
 
-	const tokens = await exchangeAuthorization(authorizationServerUrl, {
+	const request: NonNullable<Parameters<typeof exchangeAuthorization>[1]> = {
 		metadata,
 		clientInformation: clientInformation(input.clientId, input.clientSecret),
 		authorizationCode: input.code,
 		codeVerifier: input.verifier,
 		redirectUri: input.redirectUri,
-		...(input.resource ? { resource: input.resource } : {}),
 		fetchFn,
-	}).catch(fail);
+	};
+
+	if (input.resource) request.resource = input.resource;
+
+	const tokens = await exchangeAuthorization(authorizationServerUrl, request).catch(fail);
 
 	return toTokens(tokens);
 }
@@ -193,33 +222,40 @@ export async function refreshTokens(input: {
 }): Promise<McpTokens> {
 	const { authorizationServerUrl, metadata } = tokenRequest(input.tokenEndpoint);
 
-	const tokens = await refreshAuthorization(authorizationServerUrl, {
+	const request: NonNullable<Parameters<typeof refreshAuthorization>[1]> = {
 		metadata,
 		clientInformation: clientInformation(input.clientId, input.clientSecret),
 		refreshToken: input.refreshToken,
-		...(input.resource ? { resource: input.resource } : {}),
 		fetchFn,
-	}).catch(fail);
+	};
+
+	if (input.resource) request.resource = input.resource;
+
+	const tokens = await refreshAuthorization(authorizationServerUrl, request).catch(fail);
 
 	return toTokens(tokens);
 }
 
 function clientMetadata(redirectUri: string, scope?: string): OAuthClientMetadata {
-	return {
+	const metadata: OAuthClientMetadata = {
 		client_name: "Eryn",
 		redirect_uris: [redirectUri],
 		grant_types: ["authorization_code", "refresh_token"],
 		response_types: ["code"],
 		token_endpoint_auth_method: "none",
-		...(scope ? { scope } : {}),
 	};
+
+	if (scope) metadata.scope = scope;
+
+	return metadata;
 }
 
 function clientInformation(clientId: string, clientSecret?: string): OAuthClientInformationMixed {
-	return {
-		client_id: clientId,
-		...(clientSecret ? { client_secret: clientSecret } : {}),
-	};
+	const client: OAuthClientInformationMixed = { client_id: clientId };
+
+	if (clientSecret) client.client_secret = clientSecret;
+
+	return client;
 }
 
 /**
@@ -251,12 +287,15 @@ interface TokenRequest {
 }
 
 function toTokens(tokens: OAuthTokens): McpTokens {
-	return {
-		accessToken: tokens.access_token,
-		...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
-		...(tokens.expires_in !== undefined ? { expiresIn: tokens.expires_in } : {}),
-		...(tokens.scope ? { scope: tokens.scope } : {}),
-	};
+	const result: McpTokens = { accessToken: tokens.access_token };
+
+	if (tokens.refresh_token) result.refreshToken = tokens.refresh_token;
+
+	if (tokens.expires_in !== undefined) result.expiresIn = tokens.expires_in;
+
+	if (tokens.scope) result.scope = tokens.scope;
+
+	return result;
 }
 
 /** Turn a library error into the one-line answer a Discord message can show. */

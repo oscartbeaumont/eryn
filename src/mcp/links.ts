@@ -13,10 +13,19 @@ import { log, sessionSecret } from "../config";
 import { randomToken, sign } from "../crypto";
 import { describeError } from "../errors";
 import { resolveOrigin } from "../discord/application";
+import { type Mutable } from "../mutable.ts";
 import type { McpLink, PendingMcpAuth } from "../session/models";
-import { discover, exchangeCode, initiate, refreshTokens, type McpDiscovery, type McpTokens } from "./oauth";
+import {
+	discover,
+	exchangeCode,
+	initiate,
+	refreshTokens,
+	type InitiateInput,
+	type McpDiscovery,
+	type McpTokens,
+} from "./oauth";
 import { MCP_CALLBACK_PATH, MCP_START_PATH, AUTH_TTL_MS } from "./paths";
-import { probeServer, type ProbeResult } from "./probe";
+import { probeServer, type ProbeOptions, type ProbeResult } from "./probe";
 
 /**
  * The slice of guild storage a link needs.
@@ -88,33 +97,40 @@ export async function beginAuthorization(
 	const attemptId = randomToken(16);
 	const state = await sign({ guildId: input.guildId, attemptId }, secret);
 
-	const started = await initiate({
-		discovery,
-		redirectUri,
-		state,
-		...(scope ? { scope } : {}),
-	});
+	const initiation: InitiateInput = { discovery, redirectUri, state };
+
+	if (scope) initiation.scope = scope;
+
+	const started = await initiate(initiation);
 
 	await pruneAttempts(input.store);
-	await input.store.putAuthAttempt({
+
+	const attempt: Mutable<PendingMcpAuth> = {
 		attemptId,
 		name: input.name,
 		url: input.url,
-		...(input.elicitation ? { elicitation: input.elicitation } : {}),
-		...(input.applicationId ? { applicationId: input.applicationId } : {}),
-		...(input.interactionToken ? { interactionToken: input.interactionToken } : {}),
 		state,
 		authorizationUrl: started.url,
 		clientId: started.clientId,
-		...(started.clientSecret ? { clientSecret: started.clientSecret } : {}),
 		tokenEndpoint: discovery.authorizationServerMetadata.token_endpoint,
 		resource: discovery.resource,
-		...(scope ? { scope } : {}),
 		codeVerifier: started.codeVerifier,
 		redirectUri,
 		status: "pending",
 		createdAt: Date.now(),
-	});
+	};
+
+	if (input.elicitation) attempt.elicitation = input.elicitation;
+
+	if (input.applicationId) attempt.applicationId = input.applicationId;
+
+	if (input.interactionToken) attempt.interactionToken = input.interactionToken;
+
+	if (started.clientSecret) attempt.clientSecret = started.clientSecret;
+
+	if (scope) attempt.scope = scope;
+
+	await input.store.putAuthAttempt(attempt);
 
 	return { attemptId, url: started.url, startUrl: `${origin}${MCP_START_PATH}/${state}` };
 }
@@ -139,8 +155,11 @@ export async function finishAuthorization(
 ): Promise<FinishAuthorizationResult> {
 	if (pending.status === "complete" && pending.linkId) {
 		const link = await store.getLink(pending.linkId);
+		const result: Mutable<FinishAuthorizationResult> = { status: "complete" };
 
-		return { status: "complete", ...(link ? { link } : {}) };
+		if (link) result.link = link;
+
+		return result;
 	}
 
 	if ((pending.status === "pending" || pending.status === "failed") && Date.now() - pending.createdAt > AUTH_TTL_MS) {
@@ -162,18 +181,48 @@ export async function finishAuthorization(
 		return await fail(store, pending, `A server named "${pending.name}" is already linked.`);
 	}
 
+	const exchanged = await exchangeStoredCode(store, pending, input.code);
+
+	if ("status" in exchanged) return exchanged;
+
+	const tokens = exchanged.tokens;
+	const probe = exchanged.probe;
+	const link = await storeLink(store, pending, tokens);
+	const storedAttempt: Mutable<PendingMcpAuth> = { ...pending, status: "complete", linkId: link.id };
+
+	await store.putAuthAttempt(storedAttempt);
+
+	return { status: "complete", link, tools: probe.tools };
+}
+
+/**
+ * Exchange the verifier the browser's code came back with, then confirm the
+ * server accepts the token it issued.
+ *
+ * A refusal at either step is the finished attempt, so the caller only stores a
+ * link the server itself has accepted.
+ */
+async function exchangeStoredCode(
+	store: LinkStore,
+	pending: PendingMcpAuth,
+	code: string,
+): Promise<{ tokens: McpTokens; probe: ProbeResult } | FinishAuthorizationResult> {
+	const exchange: Parameters<typeof exchangeCode>[0] = {
+		tokenEndpoint: pending.tokenEndpoint,
+		clientId: pending.clientId,
+		redirectUri: pending.redirectUri,
+		code,
+		verifier: pending.codeVerifier,
+	};
+
+	if (pending.resource) exchange.resource = pending.resource;
+
+	if (pending.clientSecret) exchange.clientSecret = pending.clientSecret;
+
 	let tokens: McpTokens;
 
 	try {
-		tokens = await exchangeCode({
-			tokenEndpoint: pending.tokenEndpoint,
-			...(pending.resource ? { resource: pending.resource } : {}),
-			clientId: pending.clientId,
-			...(pending.clientSecret ? { clientSecret: pending.clientSecret } : {}),
-			redirectUri: pending.redirectUri,
-			code: input.code,
-			verifier: pending.codeVerifier,
-		});
+		tokens = await exchangeCode(exchange);
 	} catch (error) {
 		log("session", `MCP sign-in for ${pending.url} failed: ${describeError(error)}`);
 
@@ -190,34 +239,44 @@ export async function finishAuthorization(
 		);
 	}
 
+	return { tokens, probe };
+}
+
+/**
+ * Build the link from the accepted token and store it, so a failed sign-in
+ * never leaves a record the agent would try to use.
+ */
+async function storeLink(store: LinkStore, pending: PendingMcpAuth, tokens: McpTokens): Promise<McpLink> {
 	const scope = tokens.scope ?? pending.scope;
 
-	const link: McpLink = {
+	const oauth: Mutable<NonNullable<McpLink["oauth"]>> = {
+		clientId: pending.clientId,
+		tokenEndpoint: pending.tokenEndpoint,
+		expiresAt: expiresAt(tokens),
+	};
+
+	if (pending.clientSecret) oauth.clientSecret = pending.clientSecret;
+
+	if (tokens.refreshToken) oauth.refreshToken = tokens.refreshToken;
+
+	if (scope) oauth.scope = scope;
+
+	if (pending.resource) oauth.resource = pending.resource;
+
+	const link: Mutable<McpLink> = {
 		id: crypto.randomUUID(),
 		name: pending.name,
 		url: pending.url,
-		...(pending.elicitation ? { elicitation: pending.elicitation } : {}),
 		token: tokens.accessToken,
-		oauth: {
-			clientId: pending.clientId,
-			...(pending.clientSecret ? { clientSecret: pending.clientSecret } : {}),
-			tokenEndpoint: pending.tokenEndpoint,
-			expiresAt: expiresAt(tokens),
-			...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
-			...(scope ? { scope } : {}),
-			...(pending.resource ? { resource: pending.resource } : {}),
-		},
+		oauth,
 		createdAt: Date.now(),
 	};
 
-	await store.putLink(link);
-	await store.putAuthAttempt({
-		...pending,
-		status: "complete",
-		linkId: link.id,
-	});
+	if (pending.elicitation) link.elicitation = pending.elicitation;
 
-	return { status: "complete", link, tools: probe.tools };
+	await store.putLink(link);
+
+	return link;
 }
 
 /** Mark an attempt failed, so the interaction and the callback say the same thing. */
@@ -259,24 +318,27 @@ async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink
 	if (oauth.expiresAt - Date.now() > REFRESH_SKEW_MS) return link;
 
 	try {
-		const tokens = await refreshTokens({
+		const request: Parameters<typeof refreshTokens>[0] = {
 			tokenEndpoint: oauth.tokenEndpoint,
 			clientId: oauth.clientId,
-			...(oauth.clientSecret ? { clientSecret: oauth.clientSecret } : {}),
 			refreshToken: oauth.refreshToken,
-			...(oauth.resource ? { resource: oauth.resource } : {}),
-		});
-
-		const next: McpLink = {
-			...link,
-			token: tokens.accessToken,
-			oauth: {
-				...oauth,
-				refreshToken: tokens.refreshToken ?? oauth.refreshToken,
-				expiresAt: expiresAt(tokens),
-				...(tokens.scope ? { scope: tokens.scope } : {}),
-			},
 		};
+
+		if (oauth.clientSecret) request.clientSecret = oauth.clientSecret;
+
+		if (oauth.resource) request.resource = oauth.resource;
+
+		const tokens = await refreshTokens(request);
+
+		const oauthNext: Mutable<NonNullable<McpLink["oauth"]>> = {
+			...oauth,
+			refreshToken: tokens.refreshToken ?? oauth.refreshToken,
+			expiresAt: expiresAt(tokens),
+		};
+
+		if (tokens.scope) oauthNext.scope = tokens.scope;
+
+		const next: Mutable<McpLink> = { ...link, token: tokens.accessToken, oauth: oauthNext };
 
 		// The admin may have removed the link while the token endpoint was busy.
 		// Writing the refreshed record back would resurrect it.
@@ -298,7 +360,11 @@ export async function refreshLinks(store: LinkStore, links: readonly McpLink[]):
 
 /** Ask a linked server what it offers, using the bearer the link carries. */
 export async function testLink(link: McpLink): Promise<ProbeResult> {
-	return await probeServer({ url: link.url, ...(link.token ? { token: link.token } : {}) });
+	const options: ProbeOptions = { url: link.url };
+
+	if (link.token) options.token = link.token;
+
+	return await probeServer(options);
 }
 
 /** Drop attempts nobody will finish, so storage does not accumulate verifiers. */

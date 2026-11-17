@@ -13,6 +13,7 @@
 import { Cause, Duration, Effect, Option, Schedule, Schema } from "effect";
 
 import { booleanField, isJsonObject, jsonBody, jsonField, numberField, stringField } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -34,6 +35,14 @@ export const DEFAULT_THREAD_NAME = "eryn";
 
 /** Discord's audit-log action type for `BOT_ADD`. */
 export const AUDIT_BOT_ADD = 28;
+
+/** One guild the bot is in, as Discord lists it for a bot user. */
+export interface DiscordGuildSummary {
+	id: string;
+	name: string;
+	/** The bot's own permissions in that guild, as a decimal bitmask string. */
+	permissions?: string;
+}
 
 export interface DiscordUser {
 	id: string;
@@ -218,6 +227,17 @@ export interface DiscordRegisteredCommand extends DiscordCommand {
 	version?: string;
 }
 
+/** The callback body that posts or updates the message an interaction shows. */
+interface InteractionMessageBody {
+	readonly type: 4 | 7;
+	readonly data: {
+		readonly content: string;
+		readonly allowed_mentions: { readonly parse: readonly string[] };
+		readonly flags?: number;
+		readonly components?: readonly DiscordComponent[];
+	};
+}
+
 /** How to acknowledge an interaction that produced a message. */
 export interface InteractionMessageOptions {
 	ephemeral?: boolean;
@@ -226,22 +246,22 @@ export interface InteractionMessageOptions {
 
 function permissionOverwrites(value: Schema.Json | undefined): readonly PermissionOverwrite[] | undefined {
 	if (!Array.isArray(value)) return undefined;
-	const parsed: PermissionOverwrite[] = [];
 
-	for (const entry of value) {
+	return value.flatMap((entry): PermissionOverwrite[] => {
 		const id = stringField(entry, "id");
 		const type = numberField(entry, "type");
 
-		if (id === undefined || type === undefined) continue;
-		parsed.push({
-			id,
-			type,
-			allow: stringField(entry, "allow") ?? "0",
-			deny: stringField(entry, "deny") ?? "0",
-		});
-	}
+		if (id === undefined || type === undefined) return [];
 
-	return parsed;
+		return [
+			{
+				id,
+				type,
+				allow: stringField(entry, "allow") ?? "0",
+				deny: stringField(entry, "deny") ?? "0",
+			},
+		];
+	});
 }
 
 function channelRef(value: Schema.Json | undefined): DiscordChannelRef | undefined {
@@ -257,17 +277,23 @@ function channelRef(value: Schema.Json | undefined): DiscordChannelRef | undefin
 	const position = numberField(value, "position");
 	const threadMetadata = threadMetadataOf(jsonField(value, "thread_metadata"));
 
-	return {
-		id,
-		type,
-		...(guildId === undefined ? {} : { guild_id: guildId }),
-		...(parentId === undefined ? {} : { parent_id: parentId }),
-		...(name === undefined ? {} : { name }),
-		...(topic === undefined ? {} : { topic }),
-		...(position === undefined ? {} : { position }),
-		...(overwrites ? { permission_overwrites: overwrites } : {}),
-		...(threadMetadata ? { thread_metadata: threadMetadata } : {}),
-	};
+	const channel: DiscordChannelRef = { id, type };
+
+	if (guildId !== undefined) channel.guild_id = guildId;
+
+	if (parentId !== undefined) channel.parent_id = parentId;
+
+	if (name !== undefined) channel.name = name;
+
+	if (topic !== undefined) channel.topic = topic;
+
+	if (position !== undefined) channel.position = position;
+
+	if (overwrites) channel.permission_overwrites = overwrites;
+
+	if (threadMetadata) channel.thread_metadata = threadMetadata;
+
+	return channel;
 }
 
 /** The archive settings Discord reports for a thread channel. */
@@ -334,9 +360,15 @@ export function discordRest(token: string) {
 		const encoded = multipart || body === undefined ? body : JSON.stringify(body);
 
 		const fetchOnce = Effect.promise(async (): Promise<Attempt> => {
+			const init: RequestInit = { method, headers };
+
 			// SAFETY: the body is either already a `FormData` (a valid `BodyInit`) or
 			// the string `JSON.stringify` produced from a JSON value.
-			const response = await fetch(`${API}${path}`, { method, headers, body: encoded as BodyInit | undefined });
+			const encodedBody = encoded as BodyInit | undefined;
+
+			if (encodedBody !== undefined) init.body = encodedBody;
+
+			const response = await fetch(`${API}${path}`, init);
 
 			// The 429 body is JSON by contract; decode it before reading `retry_after`.
 			const rateLimitBody =
@@ -347,8 +379,11 @@ export function discordRest(token: string) {
 					: undefined;
 
 			const retryAfter = rateLimitBody === undefined ? undefined : retryDelay(rateLimitBody);
+			const attempt: Mutable<Attempt> = { response };
 
-			return { response, ...(retryAfter === undefined ? {} : { retryAfter }) };
+			if (retryAfter !== undefined) attempt.retryAfter = retryAfter;
+
+			return attempt;
 		});
 
 		const { response } = await Effect.runPromise(Effect.repeat(fetchOnce, retryRateLimits));
@@ -375,38 +410,58 @@ export function discordRest(token: string) {
 		await request<void>("POST", `/interactions/${interactionId}/${interactionToken}/callback`, payload);
 	}
 
-	return {
-		/** The bot's own user, which also serves as the application id. */
-		async me(): Promise<DiscordUser> {
-			const result = await request<Schema.Json>("GET", "/users/@me");
-			const username = stringField(result, "username");
+	const http: DiscordTransport = { request, create, interactionCallback };
 
-			return {
-				id: idOf(result, "Discord did not return a bot user"),
-				...(username === undefined ? {} : { username }),
-			};
+	return {
+		...readMethods(http),
+		...messageMethods(http),
+		...guildMethods(http),
+		...interactionMethods(http),
+		...applicationMethods(http),
+	};
+}
+
+/** The low-level transport every Discord method is written over. */
+interface DiscordTransport {
+	request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: Schema.Json | FormData): Promise<T | undefined>;
+	create(path: string, body: Schema.Json | FormData, failure: string): Promise<{ id: string }>;
+	interactionCallback(interactionId: string, interactionToken: string, payload: Schema.Json): Promise<void>;
+}
+
+/** Methods that read users, channels, and messages. */
+function readMethods(http: DiscordTransport) {
+	return {
+				/** The bot's own user, which also serves as the application id. */
+		async me(): Promise<DiscordUser> {
+			const result = await http.request<Schema.Json>("GET", "/users/@me");
+			const username = stringField(result, "username");
+			const user: DiscordUser = { id: idOf(result, "Discord did not return a bot user") };
+
+			if (username !== undefined) user.username = username;
+
+			return user;
 		},
 
 		/** A channel or thread, or undefined when the id does not exist. */
 		async channel(channelId: string): Promise<DiscordChannelRef | undefined> {
-			return channelRef(await request<Schema.Json>("GET", `/channels/${channelId}`));
+			return channelRef(await http.request<Schema.Json>("GET", `/channels/${channelId}`));
 		},
 
 		/** Every channel the bot can see in a guild, excluding threads. */
 		async guildChannels(guildId: string): Promise<DiscordChannelRef[]> {
-			return channelRefs(await request<Schema.Json>("GET", `/guilds/${guildId}/channels`));
+			return channelRefs(await http.request<Schema.Json>("GET", `/guilds/${guildId}/channels`));
 		},
 
 		/** Active threads in a guild, which Discord lists separately from channels. */
 		async activeThreads(guildId: string): Promise<DiscordChannelRef[]> {
-			const result = await request<Schema.Json>("GET", `/guilds/${guildId}/threads/active`);
+			const result = await http.request<Schema.Json>("GET", `/guilds/${guildId}/threads/active`);
 
 			return channelRefs(jsonField(result, "threads"));
 		},
 
 		/** One message in a channel or thread, or undefined when it does not exist. */
 		async message(channelId: string, messageId: string): Promise<DiscordMessageView | undefined> {
-			return await request<DiscordMessageView>("GET", messagePath(channelId, messageId));
+			return await http.request<DiscordMessageView>("GET", messagePath(channelId, messageId));
 		},
 
 		/** Recent messages in a channel or thread, newest first. */
@@ -417,11 +472,16 @@ export function discordRest(token: string) {
 			const query = new URLSearchParams({ limit: String(Math.min(Math.max(options.limit ?? 20, 1), 100)) });
 
 			if (options.before) query.set("before", options.before);
-			const result = await request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
+			const result = await http.request<DiscordMessageView[]>("GET", `/channels/${channelId}/messages?${query}`);
 
 			return Array.isArray(result) ? result : [];
 		},
+	};
+}
 
+/** Methods that write to a channel or a message. */
+function messageMethods(http: DiscordTransport) {
+	return {
 		async sendMessage(
 			channelId: string,
 			content: string,
@@ -449,7 +509,7 @@ export function discordRest(token: string) {
 			const files = options.files ?? [];
 
 			if (files.length === 0) {
-				return await create(path, jsonBody(body), "Discord did not accept the message");
+				return await http.create(path, jsonBody(body), "Discord did not accept the message");
 			}
 
 			// Files are uploaded as multipart/form-data: the message itself goes in
@@ -462,12 +522,12 @@ export function discordRest(token: string) {
 				form.append(`files[${index}]`, new Blob([file.data]), file.filename);
 			});
 
-			return await create(path, form, "Discord did not accept the message");
+			return await http.create(path, form, "Discord did not accept the message");
 		},
 
 		/** Add a user to a thread so they follow it. This does not notify them. */
 		async addThreadMember(channelId: string, userId: string): Promise<void> {
-			await request<void>("PUT", `/channels/${channelId}/thread-members/${userId}`);
+			await http.request<void>("PUT", `/channels/${channelId}/thread-members/${userId}`);
 		},
 
 		async editMessage(
@@ -476,23 +536,24 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[]; embeds?: readonly DiscordEmbed[] } = {},
 		): Promise<void> {
-			await request<void>("PATCH", messagePath(channelId, messageId), jsonBody({
-				content,
-				allowed_mentions: { parse: [] },
-				...(options.components ? { components: options.components } : {}),
-				...(options.embeds !== undefined ? { embeds: options.embeds } : {}),
-			}));
+			const body: MessageBody = { content, allowed_mentions: { parse: [] } };
+
+			if (options.components) body.components = options.components;
+
+			if (options.embeds !== undefined) body.embeds = options.embeds;
+
+			await http.request<void>("PATCH", messagePath(channelId, messageId), jsonBody(body));
 		},
 
 		async createThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> {
 			const path = `${messagePath(channelId, messageId)}/threads`;
 
-			return await create(path, jsonBody({ name, auto_archive_duration: 1_440 }), "Discord did not create the thread");
+			return await http.create(path, jsonBody({ name, auto_archive_duration: 1_440 }), "Discord did not create the thread");
 		},
 
 		/** Start a public thread in a channel, not attached to a message. */
 		async startThread(channelId: string, name: string): Promise<{ id: string }> {
-			return await create(
+			return await http.create(
 				`/channels/${channelId}/threads`,
 				jsonBody({ name, auto_archive_duration: 1_440 }),
 				"Discord did not create the thread",
@@ -501,46 +562,51 @@ export function discordRest(token: string) {
 
 		/** Archive or unarchive a thread. */
 		async setThreadArchived(threadId: string, archived: boolean, locked = false): Promise<void> {
-			await request<void>("PATCH", `/channels/${threadId}`, jsonBody({ archived, locked }));
+			await http.request<void>("PATCH", `/channels/${threadId}`, jsonBody({ archived, locked }));
 		},
 
 		/** Follow a thread, so its messages stay available to the bot. */
 		async joinThread(threadId: string): Promise<void> {
-			await request<void>("PUT", `/channels/${threadId}/thread-members/@me`);
+			await http.request<void>("PUT", `/channels/${threadId}/thread-members/@me`);
 		},
 
 		/** Stop following a thread. */
 		async leaveThread(threadId: string): Promise<void> {
-			await request<void>("DELETE", `/channels/${threadId}/thread-members/@me`);
+			await http.request<void>("DELETE", `/channels/${threadId}/thread-members/@me`);
 		},
 
 		async deleteMessage(channelId: string, messageId: string): Promise<void> {
-			await request<void>("DELETE", messagePath(channelId, messageId));
+			await http.request<void>("DELETE", messagePath(channelId, messageId));
 		},
 
 		async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-			await request<void>("PUT", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
+			await http.request<void>("PUT", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
 		},
 
 		async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-			await request<void>("DELETE", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
+			await http.request<void>("DELETE", `${messagePath(channelId, messageId)}/reactions/${encodeURIComponent(emoji)}/@me`);
 		},
 
 		async pinMessage(channelId: string, messageId: string): Promise<void> {
-			await request<void>("PUT", `/channels/${channelId}/pins/${messageId}`);
+			await http.request<void>("PUT", `/channels/${channelId}/pins/${messageId}`);
 		},
 
 		async unpinMessage(channelId: string, messageId: string): Promise<void> {
-			await request<void>("DELETE", `/channels/${channelId}/pins/${messageId}`);
+			await http.request<void>("DELETE", `/channels/${channelId}/pins/${messageId}`);
 		},
 
 		async triggerTyping(channelId: string): Promise<void> {
-			await request<void>("POST", `/channels/${channelId}/typing`);
+			await http.request<void>("POST", `/channels/${channelId}/typing`);
 		},
+	};
+}
 
+/** Methods that read a guild's roles, members, and audit log. */
+function guildMethods(http: DiscordTransport) {
+	return {
 		/** The guild's roles, used to find the bot's managed role. */
 		async guildRoles(guildId: string): Promise<DiscordRole[]> {
-			const result = await request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
+			const result = await http.request<DiscordRole[]>("GET", `/guilds/${guildId}/roles`);
 
 			return Array.isArray(result) ? result : [];
 		},
@@ -552,7 +618,7 @@ export function discordRest(token: string) {
 		 * permissions to lend to a tool call.
 		 */
 		async guildMember(guildId: string, userId: string): Promise<{ roles: string[] } | undefined> {
-			const result = await request<Schema.Json>("GET", `/guilds/${guildId}/members/${userId}`);
+			const result = await http.request<Schema.Json>("GET", `/guilds/${guildId}/members/${userId}`);
 			const roles = jsonField(result, "roles");
 
 			if (result === undefined || !Array.isArray(roles)) return undefined;
@@ -562,7 +628,7 @@ export function discordRest(token: string) {
 
 		/** A guild's owner, which the permission resolver needs to grant everything. */
 		async guildInfo(guildId: string): Promise<{ ownerId?: string } | undefined> {
-			const result = await request<Schema.Json>("GET", `/guilds/${guildId}`);
+			const result = await http.request<Schema.Json>("GET", `/guilds/${guildId}`);
 
 			if (result === undefined) return undefined;
 			const ownerId = stringField(result, "owner_id");
@@ -582,7 +648,7 @@ export function discordRest(token: string) {
 		 */
 		async isThreadMember(threadId: string, userId: string): Promise<boolean | undefined> {
 			try {
-				const result = await request<Schema.Json>("GET", `/channels/${threadId}/thread-members/${userId}`);
+				const result = await http.request<Schema.Json>("GET", `/channels/${threadId}/thread-members/${userId}`);
 
 				return result !== undefined;
 			} catch {
@@ -591,19 +657,22 @@ export function discordRest(token: string) {
 		},
 
 		/** The guilds the bot is a member of, with its own permissions in each. */
-		async guilds(): Promise<{ id: string; name: string; permissions?: string }[]> {
-			const result = await request<Schema.Json>("GET", "/users/@me/guilds");
+		async guilds(): Promise<DiscordGuildSummary[]> {
+			const result = await http.request<Schema.Json>("GET", "/users/@me/guilds");
 
 			if (!Array.isArray(result)) return [];
 
-			return result.flatMap((guild) => {
+			return result.flatMap((guild): DiscordGuildSummary[] => {
 				const id = stringField(guild, "id");
 				const name = stringField(guild, "name");
 
 				if (id === undefined || name === undefined) return [];
 				const permissions = stringField(guild, "permissions");
+				const summary: DiscordGuildSummary = { id, name };
 
-				return [{ id, name, ...(permissions === undefined ? {} : { permissions }) }];
+				if (permissions !== undefined) summary.permissions = permissions;
+
+				return [summary];
 			});
 		},
 
@@ -612,14 +681,19 @@ export function discordRest(token: string) {
 		 * learns *who* installed it. `target_id` is the bot user id.
 		 */
 		async botAddEntry(guildId: string): Promise<DiscordAuditEntry | undefined> {
-			const result = await request<Schema.Json>(
+			const result = await http.request<Schema.Json>(
 				"GET",
 				`/guilds/${guildId}/audit-logs?action_type=${AUDIT_BOT_ADD}&limit=1`,
 			);
 
 			return Option.getOrUndefined(Schema.decodeUnknownOption(AuditLogSchema)(result))?.audit_log_entries?.[0];
 		},
+	};
+}
 
+/** Methods that answer or edit an interaction. */
+function interactionMethods(http: DiscordTransport) {
+	return {
 		/** Acknowledge an interaction with a message (ephemeral by default). */
 		async interactionReply(
 			interactionId: string,
@@ -627,26 +701,22 @@ export function discordRest(token: string) {
 			content: string,
 			options: InteractionMessageOptions = {},
 		): Promise<void> {
-			await interactionCallback(
-				interactionId,
-				interactionToken,
-				jsonBody({
-					type: 4,
-					data: {
-						content,
-						// Error strings and MCP text are untrusted: never let a mention
-						// token in them ping a user, role, or another bot.
-						allowed_mentions: { parse: [] },
-						flags: options.ephemeral === false ? 0 : 64,
-						...(options.components?.length ? { components: options.components } : {}),
-					},
-				}),
-			);
+			const data: Mutable<InteractionMessageBody["data"]> = {
+				content,
+				// Error strings and MCP text are untrusted: never let a mention
+				// token in them ping a user, role, or another bot.
+				allowed_mentions: { parse: [] },
+				flags: options.ephemeral === false ? 0 : 64,
+			};
+
+			if (options.components?.length) data.components = options.components;
+
+			await http.interactionCallback(interactionId, interactionToken, jsonBody({ type: 4, data }));
 		},
 
 		/** Acknowledge an interaction without content, so slow work can finish later. */
 		async interactionDefer(interactionId: string, interactionToken: string, ephemeral = true): Promise<void> {
-			await interactionCallback(
+			await http.interactionCallback(
 				interactionId,
 				interactionToken,
 				jsonBody({ type: 5, data: { flags: ephemeral ? 64 : 0 } }),
@@ -667,14 +737,14 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[] } = {},
 		): Promise<void> {
-			await request<void>(
+			const body: MessageBody = { content, allowed_mentions: { parse: [] } };
+
+			if (options.components) body.components = options.components;
+
+			await http.request<void>(
 				"PATCH",
 				`/webhooks/${applicationId}/${interactionToken}/messages/@original`,
-				jsonBody({
-					content,
-					allowed_mentions: { parse: [] },
-					...(options.components ? { components: options.components } : {}),
-				}),
+				jsonBody(body),
 			);
 		},
 
@@ -685,38 +755,36 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[] } = {},
 		): Promise<void> {
-			await interactionCallback(
-				interactionId,
-				interactionToken,
-				jsonBody({
-					type: 7,
-					data: {
-						content,
-						allowed_mentions: { parse: [] },
-						...(options.components ? { components: options.components } : {}),
-					},
-				}),
-			);
+			const data: Mutable<InteractionMessageBody["data"]> = { content, allowed_mentions: { parse: [] } };
+
+			if (options.components) data.components = options.components;
+
+			await http.interactionCallback(interactionId, interactionToken, jsonBody({ type: 7, data }));
 		},
 
 		/** Acknowledge a component interaction without touching its message, so it can be deleted. */
 		async interactionDeferUpdate(interactionId: string, interactionToken: string): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, { type: 6 });
+			await http.interactionCallback(interactionId, interactionToken, { type: 6 });
 		},
 
 		/** Delete the message an interaction responded with, including an ephemeral menu. */
 		async interactionDeleteOriginal(applicationId: string, interactionToken: string): Promise<void> {
-			await request<void>("DELETE", `/webhooks/${applicationId}/${interactionToken}/messages/@original`);
+			await http.request<void>("DELETE", `/webhooks/${applicationId}/${interactionToken}/messages/@original`);
 		},
 
 		/** Open a modal in response to a component or command interaction. */
 		async interactionModal(interactionId: string, interactionToken: string, modal: DiscordModal): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, jsonBody({ type: 9, data: modal }));
+			await http.interactionCallback(interactionId, interactionToken, jsonBody({ type: 9, data: modal }));
 		},
+	};
+}
 
+/** Methods that read or write this application's commands and endpoint. */
+function applicationMethods(http: DiscordTransport) {
+	return {
 		/** The application's current global commands. */
 		async listCommands(applicationId: string): Promise<readonly DiscordRegisteredCommand[] | undefined> {
-			return await request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
+			return await http.request<DiscordRegisteredCommand[]>("GET", `/applications/${applicationId}/commands`);
 		},
 
 		/** The application's commands in one guild. */
@@ -724,7 +792,7 @@ export function discordRest(token: string) {
 			applicationId: string,
 			guildId: string,
 		): Promise<readonly DiscordRegisteredCommand[] | undefined> {
-			return await request<DiscordRegisteredCommand[]>(
+			return await http.request<DiscordRegisteredCommand[]>(
 				"GET",
 				`/applications/${applicationId}/guilds/${guildId}/commands`,
 			);
@@ -732,7 +800,7 @@ export function discordRest(token: string) {
 
 		/** Discord's recommended gateway shard count for this bot. */
 		async gatewayShards(): Promise<number> {
-			const result = await request<Schema.Json>("GET", "/gateway/bot");
+			const result = await http.request<Schema.Json>("GET", "/gateway/bot");
 			const shards = numberField(result, "shards");
 
 			if (shards !== undefined && Number.isFinite(shards) && shards >= 1) {
@@ -744,7 +812,7 @@ export function discordRest(token: string) {
 
 		/** Where Discord currently posts interactions, from the application object. */
 		async interactionsEndpoint(): Promise<string | undefined> {
-			const result = await request<Schema.Json>("GET", "/applications/@me");
+			const result = await http.request<Schema.Json>("GET", "/applications/@me");
 
 			return stringField(result, "interactions_endpoint_url");
 		},
@@ -756,12 +824,12 @@ export function discordRest(token: string) {
 		 * rejected endpoint leaves gateway delivery untouched.
 		 */
 		async setInteractionsEndpoint(url: string): Promise<void> {
-			await request<Schema.Json>("PATCH", "/applications/@me", jsonBody({ interactions_endpoint_url: url }));
+			await http.request<Schema.Json>("PATCH", "/applications/@me", jsonBody({ interactions_endpoint_url: url }));
 		},
 
 		/** Replace the application's global commands. */
 		async overwriteCommands(applicationId: string, commands: readonly DiscordCommand[]): Promise<void> {
-			await request<Schema.Json>("PUT", `/applications/${applicationId}/commands`, jsonBody(commands));
+			await http.request<Schema.Json>("PUT", `/applications/${applicationId}/commands`, jsonBody(commands));
 		},
 
 		/** Replace the application's commands in one guild. */
@@ -770,7 +838,7 @@ export function discordRest(token: string) {
 			guildId: string,
 			commands: readonly DiscordCommand[],
 		): Promise<void> {
-			await request<Schema.Json>(
+			await http.request<Schema.Json>(
 				"PUT",
 				`/applications/${applicationId}/guilds/${guildId}/commands`,
 				jsonBody(commands),

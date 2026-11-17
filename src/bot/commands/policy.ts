@@ -27,6 +27,7 @@ import {
 	summaryLines,
 	type EffectTable,
 } from "../../session/policy";
+import { type Mutable } from "../../mutable.ts";
 import type { Policy, PolicyEffect, PolicyState } from "../../session/models";
 import {
 	claim,
@@ -80,11 +81,18 @@ async function targetOf(request: InteractionRequest): Promise<Target | undefined
 	return { channelId, label: `#${channel.name ?? "channel"}` };
 }
 
-function stateRequest(target: Target) {
-	return {
-		channelId: target.channelId,
-		...(target.threadId ? { threadId: target.threadId } : {}),
-	};
+/** The request that reads or writes one scope's policy. */
+interface StateRequest {
+	readonly channelId: string;
+	readonly threadId?: string;
+}
+
+function stateRequest(target: Target): StateRequest {
+	const request: Mutable<StateRequest> = { channelId: target.channelId };
+
+	if (target.threadId) request.threadId = target.threadId;
+
+	return request;
 }
 
 function scopeRequest(target: Target) {
@@ -239,28 +247,27 @@ async function customise(request: InteractionRequest): Promise<void> {
 }
 
 function groupOptions(state: PolicyState): DiscordSelectOption[] {
-	const options: DiscordSelectOption[] = POLICY_GROUPS.map((group) => ({
+	const groups: DiscordSelectOption[] = POLICY_GROUPS.map((group) => ({
 		label: GROUP_LABELS[group],
 		value: group,
 		description: `Currently ${effectWord(state.effective.tools?.[group])}`.slice(0, 100),
 	}));
 
 	const mcpAll = state.effective.mcp?.[MCP_ALL] ?? "allow";
-	options.push({
+
+	const allServers: DiscordSelectOption = {
 		label: "All MCP servers",
 		value: "mcp",
 		description: `Currently ${effectWord(mcpAll)}`.slice(0, 100),
-	});
+	};
 
-	for (const server of state.mcpServers) {
-		options.push({
-			label: server.slice(0, 100),
-			value: `mcp:${server}`,
-			description: `Currently ${effectWord(state.effective.mcp?.[server] ?? mcpAll)}`.slice(0, 100),
-		});
-	}
+	const servers: DiscordSelectOption[] = state.mcpServers.map((server) => ({
+		label: server.slice(0, 100),
+		value: `mcp:${server}`,
+		description: `Currently ${effectWord(state.effective.mcp?.[server] ?? mcpAll)}`.slice(0, 100),
+	}));
 
-	return options.slice(0, MAX_SELECT_OPTIONS);
+	return [...groups, allServers, ...servers].slice(0, MAX_SELECT_OPTIONS);
 }
 
 const EFFECT_WORDS: Record<PolicyEffect, string> = {
@@ -318,6 +325,44 @@ async function groupScreen(request: InteractionRequest, key: string): Promise<vo
 	);
 }
 
+/** Apply one effect to the scope's own tool and MCP maps, deleting on inherit. */
+function applyToMaps(
+	tools: EffectTable,
+	mcp: EffectTable,
+	key: string,
+	effect: PolicyEffect | "inherit",
+): void {
+	if (key === "mcp") {
+		if (effect === "inherit") delete mcp[MCP_ALL];
+		else mcp[MCP_ALL] = effect;
+	} else if (key.startsWith("mcp:")) {
+		const server = key.slice(4);
+
+		if (effect === "inherit") delete mcp[server];
+		else mcp[server] = effect;
+	} else {
+		if (effect === "inherit") delete tools[key];
+		else tools[key] = effect;
+	}
+}
+
+/** The patch that keeps the scope's profile choices and stores the edited maps. */
+function effectPatch(state: PolicyState, tools: EffectTable, mcp: EffectTable): Mutable<Policy> {
+	const patch: Mutable<Policy> = {};
+
+	if (state.own?.profile) patch.profile = state.own.profile;
+
+	if (state.own?.preset) patch.preset = state.own.preset;
+
+	if (state.own?.elicitation) patch.elicitation = state.own.elicitation;
+
+	if (Object.keys(tools).length) patch.tools = tools;
+
+	if (Object.keys(mcp).length) patch.mcp = mcp;
+
+	return patch;
+}
+
 async function applyEffect(
 	request: InteractionRequest,
 	key: string,
@@ -332,32 +377,8 @@ async function applyEffect(
 	const tools: EffectTable = { ...state.own?.tools };
 	const mcp: EffectTable = { ...state.own?.mcp };
 
-	if (key === "mcp") {
-		if (effect === "inherit") delete mcp[MCP_ALL];
-		else mcp[MCP_ALL] = effect;
-	} else if (key.startsWith("mcp:")) {
-		const server = key.slice(4);
-
-		if (effect === "inherit") delete mcp[server];
-		else mcp[server] = effect;
-	} else {
-		if (effect === "inherit") delete tools[key];
-		else tools[key] = effect;
-	}
-
-	const own = state.own
-		? {
-				...(state.own.profile ? { profile: state.own.profile } : {}),
-				...(state.own.preset ? { preset: state.own.preset } : {}),
-				...(state.own.elicitation ? { elicitation: state.own.elicitation } : {}),
-			}
-		: {};
-
-	const patch: Policy = {
-		...own,
-		...(Object.keys(tools).length ? { tools } : {}),
-		...(Object.keys(mcp).length ? { mcp } : {}),
-	};
+	applyToMaps(tools, mcp, key, effect);
+	const patch = effectPatch(state, tools, mcp);
 
 	try {
 		await request.session.setPolicy({ ...scopeRequest(target), policy: patch });

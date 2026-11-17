@@ -7,6 +7,7 @@
  * own permission list, so a blocked tool is not offered to the model at all.
  */
 
+import { type Mutable } from "../mutable.ts";
 import type { McpLink, Policy, PolicyEffect, PolicyPreset, PolicyProfile } from "./models";
 
 /** The effect chosen for each tool group or MCP server. */
@@ -239,15 +240,11 @@ export function profileDefinition(
 
 /** A custom profile's tools completed from Standard, so every group has a value. */
 export function completeTools(tools: EffectTable = {}): EffectTable {
-	const complete: EffectTable = { ...PRESETS.standard };
+	const overrides = POLICY_GROUPS.flatMap((group): [string, PolicyEffect][] =>
+		tools[group] ? [[group, tools[group]]] : [],
+	);
 
-	for (const group of POLICY_GROUPS) {
-		const effect = tools[group];
-
-		if (effect) complete[group] = effect;
-	}
-
-	return complete;
+	return { ...PRESETS.standard, ...Object.fromEntries(overrides) };
 }
 
 /** A custom profile's MCP map completed with the all-servers default. */
@@ -299,7 +296,11 @@ export function resolvePolicy(
 		if (layer.elicitation) elicitation = layer.elicitation;
 	}
 
-	return { profile, tools, mcp, ...(elicitation ? { elicitation } : {}) };
+	const resolved: Mutable<Policy> = { profile, tools, mcp };
+
+	if (elicitation) resolved.elicitation = elicitation;
+
+	return resolved;
 }
 
 /** Whether a policy leaves everything at the server default. */
@@ -543,9 +544,11 @@ export function overrideFor(action: string, effect: PolicyEffect): PolicyOverrid
 
 /** Merge one approval decision into the patch stored at a scope. */
 export function withOverride(patch: Policy | undefined, override: ReturnType<typeof overrideFor>): Policy {
-	return {
-		...patch,
-		...(override.tools ? { tools: { ...patch?.tools, ...override.tools } } : {}),
-		updatedAt: Date.now(),
-	};
+	const merged: Mutable<Policy> = { ...patch };
+
+	if (override.tools) merged.tools = { ...patch?.tools, ...override.tools };
+
+	merged.updatedAt = Date.now();
+
+	return merged;
 }

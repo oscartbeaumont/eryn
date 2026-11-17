@@ -18,6 +18,9 @@ const DOMAIN =
 			? undefined
 			: "eryn.otbeaumont.me";
 
+/** The origin binding, present only when this deployment serves a domain. */
+const publicOrigin = DOMAIN ? { PUBLIC_ORIGIN: bindings.text(`https://${DOMAIN}`) } : {};
+
 /**
  * One Worker: the Discord bot.
  *
@@ -75,7 +78,7 @@ export default defineConfig({
 			// Public origin used in links and OAuth callbacks. The hosted deploy
 			// knows its own domain; a self-hosted one learns its URL from the first
 			// request it serves, so it leaves this unset.
-			...(DOMAIN ? { PUBLIC_ORIGIN: bindings.text(`https://${DOMAIN}`) } : {}),
+			...publicOrigin,
 
 			// The deploy this Worker is serving. A deploy does not restart a live
 			// object, and an object's own copy of this binding is pinned to the

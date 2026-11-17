@@ -11,6 +11,7 @@ import type { Schema } from "effect";
 
 import { describeError } from "../errors.ts";
 import { toJsonObject } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 
 /** The JSON-schema shape OpenCode's tool editor expects. */
 export function objectSchema(properties: Schema.JsonObject, required: string[] = []) {
@@ -98,6 +99,23 @@ function isText(result: ToolResult): result is string {
 	return typeof result === "string";
 }
 
+/** A file part in the editor's content array. */
+interface ToolFilePart {
+	readonly type: "file";
+	readonly uri: string;
+	readonly mime: string;
+	readonly name?: string;
+}
+
+/** One result file as the part the editor carries to the model. */
+function filePart(file: ToolFile): ToolFilePart {
+	const part: Mutable<ToolFilePart> = { type: "file", uri: file.uri, mime: file.mime };
+
+	if (file.name) part.name = file.name;
+
+	return part;
+}
+
 function content(result: ToolResult) {
 	if (result instanceof ToolOutput) {
 		if (result.files.length === 0) return { content: result.text };
@@ -105,12 +123,7 @@ function content(result: ToolResult) {
 		return {
 			content: [
 				{ type: "text" as const, text: result.text },
-				...result.files.map((file) => ({
-					type: "file" as const,
-					uri: file.uri,
-					mime: file.mime,
-					...(file.name ? { name: file.name } : {}),
-				})),
+				...result.files.map(filePart),
 			],
 		};
 	}

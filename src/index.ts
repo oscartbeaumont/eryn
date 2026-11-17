@@ -96,7 +96,10 @@ export async function wake(env: Env, origin?: string): Promise<WakeState | undef
  * Each route handler returns `undefined` for a path it does not own, so the
  * Worker can fall through to the health check or a 404.
  */
-export async function handle(request: Request, ctx: ExecutionContext): Promise<Response | undefined> {
+export async function handleWorkerRequest(
+	request: Request,
+	ctx: ExecutionContext,
+): Promise<Response | undefined> {
 	const url = new URL(request.url);
 
 	// Discord posts every interaction here once the application's endpoint is
@@ -401,7 +404,7 @@ export default {
 			ctx.waitUntil(ensureEndpoint(env, new URL(request.url).origin).catch(() => undefined));
 		}
 
-		const handled = await handle(request, ctx).catch(() => undefined);
+		const handled = await handleWorkerRequest(request, ctx).catch(() => undefined);
 
 		if (handled) return handled;
 

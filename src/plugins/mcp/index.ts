@@ -19,7 +19,9 @@ export function guildMcpPlugin(links: readonly McpLink[]) {
 		id: "eryn.mcp",
 		async setup(ctx) {
 			await ctx.mcp.transform((editor) => {
-				for (const link of links) {
+				links.forEach((link) => {
+					const headers = link.token ? { headers: { Authorization: `Bearer ${link.token}` } } : {};
+
 					editor.set(link.name, {
 						type: "remote",
 						url: supportsElicitationParam(link.url)
@@ -29,9 +31,9 @@ export function guildMcpPlugin(links: readonly McpLink[]) {
 						// Leave codemode unset. OpenCode uses Code Mode for normal
 						// MCP servers and keeps Executor/PostHog direct because they
 						// already expose their own execute tool.
-						...(link.token ? { headers: { Authorization: `Bearer ${link.token}` } } : {}),
+						...headers,
 					});
-				}
+				});
 			});
 		},
 	});

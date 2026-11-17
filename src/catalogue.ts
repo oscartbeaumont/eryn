@@ -171,27 +171,42 @@ export function filterCatalogue(text: string, keep: readonly string[]): string {
 		while (i < text.length && /[\s,]/.test(text[i] ?? "")) i += 1;
 
 		if (text[i] === "}") break;
+		const parsed = catalogueEntry(text, i, kept);
 
-		if (text[i] !== '"') throw new Error("expected a provider name in the catalogue");
-		const keyEnd = endOfString(text, i);
-		const key = text.slice(i + 1, keyEnd - 1);
-		i = keyEnd;
-
-		while (i < text.length && text[i] !== ":") i += 1;
-		i += 1;
-
-		while (i < text.length && /\s/.test(text[i] ?? "")) i += 1;
-		const valueStart = i;
-
-		if (text[i] !== "{") throw new Error("expected a provider object in the catalogue");
-		const valueEnd = endOfContainer(text, i);
-		const provider = text.slice(valueStart, valueEnd);
-		const value = kept.has(key) ? provider : withoutModels(provider);
-		entries.push(`${JSON.stringify(key)}:${value}`);
-		i = valueEnd;
+		entries.push(parsed.entry);
+		i = parsed.end;
 	}
 
 	return `{${entries.join(",")}}`;
+}
+
+/** One `"provider":{…}` entry, and where the next one begins. */
+interface CatalogueEntry {
+	readonly entry: string;
+	readonly end: number;
+}
+
+/** Parse the entry starting at `start`, keeping or stripping its model list. */
+function catalogueEntry(text: string, start: number, kept: ReadonlySet<string>): CatalogueEntry {
+	let i = start;
+
+	if (text[i] !== '"') throw new Error("expected a provider name in the catalogue");
+	const keyEnd = endOfString(text, i);
+	const key = text.slice(i + 1, keyEnd - 1);
+	i = keyEnd;
+
+	while (i < text.length && text[i] !== ":") i += 1;
+	i += 1;
+
+	while (i < text.length && /\s/.test(text[i] ?? "")) i += 1;
+	const valueStart = i;
+
+	if (text[i] !== "{") throw new Error("expected a provider object in the catalogue");
+	const valueEnd = endOfContainer(text, i);
+	const provider = text.slice(valueStart, valueEnd);
+	const value = kept.has(key) ? provider : withoutModels(provider);
+
+	return { entry: `${JSON.stringify(key)}:${value}`, end: valueEnd };
 }
 
 /**

@@ -8,6 +8,7 @@
 
 import { DEFAULT_THREAD_NAME } from "../discord/api.ts";
 import type { DiscordMessage } from "../discord/socket";
+import { type Mutable } from "../mutable.ts";
 import type { PromptAttachment, PromptUser } from "../session/models.ts";
 
 /** Discord permits 100 characters in a thread name. */
@@ -31,23 +32,25 @@ export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
 	// A reply shows the message it answers inline, and that is often where the
 	// screenshot is: "put this on the calendar" replying to an image. Discord
 	// keeps the two attachment arrays separate, so carry both.
-	const sources = [...(message.attachments ?? []), ...(message.referenced_message?.attachments ?? [])];
+	const own = message.attachments ?? [];
+	const referenced = message.referenced_message?.attachments ?? [];
+	const sources = [...own, ...referenced];
 	const seen = new Set<string>();
 
-	return sources.flatMap((attachment) => {
+	return sources.flatMap((attachment): PromptAttachment[] => {
 		const url = attachment.url ?? attachment.proxy_url;
 
 		if (!url || seen.has(url)) return [];
 		seen.add(url);
+		const file: Mutable<PromptAttachment> = { url };
 
-		return [
-			{
-				url,
-				...(attachment.filename ? { name: attachment.filename } : {}),
-				...(attachment.content_type ? { contentType: attachment.content_type } : {}),
-				...(attachment.size === undefined ? {} : { size: attachment.size }),
-			},
-		];
+		if (attachment.filename) file.name = attachment.filename;
+
+		if (attachment.content_type) file.contentType = attachment.content_type;
+
+		if (attachment.size !== undefined) file.size = attachment.size;
+
+		return [file];
 	});
 }
 
@@ -59,15 +62,19 @@ export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
 export function authorInfo(message: DiscordMessage): PromptUser {
 	const username = message.author?.username?.trim();
 
-	return {
+	const author: Mutable<PromptUser> = {
 		name:
 			message.member?.nick?.trim() ||
 			message.author?.global_name?.trim() ||
 			username ||
 			"someone",
-		...(username ? { username } : {}),
-		...(message.author?.id ? { id: message.author.id } : {}),
 	};
+
+	if (username) author.username = username;
+
+	if (message.author?.id) author.id = message.author.id;
+
+	return author;
 }
 
 /**
@@ -76,21 +83,23 @@ export function authorInfo(message: DiscordMessage): PromptUser {
  */
 export function mentionInfo(message: DiscordMessage, botUserId: string | undefined): PromptUser[] {
 	const seen = new Set<string>();
-	const mentions: PromptUser[] = [];
 
-	for (const user of message.mentions ?? []) {
-		if (!user.id || user.id === botUserId || user.id === message.author?.id || seen.has(user.id)) continue;
+	return (message.mentions ?? []).flatMap((user): PromptUser[] => {
+		if (!user.id || user.id === botUserId || user.id === message.author?.id || seen.has(user.id)) return [];
 		seen.add(user.id);
 		const username = user.username?.trim();
-		mentions.push({
-			name: user.global_name?.trim() || username || user.id,
-			...(username ? { username } : {}),
-			id: user.id,
-			...(user.bot ? { bot: true } : {}),
-		});
-	}
 
-	return mentions;
+		const mention: Mutable<PromptUser> = {
+			name: user.global_name?.trim() || username || user.id,
+			id: user.id,
+		};
+
+		if (username) mention.username = username;
+
+		if (user.bot) mention.bot = true;
+
+		return [mention];
+	});
 }
 
 /** The pattern matching this bot's user mention, in either of Discord's forms. */

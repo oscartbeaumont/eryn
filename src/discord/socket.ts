@@ -431,32 +431,15 @@ class DiscordShard {
 			return;
 		}
 
+		this.handlePayload(payload);
+	}
+
+	/** Apply one decoded frame, which is mostly an opcode switch. */
+	private handlePayload(payload: GatewayPayload): void {
 		switch (payload.op) {
-			case 10: {
-				const interval = numberField(payload.d, "heartbeat_interval");
-
-				if (interval !== undefined && interval > 0) this.intervalMs = Math.max(5_000, interval);
-
-				if (this.session) {
-					this.send(jsonBody({ op: 6, d: { token: this.token, session_id: this.session, seq: this.sequence ?? 0 } }));
-				} else {
-					this.send(
-						jsonBody({
-							op: 2,
-							d: {
-								token: this.token,
-								intents: INTENTS,
-								shard: [this.shard.index, this.shard.count],
-								properties: { os: "cloudflare-workers", browser: "eryn", device: "eryn" },
-							},
-						}),
-					);
-				}
-
-				this.startHeartbeat();
+			case 10:
+				this.handleHello(payload);
 				break;
-			}
-
 			case 11:
 				this.awaitingAck = 0;
 				break;
@@ -466,39 +449,67 @@ class DiscordShard {
 			case 7:
 				this.reconnect("gateway requested reconnect");
 				break;
-			case 9: {
-				const resumable = payload.d === true;
-
-				if (!resumable) {
-					this.session = undefined;
-					this.sequence = null;
-				}
-
-				this.reconnect(resumable ? "invalid session, resuming" : "invalid session, re-identifying");
+			case 9:
+				this.handleInvalidSession(payload.d === true);
 				break;
-			}
-
-			case 0: {
-				if (payload.s !== null && payload.s !== undefined) this.sequence = payload.s;
-
-				if (payload.t === "READY") {
-					const session = stringField(payload.d, "session_id");
-
-					if (session !== undefined) this.session = session;
-					this.attempt = 0;
-					this.log(this.say("gateway connected"));
-				} else if (payload.t === "RESUMED") {
-					this.attempt = 0;
-					this.log(this.say("gateway resumed"));
-				} else if (payload.t) {
-					DISCORD_EVENTS[payload.t]?.(payload.d, this.handlers);
-				}
-
+			case 0:
+				this.handleDispatch(payload);
 				break;
-			}
-
 			default:
 				break;
+		}
+	}
+
+	/** Opcode 10: the heartbeat interval, then identify or resume. */
+	private handleHello(payload: GatewayPayload): void {
+		const interval = numberField(payload.d, "heartbeat_interval");
+
+		if (interval !== undefined && interval > 0) this.intervalMs = Math.max(5_000, interval);
+
+		if (this.session) {
+			this.send(jsonBody({ op: 6, d: { token: this.token, session_id: this.session, seq: this.sequence ?? 0 } }));
+		} else {
+			this.send(
+				jsonBody({
+					op: 2,
+					d: {
+						token: this.token,
+						intents: INTENTS,
+						shard: [this.shard.index, this.shard.count],
+						properties: { os: "cloudflare-workers", browser: "eryn", device: "eryn" },
+					},
+				}),
+			);
+		}
+
+		this.startHeartbeat();
+	}
+
+	/** Opcode 9: a session that cannot resume starts over, one that can resumes. */
+	private handleInvalidSession(resumable: boolean): void {
+		if (!resumable) {
+			this.session = undefined;
+			this.sequence = null;
+		}
+
+		this.reconnect(resumable ? "invalid session, resuming" : "invalid session, re-identifying");
+	}
+
+	/** Opcode 0: a sequenced event, dispatched by its name. */
+	private handleDispatch(payload: GatewayPayload): void {
+		if (payload.s !== null && payload.s !== undefined) this.sequence = payload.s;
+
+		if (payload.t === "READY") {
+			const session = stringField(payload.d, "session_id");
+
+			if (session !== undefined) this.session = session;
+			this.attempt = 0;
+			this.log(this.say("gateway connected"));
+		} else if (payload.t === "RESUMED") {
+			this.attempt = 0;
+			this.log(this.say("gateway resumed"));
+		} else if (payload.t) {
+			DISCORD_EVENTS[payload.t]?.(payload.d, this.handlers);
 		}
 	}
 

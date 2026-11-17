@@ -29,13 +29,15 @@ function account(
 ): RenderUser | undefined {
 	if (!user) return undefined;
 	const username = user.username?.trim();
+	const rendered: RenderUser = { name: user.global_name?.trim() || username || user.id || "unknown" };
 
-	return {
-		name: user.global_name?.trim() || username || user.id || "unknown",
-		...(username ? { username } : {}),
-		...(user.id ? { id: user.id } : {}),
-		...(user.bot ? { bot: true } : {}),
-	};
+	if (username) rendered.username = username;
+
+	if (user.id) rendered.id = user.id;
+
+	if (user.bot) rendered.bot = true;
+
+	return rendered;
 }
 
 /** A self-closing account reference. */

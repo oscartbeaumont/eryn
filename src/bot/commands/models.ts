@@ -10,6 +10,7 @@ import {
 	type DiscordSelectOption,
 	type DiscordModal,
 } from "../../discord/components";
+import { type Mutable } from "../../mutable.ts";
 import type { ModelOption } from "../../session/models";
 import { describeError } from "../../errors";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
@@ -39,16 +40,21 @@ const SEARCH_MODAL_ID = "setup:model:search:modal";
 
 /** The model select's entries, in catalogue order, with the current one preselected. */
 function modelOptions(models: readonly ModelOption[], current: string | undefined): DiscordSelectOption[] {
-	return models.slice(0, MAX_SELECT_OPTIONS).map((model) => ({
-		label: model.name.slice(0, 100),
-		value: model.id,
-		// Status is only interesting when the model is not plain "available".
-		description: [model.provider, ["alpha", "beta"].includes(model.status) ? model.status : undefined]
-			.filter(Boolean)
-			.join(" · ")
-			.slice(0, 100),
-		...(model.id === current ? { default: true } : {}),
-	}));
+	return models.slice(0, MAX_SELECT_OPTIONS).map((model): DiscordSelectOption => {
+		const option: Mutable<DiscordSelectOption> = {
+			label: model.name.slice(0, 100),
+			value: model.id,
+			// Status is only interesting when the model is not plain "available".
+			description: [model.provider, ["alpha", "beta"].includes(model.status) ? model.status : undefined]
+				.filter(Boolean)
+				.join(" · ")
+				.slice(0, 100),
+		};
+
+		if (model.id === current) option.default = true;
+
+		return option;
+	});
 }
 
 function modelModal(request: InteractionRequest): DiscordModal {
@@ -124,15 +130,18 @@ export async function modelScreen(request: InteractionRequest): Promise<void> {
 
 	const status = await request.session.config().catch(() => undefined);
 	const current = status?.model;
+	const lines = ["**Model**"];
+
+	if (current) lines.push(`Current: \`${current}\``);
+
+	lines.push("Pick the model Eryn should run here.");
+
+	if (models.length > MAX_SELECT_OPTIONS) {
+		lines.push(`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search models** for the rest.`);
+	}
+
 	await answer.reply(
-		[
-			"**Model**",
-			...(current ? [`Current: \`${current}\``] : []),
-			"Pick the model Eryn should run here.",
-			...(models.length > MAX_SELECT_OPTIONS
-				? [`Showing the first ${MAX_SELECT_OPTIONS} here; use **Search models** for the rest.`]
-				: []),
-		].join("\n"),
+		lines.join("\n"),
 		[
 			selectRow({
 				type: 3,

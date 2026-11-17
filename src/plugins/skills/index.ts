@@ -9,7 +9,20 @@
 
 import { Plugin, Skill } from "@opencode/plugin";
 
+import { type Mutable } from "../../mutable.ts";
 import type { WorkspaceSkill } from "../../session/workspace-config";
+
+/** Point a session's later file reads at the skill it just activated. */
+function activateSkill(
+	activeSkills: Map<string, string>,
+	directories: ReadonlyMap<string, string>,
+	skillId: string,
+	sessionID: string,
+): void {
+	const directory = directories.get(skillId);
+
+	if (directory) activeSkills.set(sessionID, directory);
+}
 
 export function workspaceSkillsPlugin(
 	skills: readonly WorkspaceSkill[],
@@ -21,24 +34,27 @@ export function workspaceSkillsPlugin(
 		id: "eryn.skills",
 		async setup(ctx) {
 			await ctx.skill.transform((editor) => {
-				for (const skill of skills) {
+				skills.forEach((skill) => {
 					const directory = skill.path.slice(0, skill.path.lastIndexOf("/"));
-					editor.add(
-						Skill.Info.make({
-							id: Skill.ID.make(skill.id),
-							name: Skill.Name.make(skill.name),
-							...(skill.description ? { description: skill.description } : {}),
-							...(skill.autoinvoke === undefined ? {} : { autoinvoke: skill.autoinvoke }),
-							// SAFETY: the workspace stores this skill's absolute path; the
-							// `AbsolutePath` brand is only a compile-time marker for it.
-							path: skill.path as Skill.Info["path"],
-							content: [
-								skill.content,
-								`Supporting files, if any, live under \`${directory}\`. The \`read\` tool resolves relative paths in this skill against that directory.`,
-							].join("\n\n"),
-						}),
-					);
-				}
+
+					const info: Mutable<Skill.Info> = {
+						id: Skill.ID.make(skill.id),
+						name: Skill.Name.make(skill.name),
+						// SAFETY: the workspace stores this skill's absolute path; the
+						// `AbsolutePath` brand is only a compile-time marker for it.
+						path: skill.path as Skill.Info["path"],
+						content: [
+							skill.content,
+							`Supporting files, if any, live under \`${directory}\`. The \`read\` tool resolves relative paths in this skill against that directory.`,
+						].join("\n\n"),
+					};
+
+					if (skill.description) info.description = skill.description;
+
+					if (skill.autoinvoke !== undefined) info.autoinvoke = skill.autoinvoke;
+
+					editor.add(Skill.Info.make(info));
+				});
 			});
 
 			if (!activeSkills) return;
@@ -50,9 +66,7 @@ export function workspaceSkillsPlugin(
 						types: ["session.skill.activated"],
 						signal: controller.signal,
 					})) {
-						const directory = directories.get(String(event.data.id));
-
-						if (directory) activeSkills.set(String(event.data.sessionID), directory);
+						activateSkill(activeSkills, directories, String(event.data.id), String(event.data.sessionID));
 					}
 				} catch {
 					// The host closed or replaced the subscription.

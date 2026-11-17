@@ -17,7 +17,7 @@
 import type { Schema } from "effect";
 
 import type { Analytics } from "../analytics";
-import { actionButton, buttonRow } from "../discord/components";
+import { actionButton, buttonRow, type DiscordComponent } from "../discord/components";
 import { DiscordError, type DiscordAuditEntry, type DiscordRest } from "../discord/api";
 import { log } from "../config";
 import { isJsonObject, numberField, stringField } from "../json.ts";
@@ -78,17 +78,62 @@ export interface InstallAnnouncement {
 }
 
 /**
+ * Post the greeting in the first writable channel, recording it so setup can
+ * find it again, or log why no channel could take it.
+ */
+async function postGreeting(
+	input: InstallAnnouncementInput,
+	installer: string,
+	body: string,
+	components: readonly DiscordComponent[],
+): Promise<void> {
+	const { rest, storage, guild } = input;
+
+	// The system channel is the guild's own welcome channel, so prefer it. A
+	// guild can have none (or the bot cannot post there), so fall back to the
+	// first text channel and let Discord's permissions decide.
+	const channels = await rest.guildChannels(guild.id).catch(() => []);
+	const writable = channels.filter((channel) => WRITABLE_TYPES.has(channel.type)).map((channel) => channel.id);
+	const targets = new Set<string>(guild.system_channel_id ? [guild.system_channel_id, ...writable] : writable);
+
+	// A guild where the bot can post nowhere should fail fast rather than try
+	// every channel it can see.
+	for (const channelId of [...targets].slice(0, 5)) {
+		try {
+			const message = await rest.sendMessage(channelId, body, { components, users: [installer] });
+			await storage.put(marker(guild.id), {
+				channelId,
+				messageId: message.id,
+				sentAt: Date.now(),
+			} satisfies InstallGreeting);
+			log("gateway", `welcomed ${installer} about guild ${guild.id} in ${channelId}`);
+
+			return;
+		} catch (error) {
+			log("gateway", `could not post the install message in ${channelId}: ${String(error)}`);
+		}
+	}
+
+	log("gateway", `could not post the install message for guild ${guild.id}: no writable channel`);
+}
+
+/** Everything announcing a fresh install needs. */
+export interface InstallAnnouncementInput {
+	readonly rest: DiscordRest;
+	readonly storage: DurableObjectStorage;
+	readonly guild: InstallAnnouncement;
+	readonly botUserId: string | undefined;
+	readonly analytics: Analytics;
+}
+
+/**
  * Announce a fresh install, once. Returns without doing anything when the guild
  * is not newly installed, when the audit log cannot be read, or when the
  * announcement has already been sent.
  */
-export async function maybeAnnounceInstall(
-	rest: DiscordRest,
-	storage: DurableObjectStorage,
-	guild: InstallAnnouncement,
-	botUserId: string | undefined,
-	analytics: Analytics,
-): Promise<void> {
+export async function maybeAnnounceInstall(input: InstallAnnouncementInput): Promise<void> {
+	const { rest, storage, guild, botUserId, analytics } = input;
+
 	if (guild.unavailable) return;
 
 	if (await storage.get(marker(guild.id))) return;
@@ -134,35 +179,7 @@ export async function maybeAnnounceInstall(
 
 	const components = [buttonRow([actionButton("Start setup", SETUP_MENU_ID, 1)])];
 
-	// The system channel is the guild's own welcome channel, so prefer it. A
-	// guild can have none (or the bot cannot post there), so fall back to the
-	// first text channel and let Discord's permissions decide.
-	const channels = await rest.guildChannels(guild.id).catch(() => []);
-
-	const targets = new Set<string>([
-		...(guild.system_channel_id ? [guild.system_channel_id] : []),
-		...channels.filter((channel) => WRITABLE_TYPES.has(channel.type)).map((channel) => channel.id),
-	]);
-
-	// A guild where the bot can post nowhere should fail fast rather than try
-	// every channel it can see.
-	for (const channelId of [...targets].slice(0, 5)) {
-		try {
-			const message = await rest.sendMessage(channelId, body, { components, users: [installer] });
-			await storage.put(marker(guild.id), {
-				channelId,
-				messageId: message.id,
-				sentAt: Date.now(),
-			} satisfies InstallGreeting);
-			log("gateway", `welcomed ${installer} about guild ${guild.id} in ${channelId}`);
-
-			return;
-		} catch (error) {
-			log("gateway", `could not post the install message in ${channelId}: ${String(error)}`);
-		}
-	}
-
-	log("gateway", `could not post the install message for guild ${guild.id}: no writable channel`);
+	await postGreeting(input, installer, body, components);
 }
 
 /**

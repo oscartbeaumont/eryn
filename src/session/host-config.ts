@@ -29,7 +29,7 @@ import { fileStore } from "../plugins/workspace/store";
 import { createHost, type HostInterface } from "./host";
 import type { DiscordContext, McpLink, ProviderConnection } from "./models";
 import { seedWorkspace } from "./seed";
-import { readWorkspaceConfig } from "./workspace-config";
+import { readWorkspaceConfig, type WorkspaceConfig } from "./workspace-config";
 
 /** Everything the host needs to be built, and to decide whether to rebuild. */
 export interface HostConfig {
@@ -82,14 +82,19 @@ async function postToGateway(env: Env, path: string, body: Schema.Json): Promise
 	if (!response.ok) throw new Error(`the bot gateway returned HTTP ${response.status}`);
 }
 
+/** One change to the bot gateway's subscription markers. */
+interface SubscriptionChange {
+	readonly env: Env;
+	readonly guildId: string;
+	readonly kind: "thread" | "channel";
+	readonly id: string;
+	readonly subscribed: boolean;
+}
+
 /** Add or remove the bot gateway's marker for a subscribed conversation. */
-async function setSubscription(
-	env: Env,
-	guildId: string,
-	kind: "thread" | "channel",
-	id: string,
-	subscribed: boolean,
-): Promise<void> {
+async function setSubscription(change: SubscriptionChange): Promise<void> {
+	const { env, guildId, kind, id, subscribed } = change;
+
 	await postToGateway(env, "/subscription", { guildId, kind, id, subscribed });
 }
 
@@ -125,82 +130,56 @@ export function linkSignature(links: readonly McpLink[]): string {
 		.join("|");
 }
 
-/** Build a host for this config; the returned promise rejects if it cannot start. */
-export async function buildHost(config: HostConfig, options: HostBuildOptions): Promise<HostInterface> {
-	const { env, storage, rest, guildId, directory, onMessageSent, onScheduleCreated } = options;
-	const location = { directory };
+/** What the plugin set needs beyond the host options. */
+interface PluginBuild {
+	readonly workspace: WorkspaceConfig;
+	readonly links: readonly McpLink[];
+	readonly activeSkills: Map<string, string>;
+	readonly hostname: string;
+}
 
-	// The guild filesystem is the source of truth for config, skills, commands,
-	// and instructions. Seed it before reading so a fresh guild starts from the
-	// documented defaults.
-	await seedWorkspace(storage);
-	const workspace = await readWorkspaceConfig(storage);
-
-	// The host asks this deployment for the catalogue over HTTP, so it needs the
-	// origin the Worker is served from. The same origin is the "hostname" the
-	// agent puts in its attribution footer.
-	const origin = await resolveOrigin(options.env);
-
-	if (!origin) {
-		throw new Error(
-			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
-		);
-	}
-
-	const hostname = new URL(origin).hostname;
-
-	// Every plugin is the promise API, which is what this host accepts.
-	const activeSkills = new Map<string, string>();
+/** The plugin set one guild's host runs with. */
+function hostPlugins(options: HostBuildOptions, build: PluginBuild) {
+	const { env, storage, rest, guildId, onMessageSent, onScheduleCreated } = options;
+	const { workspace, links, activeSkills, hostname } = build;
 
 	const plugins = [
 		workspacePlugin(storage, activeSkills),
 		commandShellPlugin(storage),
 		agentInstructionsPlugin(() => workspace.instructions),
 		sessionPlugin(hostname),
-		discordPlugin(
+		discordPlugin({
 			rest,
 			guildId,
-			fileStore(storage),
-			(kind, id, subscribed) => setSubscription(env, guildId, kind, id, subscribed),
-			(watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
+			store: fileStore(storage),
+			setSubscription: (kind, id, subscribed) => setSubscription({ env, guildId, kind, id, subscribed }),
+			setMessageSubscription: (watch, subscribed) => setMessageSubscription(env, guildId, watch, subscribed),
 			onMessageSent,
 			onScheduleCreated,
-		),
+		}),
 	];
 
 	const skills = workspaceSkillsPlugin(workspace.skills, activeSkills);
 
 	if (skills) plugins.push(skills);
-	const mcp = guildMcpPlugin(config.links);
+
+	const mcp = guildMcpPlugin(links);
 
 	if (mcp) plugins.push(mcp);
-	const guidance = mcpGuidancePlugin(config.links.map((link) => link.name));
+
+	const guidance = mcpGuidancePlugin(links.map((link) => link.name));
 
 	if (guidance) plugins.push(guidance);
 
-	const catalogueProviders = new Set(config.connections.map((connection) => connection.integrationID));
+	return plugins;
+}
 
-	for (const [integrationID, providerIDs] of Object.entries(INTEGRATION_PROVIDERS)) {
-		if (!catalogueProviders.has(integrationID)) continue;
-
-		for (const providerID of providerIDs) catalogueProviders.add(providerID);
-	}
-
-	const host = await createHost({
-		storage,
-		// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
-		// exceeds a Durable Object's memory. Ask this deployment's own
-		// endpoint for the same catalogue with only the connected providers
-		// keeping their models; the provider list itself stays complete.
-		models: {
-			snapshot: false,
-			fetch: true,
-			url: `${origin}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
-		},
-		config: workspace.config,
-		plugins,
-	});
-
+/** Replay each stored key as an integration credential, reusing one per key. */
+async function connectCredentials(
+	host: HostInterface,
+	connections: readonly ProviderConnection[],
+	location: { readonly directory: string },
+): Promise<void> {
 	// Every provider is connected the same way: the integration the guild
 	// chose and the key it gave us. The credential is supplied as an
 	// integration credential, not as `providers.<id>.settings.apiKey`,
@@ -213,7 +192,7 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 	// the duplicates earlier builds left behind.
 	const credentials = await host.credential.list().catch(() => []);
 
-	for (const connection of config.connections) {
+	for (const connection of connections) {
 		if (!connection.key) continue;
 		const owned = credentials.filter((entry) => entry.integrationID === connection.integrationID);
 		const existing = owned.find((entry) => entry.value.type === "key" && entry.value.key === connection.key);
@@ -240,6 +219,75 @@ export async function buildHost(config: HostConfig, options: HostBuildOptions): 
 			log("session", `could not connect ${connection.integrationID}: ${describeError(error)}`);
 		}
 	}
+}
+
+/** The catalogue provider ids a connection set needs, including aliases. */
+function catalogueProviderIds(connections: readonly ProviderConnection[]): Set<string> {
+	const connected = new Set(connections.map((connection) => connection.integrationID));
+
+	const aliases = Object.entries(INTEGRATION_PROVIDERS).flatMap(([integrationID, providerIDs]) =>
+		connected.has(integrationID) ? [...providerIDs] : [],
+	);
+
+	return new Set([...connected, ...aliases]);
+}
+
+/** The deployment's public origin, which the host asks for its catalogue. */
+async function requireOrigin(env: Env): Promise<string> {
+	// The host asks this deployment for the catalogue over HTTP, so it needs the
+	// origin the Worker is served from. The same origin is the "hostname" the
+	// agent puts in its attribution footer.
+	const origin = await resolveOrigin(env);
+
+	if (!origin) {
+		throw new Error(
+			"This deployment does not know its public URL yet. Open its site once, then send the message again.",
+		);
+	}
+
+	return origin;
+}
+
+/** Build a host for this config; the returned promise rejects if it cannot start. */
+export async function buildHost(config: HostConfig, options: HostBuildOptions): Promise<HostInterface> {
+	const { storage, directory } = options;
+	const location = { directory };
+
+	// The guild filesystem is the source of truth for config, skills, commands,
+	// and instructions. Seed it before reading so a fresh guild starts from the
+	// documented defaults.
+	await seedWorkspace(storage);
+	const workspace = await readWorkspaceConfig(storage);
+	const origin = await requireOrigin(options.env);
+
+	// Every plugin is the promise API, which is what this host accepts.
+	const activeSkills = new Map<string, string>();
+
+	const plugins = hostPlugins(options, {
+		workspace,
+		links: config.links,
+		activeSkills,
+		hostname: new URL(origin).hostname,
+	});
+
+	const catalogueProviders = catalogueProviderIds(config.connections);
+
+	const host = await createHost({
+		storage,
+		// The bundled catalogue is 7.8 MB of JSON, and decoding all of it
+		// exceeds a Durable Object's memory. Ask this deployment's own
+		// endpoint for the same catalogue with only the connected providers
+		// keeping their models; the provider list itself stays complete.
+		models: {
+			snapshot: false,
+			fetch: true,
+			url: `${origin}${CATALOGUE_PATH}/${[...catalogueProviders].join(",")}`,
+		},
+		config: workspace.config,
+		plugins,
+	});
+
+	await connectCredentials(host, config.connections, location);
 
 	return host;
 }

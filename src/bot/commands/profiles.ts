@@ -149,16 +149,22 @@ async function setDefault(request: InteractionRequest, id: string): Promise<void
 			placeholder: "Default profile for this server",
 			options: profileOptions(state),
 		}),
-		buttonRow([
-			actionButton("New profile", NEW_ID, 1),
-			...(customProfiles(state).length ? [actionButton("Edit custom", MANAGE_ID, 2)] : []),
-			actionButton("Back", SETUP_MENU_ID, 2),
-			actionButton("Close", SETUP_CLOSE_ID, 2),
-		]),
+		buttonRow(profileButtons(state)),
 	]);
 }
 
-async function manage(request: InteractionRequest): Promise<void> {
+/** The screen's buttons, with the edit entry only when a custom profile exists. */
+function profileButtons(state: ProfilesState): DiscordButton[] {
+	const buttons = [actionButton("New profile", NEW_ID, 1)];
+
+	if (customProfiles(state).length) buttons.push(actionButton("Edit custom", MANAGE_ID, 2));
+
+	buttons.push(actionButton("Back", SETUP_MENU_ID, 2), actionButton("Close", SETUP_CLOSE_ID, 2));
+
+	return buttons;
+}
+
+async function manageProfiles(request: InteractionRequest): Promise<void> {
 	const answer = responder(request);
 	await answer.defer();
 	const state = await request.session.profiles();
@@ -471,41 +477,63 @@ export async function profileComponent(
 	customId: string,
 	values: readonly string[],
 ): Promise<boolean> {
+	const menu = await profileMenuAction(request, customId);
+
+	if (menu !== undefined) return menu;
+
+	const selected = await profileSelectAction(request, customId, values);
+
+	if (selected !== undefined) return selected;
+
+	return (await profileIdAction(request, customId)) ?? false;
+}
+
+/** The buttons that always mean the same screen, whatever the menu shows. */
+async function profileMenuAction(request: InteractionRequest, customId: string): Promise<boolean | undefined> {
 	if (customId === PROFILES_SCREEN_ID) return await claim(request, "update", () => profileScreen(request));
 
-	if (customId === MANAGE_ID) return await claim(request, "update", () => manage(request));
+	if (customId === MANAGE_ID) return await claim(request, "update", () => manageProfiles(request));
 
 	if (customId === NEW_ID) {
 		return await claim(request, "reply", () => responder(request).modal(newProfileModal(request)));
 	}
 
-	if (customId === DEFAULT_SELECT_ID) {
-		const id = values[0];
+	return undefined;
+}
 
-		if (id) return await claim(request, "update", () => setDefault(request, id));
+/** The selects, whose meaning depends on which values the admin chose. */
+async function profileSelectAction(
+	request: InteractionRequest,
+	customId: string,
+	values: readonly string[],
+): Promise<boolean | undefined> {
+	const value = values[0];
+
+	if (!value) return undefined;
+
+	if (customId === DEFAULT_SELECT_ID) {
+		return await claim(request, "update", () => setDefault(request, value));
 	}
 
 	if (customId === MANAGE_SELECT_ID) {
-		const id = values[0];
-
-		if (id) return await claim(request, "update", () => detail(request, id));
+		return await claim(request, "update", () => detail(request, value));
 	}
 
 	if (customId === GROUP_SELECT_ID) {
-		const value = values[0];
+		const separator = value.lastIndexOf(":");
 
-		if (value) {
-			const separator = value.lastIndexOf(":");
+		if (separator <= 0) return undefined;
+		const id = value.slice(0, separator);
+		const key = value.slice(separator + 1);
 
-			if (separator > 0) {
-				const id = value.slice(0, separator);
-				const key = value.slice(separator + 1);
-
-				return await claim(request, "update", () => groupScreen(request, id, key));
-			}
-		}
+		return await claim(request, "update", () => groupScreen(request, id, key));
 	}
 
+	return undefined;
+}
+
+/** The buttons and selects whose id carries the profile (and sometimes field) they name. */
+async function profileIdAction(request: InteractionRequest, customId: string): Promise<boolean | undefined> {
 	if (customId.startsWith(DELETE_CONFIRM_PREFIX)) {
 		const id = customId.slice(DELETE_CONFIRM_PREFIX.length);
 
@@ -548,7 +576,7 @@ export async function profileComponent(
 		}
 	}
 
-	return false;
+	return undefined;
 }
 
 /** Modal submissions: a new profile, or a rename. */

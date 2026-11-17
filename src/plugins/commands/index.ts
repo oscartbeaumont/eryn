@@ -15,6 +15,20 @@ import { WORKSPACE_ROOT } from "../../session/locations.ts";
 import { runShell } from "../workspace/shell.ts";
 import { fileStore, type FileStore } from "../workspace/store.ts";
 
+/**
+ * Run each block in order, because a later block may read what an earlier one
+ * wrote, and collect what each one printed.
+ */
+async function runBlocksInOrder(store: FileStore, blocks: readonly string[]): Promise<string[]> {
+	if (blocks.length === 0) return [];
+
+	const [block, ...rest] = blocks;
+	const result = await runShell(store, block, WORKSPACE_ROOT, WORKSPACE_ROOT);
+	const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
+
+	return [output, ...(await runBlocksInOrder(store, rest))];
+}
+
 /** Replace every protected block with its just-bash output. */
 export async function expandShellBlocks(store: FileStore, text: string): Promise<string> {
 	const pattern = shellBlockPattern();
@@ -22,12 +36,10 @@ export async function expandShellBlocks(store: FileStore, text: string): Promise
 
 	if (matches.length === 0) return text;
 
-	const outputs: string[] = [];
-
-	for (const match of matches) {
-		const result = await runShell(store, match[1] ?? "", WORKSPACE_ROOT, WORKSPACE_ROOT);
-		outputs.push([result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd());
-	}
+	const outputs = await runBlocksInOrder(
+		store,
+		matches.map((match) => match[1] ?? ""),
+	);
 
 	let index = 0;
 

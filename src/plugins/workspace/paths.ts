@@ -5,14 +5,15 @@ import type { FileStore } from "./store.ts";
 /** Collapse `.`/`..` segments and return an absolute path. */
 export function resolvePath(cwd: string, input: string): string {
 	const base = input.startsWith("/") ? input : `${cwd}/${input}`;
-	const parts: string[] = [];
 
-	for (const segment of base.split("/")) {
-		if (segment === "" || segment === ".") continue;
+	const parts = base.split("/").reduce<string[]>((kept, segment) => {
+		if (segment === "" || segment === ".") return kept;
 
-		if (segment === "..") parts.pop();
-		else parts.push(segment);
-	}
+		if (segment === "..") kept.pop();
+		else kept.push(segment);
+
+		return kept;
+	}, []);
 
 	return `/${parts.join("/")}`;
 }
@@ -23,13 +24,17 @@ export function resolvePath(cwd: string, input: string): string {
  * When a relative path exists under the active skill, it wins; otherwise the
  * path resolves against the workspace as usual. Absolute paths are untouched.
  */
-export async function resolveToolPath(
-	store: FileStore,
-	root: string,
-	skillDirectory: string | undefined,
-	input: string,
-	kind: "file" | "dir" = "file",
-): Promise<string> {
+export interface ResolveToolPathInput {
+	readonly store: FileStore;
+	readonly root: string;
+	readonly skillDirectory?: string;
+	readonly input: string;
+	readonly kind?: "file" | "dir";
+}
+
+export async function resolveToolPath(request: ResolveToolPathInput): Promise<string> {
+	const { store, root, skillDirectory, input, kind = "file" } = request;
+
 	if (!input.startsWith("/") && skillDirectory) {
 		const candidate = resolvePath(skillDirectory, input);
 

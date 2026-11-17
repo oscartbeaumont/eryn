@@ -15,11 +15,11 @@ import {
 	SdkHttpError,
 	StreamableHTTPClientTransport,
 	type AuthProvider,
-	type FetchLike,
 } from "@modelcontextprotocol/client";
 
 import { describeError } from "../errors";
 import { externalFetch, isSecureUrl } from "../http";
+import { type Mutable } from "../mutable.ts";
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -86,28 +86,21 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 		},
 	};
 
-	const fetchFn: FetchLike = externalFetch(timeoutMs);
-
-	const transport = new StreamableHTTPClientTransport(endpoint, {
-		authProvider,
-		fetch: fetchFn,
-		// This module owns redirects, so the transport must not wrap the fetch
-		// with a second, same-origin-only policy.
-		redirectPolicy: "follow",
-	});
-
-	const client = new Client({ name: "eryn", version: "1.0.0" }, { listMaxPages: MAX_TOOL_PAGES });
+	const { client, transport } = probeClient(endpoint, timeoutMs, authProvider);
 
 	try {
 		await client.connect(transport);
 		const listing = await client.listTools();
 		const serverName = client.getServerVersion()?.name;
 
-		return {
+		const result: Mutable<McpProbeResponse> & { ok: true } = {
 			ok: true,
 			tools: listing.tools.map(toolSummary),
-			...(serverName ? { serverName } : {}),
 		};
+
+		if (serverName) result.serverName = serverName;
+
+		return result;
 	} catch (error) {
 		if (challenge) return challenge;
 
@@ -123,6 +116,21 @@ export async function probeServer(options: ProbeOptions): Promise<ProbeResult> {
 	}
 }
 
+/** A client for one probe, plus the transport that owns its session. */
+function probeClient(endpoint: URL, timeoutMs: number, authProvider: AuthProvider) {
+	const transport = new StreamableHTTPClientTransport(endpoint, {
+		authProvider,
+		// This module owns redirects, so the transport must not wrap the fetch
+		// with a second, same-origin-only policy.
+		fetch: externalFetch(timeoutMs),
+		redirectPolicy: "follow",
+	});
+
+	const client = new Client({ name: "eryn", version: "1.0.0" }, { listMaxPages: MAX_TOOL_PAGES });
+
+	return { client, transport };
+}
+
 function challengeFailure(response: Response, hasToken: boolean): ProbeFailure {
 	const header = response.headers.get("www-authenticate");
 	const params = extractWWWAuthenticateParams(response);
@@ -130,28 +138,39 @@ function challengeFailure(response: Response, hasToken: boolean): ProbeFailure {
 	// token, so the others are reported as a plain refusal.
 	const bearer = !header || /\bbearer\b/i.test(header);
 
-	return {
+	const failure: Mutable<ProbeFailure> = {
 		ok: false,
 		tools: [],
-		...(bearer ? { needsAuth: true } : {}),
-		...(params.resourceMetadataUrl ? { resourceMetadataUrl: params.resourceMetadataUrl.toString() } : {}),
-		...(params.scope ? { scope: params.scope } : {}),
 		status: response.status,
 		error:
 			params.errorDescription ??
 			params.error ??
 			(hasToken ? "This server rejected the token." : "This server needs authorisation before it will talk."),
 	};
+
+	if (bearer) failure.needsAuth = true;
+
+	if (params.resourceMetadataUrl) failure.resourceMetadataUrl = params.resourceMetadataUrl.toString();
+
+	if (params.scope) failure.scope = params.scope;
+
+	return failure;
 }
 
 function toolSummary(tool: { name: string; title?: string; description?: string }): McpToolSummary {
-	return {
-		name: tool.name,
-		...(tool.title ? { title: tool.title } : {}),
-		...(tool.description ? { description: tool.description } : {}),
-	};
+	const summary: Mutable<McpToolSummary> = { name: tool.name };
+
+	if (tool.title) summary.title = tool.title;
+
+	if (tool.description) summary.description = tool.description;
+
+	return summary;
 }
 
 function failed(error: string, status?: number): ProbeFailure {
-	return { ok: false, tools: [], error, ...(status === undefined ? {} : { status }) };
+	const failure: Mutable<ProbeFailure> = { ok: false, tools: [], error };
+
+	if (status !== undefined) failure.status = status;
+
+	return failure;
 }

@@ -12,6 +12,7 @@ import { Option, Schema } from "effect";
 
 import { configuredOrigin, INTERACTIONS_PATH, log } from "../config";
 import { stringField } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 import { CLIENT_ID } from "../public";
 
 const API = "https://discord.com/api/v10";
@@ -25,9 +26,15 @@ export interface Application {
 	endpoint?: string;
 }
 
-let cachedToken: string | undefined;
+interface ApplicationCache {
+	/** The token the cached read belongs to. */
+	token?: string;
+	/** The in-flight or settled read for that token. */
+	pending?: Promise<Application | undefined>;
+}
 
-let cached: Promise<Application | undefined> | undefined;
+/** One owner for the read, so a token change is the only thing that refreshes it. */
+const applicationCache: ApplicationCache = {};
 
 /** The application the bot token belongs to, or undefined when Discord will not say. */
 export function application(env: Env): Promise<Application | undefined> {
@@ -35,12 +42,12 @@ export function application(env: Env): Promise<Application | undefined> {
 
 	if (!token) return Promise.resolve(undefined);
 
-	if (!cached || cachedToken !== token) {
-		cachedToken = token;
-		cached = fetchApplication(token);
+	if (!applicationCache.pending || applicationCache.token !== token) {
+		applicationCache.token = token;
+		applicationCache.pending = fetchApplication(token);
 	}
 
-	return cached;
+	return applicationCache.pending;
 }
 
 async function fetchApplication(token: string): Promise<Application | undefined> {
@@ -61,12 +68,13 @@ async function fetchApplication(token: string): Promise<Application | undefined>
 		if (id === undefined) return undefined;
 		const verifyKey = stringField(body, "verify_key");
 		const endpoint = stringField(body, "interactions_endpoint_url");
+		const result: Mutable<Application> = { id };
 
-		return {
-			id,
-			...(verifyKey === undefined ? {} : { verifyKey }),
-			...(endpoint === undefined ? {} : { endpoint }),
-		};
+		if (verifyKey !== undefined) result.verifyKey = verifyKey;
+
+		if (endpoint !== undefined) result.endpoint = endpoint;
+
+		return result;
 	} catch (error) {
 		log("application", `could not read this application: ${String(error)}`);
 

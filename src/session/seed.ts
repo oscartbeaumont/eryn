@@ -15,6 +15,7 @@ import { applyEdits, modify, parse } from "jsonc-parser";
 import { KEYS, log } from "../config.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "../plugins/workspace/bytes.ts";
 import { isJsonObject, isNumber } from "../json.ts";
+import { type Mutable } from "../mutable.ts";
 import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
 import {
 	DEFAULT_AGENTS,
@@ -143,11 +144,13 @@ export async function seedWorkspace(storage: WorkspaceStorage): Promise<void> {
 	const upgradedWebSearch = version > 0 && version < 4 ? await upgradeWebSearch(store) : false;
 	await storage.put(KEYS.workspaceSeed, SEED_VERSION);
 
-	const upgrades = [
-		...(upgradedVoice ? ["the default voice"] : []),
-		...(upgradedAttribution ? ["the attribution footer"] : []),
-		...(upgradedWebSearch ? ["the web search default"] : []),
-	];
+	const upgrades: string[] = [];
+
+	if (upgradedVoice) upgrades.push("the default voice");
+
+	if (upgradedAttribution) upgrades.push("the attribution footer");
+
+	if (upgradedWebSearch) upgrades.push("the web search default");
 
 	if (written > 0 || upgrades.length > 0) {
 		log(
@@ -169,11 +172,14 @@ export async function resetWorkspace(storage: WorkspaceStorage): Promise<number>
 	let startAfter: string | undefined;
 
 	for (;;) {
-		const entries = await storage.list<unknown>({
+		const listOptions: Mutable<NonNullable<Parameters<WorkspaceStorage["list"]>[0]>> = {
 			prefix: KEYS.fs,
 			limit: 1_000,
-			...(startAfter ? { startAfter } : {}),
-		});
+		};
+
+		if (startAfter) listOptions.startAfter = startAfter;
+
+		const entries = await storage.list<unknown>(listOptions);
 
 		const keys = [...entries.keys()];
 

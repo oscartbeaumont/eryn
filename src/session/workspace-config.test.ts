@@ -367,15 +367,33 @@ test("a skill's relative paths resolve before the workspace", async () => {
 	const store = fileStore(storage);
 
 	assert.equal(
-		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "references/policy.md", "file"),
+		await resolveToolPath({
+			store,
+			root: "/workspace",
+			skillDirectory: "/eryn/.opencode/skills/release",
+			input: "references/policy.md",
+			kind: "file",
+		}),
 		"/eryn/.opencode/skills/release/references/policy.md",
 	);
 	assert.equal(
-		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "missing.md", "file"),
+		await resolveToolPath({
+			store,
+			root: "/workspace",
+			skillDirectory: "/eryn/.opencode/skills/release",
+			input: "missing.md",
+			kind: "file",
+		}),
 		"/workspace/missing.md",
 	);
 	assert.equal(
-		await resolveToolPath(store, "/workspace", "/eryn/.opencode/skills/release", "references/policy.md", "dir"),
+		await resolveToolPath({
+			store,
+			root: "/workspace",
+			skillDirectory: "/eryn/.opencode/skills/release",
+			input: "references/policy.md",
+			kind: "dir",
+		}),
 		"/workspace/references/policy.md",
 	);
 });

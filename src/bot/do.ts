@@ -27,7 +27,15 @@ import { INTERACTIONS_PATH, log as botLog } from "../config";
 import { ORIGIN_HEADER, deployRestart } from "../deploy";
 import { describeError } from "../errors";
 import { isLoopback, json } from "../http";
-import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest, type DiscordChannelRef, type DiscordRest } from "../discord/api";
+import {
+	DEFAULT_THREAD_NAME,
+	DiscordError,
+	THREAD_TYPES,
+	discordRest,
+	type DiscordChannelRef,
+	type DiscordRest,
+	type DiscordUser,
+} from "../discord/api";
 import { applicationId, resolveOrigin } from "../discord/application";
 import { renderChannelRenamed, renderMessage, renderThreadCreated } from "../discord/render";
 import {
@@ -38,7 +46,8 @@ import {
 	type DiscordMessage,
 	type DiscordSocketHandlers,
 } from "../discord/socket";
-import { DiscordContextSchema, type DiscordContext } from "../session/models";
+import { type Mutable } from "../mutable.ts";
+import { DiscordContextSchema, type DiscordContext, type PromptRequest } from "../session/models";
 import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
 import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
@@ -162,6 +171,26 @@ interface RenameNotice {
 	readonly kind: "thread" | "channel";
 	readonly name: string;
 	readonly previousName?: string;
+}
+
+/** Everything that turns an answer click into a message the session can read. */
+interface AnswerMessageInput {
+	readonly interaction: DiscordInteraction;
+	readonly guildId: string;
+	readonly channelId: string;
+	readonly answer: string;
+	readonly user: DiscordUser | undefined;
+}
+
+/** One prompt to deliver to a guild's session object. */
+interface ForwardInput {
+	readonly guildId: string;
+	readonly threadId: string;
+	readonly title: string;
+	readonly text: string;
+	readonly message: DiscordMessage;
+	readonly discord: DiscordContext;
+	readonly notice?: string;
 }
 
 export class BotGateway extends DurableObject<Env> {
@@ -288,92 +317,107 @@ export class BotGateway extends DurableObject<Env> {
 
 		if (served && served !== this.servedOrigin) await this.rememberOrigin(served);
 
-		if (pathname === INTERACTION_PATH) {
-			await this.ensureCurrentVersion(request);
+		if (pathname === INTERACTION_PATH) return await this.handleInteraction(request);
 
-			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const body = await request.json().catch(() => undefined);
+		if (pathname === SUBSCRIPTION_PATH) return await this.handleSubscription(request);
 
-			if (!Schema.is(InteractionBodySchema)(body)) return badRequest();
-			// The Worker already answered Discord with a 202, so this handler still
-			// acknowledges through the interaction callback endpoint. The payload is
-			// passed on untouched; only the ids the bot needs are checked here.
-			// SAFETY: `InteractionBodySchema` checked the fields the bot reads; the
-			// rest of Discord's interaction document is passed through untouched.
-			await this.onInteraction(body as DiscordInteraction);
-			await this.ensureCommands();
+		if (pathname === MESSAGE_WATCH_PATH) return await this.handleMessageWatch(request);
 
-			return json({ ok: true });
-		}
-
-		if (pathname === SUBSCRIPTION_PATH) {
-			await this.ensureCurrentVersion(request);
-
-			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const body = await decodeBody(request, SubscriptionBodySchema);
-
-			if (!body) return badRequest();
-			const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
-
-			if (body.subscribed) await this.ctx.storage.put(key, true);
-			else await this.ctx.storage.delete(key);
-
-			return json({ ok: true });
-		}
-
-		if (pathname === MESSAGE_WATCH_PATH) {
-			await this.ensureCurrentVersion(request);
-
-			if (request.method !== "POST") return json({ error: "not found" }, 404);
-			const body = await decodeBody(request, MessageWatchBodySchema);
-
-			if (!body) return badRequest();
-			const key = WATCH_PREFIX + body.messageId;
-
-			if (!body.subscribed) {
-				await this.ctx.storage.delete(key);
-
-				return json({ ok: true });
-			}
-
-			const watch: MessageWatch = {
-				guildId: body.guildId,
-				channelId: body.channelId,
-				messageId: body.messageId,
-				...(body.notifyThreadId !== undefined ? { notifyThreadId: body.notifyThreadId } : {}),
-				...(body.notifyTitle !== undefined ? { notifyTitle: body.notifyTitle } : {}),
-				...(body.notifyDiscord !== undefined ? { notifyDiscord: body.notifyDiscord } : {}),
-			};
-
-			await this.ctx.storage.put(key, watch);
-
-			return json({ ok: true });
-		}
-
-		if (pathname === WAKE_PATH) {
-			// `keepAlive` also arms the alarm, so the first wake starts the cycle
-			// that reconnects the socket before Cloudflare's 15 minute cap.
-			await this.keepAlive();
-			// Arm the restart *after* keepAlive: the keepalive alarm is the long
-			// one, and setting it last would replace the one-second restart alarm.
-			await this.ensureCurrentVersion(request);
-			// A cold start has not registered the commands yet; a wake is the place
-			// to do it, because no interaction is waiting on the result.
-			await this.ensureCommands();
-			const deploy = await this.ctx.storage.get<string>("deploy:version");
-
-			return json({
-				ok: true,
-				connected: this.gateway?.open ?? false,
-				shards: this.gateway?.status ?? { total: 0, open: 0 },
-				deploy: deploy ?? null,
-				restart: this.restartPending,
-			});
-		}
+		if (pathname === WAKE_PATH) return await this.handleWake(request);
 
 		await this.ensureCurrentVersion(request);
 
 		return json({ error: "not found" }, 404);
+	}
+
+	/** An interaction the Worker forwarded; Discord is answered through the callback endpoint. */
+	private async handleInteraction(request: Request): Promise<Response> {
+		await this.ensureCurrentVersion(request);
+
+		if (request.method !== "POST") return json({ error: "not found" }, 404);
+		const body = await request.json().catch(() => undefined);
+
+		if (!Schema.is(InteractionBodySchema)(body)) return badRequest();
+		// The Worker already answered Discord with a 202, so this handler still
+		// acknowledges through the interaction callback endpoint. The payload is
+		// passed on untouched; only the ids the bot needs are checked here.
+		// SAFETY: `InteractionBodySchema` checked the fields the bot reads; the
+		// rest of Discord's interaction document is passed through untouched.
+		await this.onInteraction(body as DiscordInteraction);
+		await this.ensureCommands();
+
+		return json({ ok: true });
+	}
+
+	/** A stored subscription for a thread or a whole channel. */
+	private async handleSubscription(request: Request): Promise<Response> {
+		await this.ensureCurrentVersion(request);
+
+		if (request.method !== "POST") return json({ error: "not found" }, 404);
+		const body = await decodeBody(request, SubscriptionBodySchema);
+
+		if (!body) return badRequest();
+		const key = (body.kind === "thread" ? THREAD_PREFIX : CHANNEL_PREFIX) + body.id;
+
+		if (body.subscribed) await this.ctx.storage.put(key, true);
+		else await this.ctx.storage.delete(key);
+
+		return json({ ok: true });
+	}
+
+	/** A message to watch for a thread being created from it. */
+	private async handleMessageWatch(request: Request): Promise<Response> {
+		await this.ensureCurrentVersion(request);
+
+		if (request.method !== "POST") return json({ error: "not found" }, 404);
+		const body = await decodeBody(request, MessageWatchBodySchema);
+
+		if (!body) return badRequest();
+		const key = WATCH_PREFIX + body.messageId;
+
+		if (!body.subscribed) {
+			await this.ctx.storage.delete(key);
+
+			return json({ ok: true });
+		}
+
+		const watch: Mutable<MessageWatch> = {
+			guildId: body.guildId,
+			channelId: body.channelId,
+			messageId: body.messageId,
+		};
+
+		if (body.notifyThreadId !== undefined) watch.notifyThreadId = body.notifyThreadId;
+
+		if (body.notifyTitle !== undefined) watch.notifyTitle = body.notifyTitle;
+
+		if (body.notifyDiscord !== undefined) watch.notifyDiscord = body.notifyDiscord;
+
+		await this.ctx.storage.put(key, watch);
+
+		return json({ ok: true });
+	}
+
+	/** The scheduled poke: keep the socket alive and report this object's state. */
+	private async handleWake(request: Request): Promise<Response> {
+		// `keepAlive` also arms the alarm, so the first wake starts the cycle
+		// that reconnects the socket before Cloudflare's 15 minute cap.
+		await this.keepAlive();
+		// Arm the restart *after* keepAlive: the keepalive alarm is the long
+		// one, and setting it last would replace the one-second restart alarm.
+		await this.ensureCurrentVersion(request);
+		// A cold start has not registered the commands yet; a wake is the place
+		// to do it, because no interaction is waiting on the result.
+		await this.ensureCommands();
+		const deploy = await this.ctx.storage.get<string>("deploy:version");
+
+		return json({
+			ok: true,
+			connected: this.gateway?.open ?? false,
+			shards: this.gateway?.status ?? { total: 0, open: 0 },
+			deploy: deploy ?? null,
+			restart: this.restartPending,
+		});
 	}
 
 	/** Resolve the bot identity and connect. Idempotent. */
@@ -666,7 +710,13 @@ export class BotGateway extends DurableObject<Env> {
 	// --- Inbound Discord events -------------------------------------------------
 
 	private async onGuild(guild: DiscordGuildCreate): Promise<void> {
-		await maybeAnnounceInstall(this.rest, this.ctx.storage, guild, this.botUserId, this.analytics(guild.id));
+		await maybeAnnounceInstall({
+			rest: this.rest,
+			storage: this.ctx.storage,
+			guild,
+			botUserId: this.botUserId,
+			analytics: this.analytics(guild.id),
+		});
 		// Remember every guild, so a restart can refresh the guild-scoped copy of
 		// the commands there. A guild this instance has not seen before also needs
 		// its copy now, because the registration pass has already run.
@@ -763,12 +813,15 @@ export class BotGateway extends DurableObject<Env> {
 		const text = renderThreadCreated(thread, watch.messageId);
 		await this.withLock(notifyThreadId, async () => {
 			try {
-				await this.session(watch.guildId).prompt({
+				const request: Mutable<Omit<PromptRequest, "guildId">> = {
 					threadId: notifyThreadId,
 					title: watch.notifyTitle ?? DEFAULT_THREAD_NAME,
 					text,
-					...(watch.notifyDiscord ? { discord: watch.notifyDiscord } : {}),
-				});
+				};
+
+				if (watch.notifyDiscord) request.discord = watch.notifyDiscord;
+
+				await this.session(watch.guildId).prompt(request);
 			} catch (error) {
 				log(
 					`could not tell ${notifyThreadId} that thread ${thread.id} was created: ${describeError(error)}`,
@@ -839,46 +892,14 @@ export class BotGateway extends DurableObject<Env> {
 		const answer = await this.askAnswer(interaction, customId, kind === "s");
 
 		if (!answer) {
-			await this.rest
-				.interactionReply(
-					interaction.id,
-					interaction.token,
-					"That answer could not be read. Reply in the conversation instead.",
-				)
-				.catch(() => undefined);
+			await this.refuse(interaction, "That answer could not be read. Reply in the conversation instead.");
 
 			return;
 		}
 
-		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return;
+		const context = await this.answerTarget(interaction, guildId, channelId, userId);
 
-		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
-			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
-
-			return { ok: false, message: "Eryn could not verify your access to this conversation." };
-		});
-
-		if (!allowed.ok) {
-			await this.rest
-				.interactionReply(
-					interaction.id,
-					interaction.token,
-					allowed.message ?? "Only people who can access this conversation can answer here.",
-				)
-				.catch(() => undefined);
-
-			return;
-		}
-
-		const context = await this.conversationContext(guildId, channelId);
-
-		if (!context) {
-			await this.rest
-				.interactionReply(interaction.id, interaction.token, "I could not read this conversation. Try again.")
-				.catch(() => undefined);
-
-			return;
-		}
+		if (!context) return;
 
 		const question = (interaction.message?.content ?? "")
 			.replace(
@@ -892,19 +913,81 @@ export class BotGateway extends DurableObject<Env> {
 			.interactionUpdate(interaction.id, interaction.token, truncate(content), { components: [] })
 			.catch(() => undefined);
 
-		const message: DiscordMessage = {
+		const message = this.answerMessage({ interaction, guildId, channelId, answer, user });
+
+		this.track(
+			() =>
+				this.forward({
+					guildId,
+					threadId: channelId,
+					title: threadName(answer),
+					text: answer,
+					message,
+					discord: context,
+				}),
+			"could not start a turn from a question answer",
+		);
+	}
+
+	/** A short refusal on the interaction, which is all an answer click can show. */
+	private async refuse(interaction: DiscordInteraction, message: string): Promise<void> {
+		await this.rest.interactionReply(interaction.id, interaction.token, message).catch(() => undefined);
+	}
+
+	/**
+	 * The conversation an answer lands in, or undefined when the speaker may not
+	 * answer here and has already been refused.
+	 */
+	private async answerTarget(
+		interaction: DiscordInteraction,
+		guildId: string,
+		channelId: string,
+		userId: string,
+	): Promise<DiscordContext | undefined> {
+		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return undefined;
+
+		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
+			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
+
+			return { ok: false, message: "Eryn could not verify your access to this conversation." };
+		});
+
+		if (!allowed.ok) {
+			await this.refuse(
+				interaction,
+				allowed.message ?? "Only people who can access this conversation can answer here.",
+			);
+
+			return undefined;
+		}
+
+		const context = await this.conversationContext(guildId, channelId);
+
+		if (!context) {
+			await this.refuse(interaction, "I could not read this conversation. Try again.");
+
+			return undefined;
+		}
+
+		return context;
+	}
+
+	/** The answer as a message from the person who clicked, so the turn has a speaker. */
+	private answerMessage(input: AnswerMessageInput): DiscordMessage {
+		const { interaction, guildId, channelId, answer, user } = input;
+
+		const message: Mutable<DiscordMessage> = {
 			id: interaction.message?.id ?? interaction.id,
 			channel_id: channelId,
 			guild_id: guildId,
 			content: answer,
-			...(user ? { author: user } : {}),
-			...(interaction.member?.nick ? { member: { nick: interaction.member.nick } } : {}),
 		};
 
-		this.track(
-			() => this.forward(guildId, channelId, threadName(answer), answer, message, context),
-			"could not start a turn from a question answer",
-		);
+		if (user) message.author = user;
+
+		if (interaction.member?.nick) message.member = { nick: interaction.member.nick };
+
+		return message;
 	}
 
 	/** The label behind the component that was clicked, or undefined. */
@@ -1054,6 +1137,27 @@ export class BotGateway extends DurableObject<Env> {
 			.catch(() => undefined);
 	}
 
+	/** Join and adopt a thread the bot was addressed in, or report it was not. */
+	private async adoptAddressedThread(
+		channel: DiscordChannelRef,
+		message: DiscordMessage,
+		roleId: string | undefined,
+	): Promise<boolean> {
+		if (!(await this.addressed(message, roleId))) return false;
+		log(`joining and adopting thread ${channel.id} after being addressed`);
+		// A mention still has to reach a thread the gateway is not already
+		// following. Joining is idempotent. A mention (or a reply to one of Eryn's
+		// messages) is an invitation to the conversation, so the thread is adopted
+		// here: later messages in it are follow-ups, and a follow-up without an `@`
+		// must not be dropped.
+		await this.rest
+			.joinThread(channel.id)
+			.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
+		await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
+
+		return true;
+	}
+
 	/**
 	 * Handle one message in a conversation Eryn owns, in arrival order.
 	 *
@@ -1084,17 +1188,9 @@ export class BotGateway extends DurableObject<Env> {
 			const thread = THREAD_TYPES.has(channel.type);
 
 			if (thread && !(await this.ownsThread(channel.id))) {
-				if (!(await this.addressed(message, roleId))) return;
-				log(`joining and adopting thread ${channel.id} after being addressed`);
-				// A mention still has to reach a thread the gateway is not already
-				// following. Joining is idempotent. A mention (or a reply to one of
-				// Eryn's messages) is an invitation to the conversation, so the
-				// thread is adopted here: later messages in it are follow-ups, and a
-				// follow-up without an `@` must not be dropped.
-				await this.rest
-					.joinThread(channel.id)
-					.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
-				await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
+				const adopted = await this.adoptAddressedThread(channel, message, roleId);
+
+				if (!adopted) return;
 			}
 
 			const text = stripMention(message.content ?? "", botUserId, roleId);
@@ -1168,15 +1264,15 @@ export class BotGateway extends DurableObject<Env> {
 					? await this.lookups.context(guildId, parent, channel)
 					: await this.lookups.context(guildId, channel, { id: channel.id, name: channel.name }, "channel");
 
-				await this.forward(
+				await this.forward({
 					guildId,
-					channel.id,
-					threadName(text),
+					threadId: channel.id,
+					title: threadName(text),
 					text,
 					message,
 					discord,
-					await this.takeRenameNotice(channel.id),
-				);
+					notice: await this.takeRenameNotice(channel.id),
+				});
 			});
 		} finally {
 			// A no-op once the ticket is ready; this releases the reservation on
@@ -1252,15 +1348,15 @@ export class BotGateway extends DurableObject<Env> {
 					return;
 				}
 
-				await this.forward(
+				await this.forward({
 					guildId,
 					threadId,
-					name,
+					title: name,
 					text,
 					message,
-					await this.lookups.context(guildId, channel, { id: threadId, name }),
-					await this.takeRenameNotice(threadId),
-				);
+					discord: await this.lookups.context(guildId, channel, { id: threadId, name }),
+					notice: await this.takeRenameNotice(threadId),
+				});
 			});
 		} finally {
 			ticket.skip();
@@ -1275,48 +1371,43 @@ export class BotGateway extends DurableObject<Env> {
 	 * The conversation queue starts message turns in arrival order; this lock
 	 * also serialises an automated notice (`onThreadCreate`) with them.
 	 */
-	private forward(
-		guildId: string,
-		threadId: string,
-		title: string,
-		text: string,
-		message: DiscordMessage,
-		discord: DiscordContext,
-		notice?: string,
-	): Promise<void> {
-		return this.withLock(threadId, async () => {
-			const client = this.session(guildId);
+	private forward(input: ForwardInput): Promise<void> {
+		return this.withLock(input.threadId, async () => {
+			const client = this.session(input.guildId);
 
 			// A reply is a request about the message it answers, and the reply
 			// itself may be nothing but "this". Put that message in front of the
 			// request so the model can resolve what "this" is, even when the
 			// parent is too old to appear in `discord_read_messages`.
-			const parent = message.referenced_message
-				? renderMessage(message.referenced_message, this.botUserId)
+			const parent = input.message.referenced_message
+				? renderMessage(input.message.referenced_message, this.botUserId)
 				: undefined;
 
+			const request: Mutable<Omit<PromptRequest, "guildId">> = {
+				threadId: input.threadId,
+				title: input.title,
+				text: parent ? `${parent}\n\n${input.text}` : input.text,
+				author: authorInfo(input.message),
+				mentions: mentionInfo(input.message, this.botUserId),
+				discord: input.discord,
+				attachments: attachmentsOf(input.message),
+			};
+
+			if (input.notice) request.notice = input.notice;
+
 			try {
-				await client.prompt({
-					threadId,
-					title,
-					text: parent ? `${parent}\n\n${text}` : text,
-					author: authorInfo(message),
-					mentions: mentionInfo(message, this.botUserId),
-					discord,
-					...(notice ? { notice } : {}),
-					attachments: attachmentsOf(message),
-				});
+				await client.prompt(request);
 
 				return;
 			} catch (error) {
-				log(`session prompt for ${threadId} could not be delivered: ${describeError(error)}`);
+				log(`session prompt for ${input.threadId} could not be delivered: ${describeError(error)}`);
 			}
 
 			// The session object is gone or refused the turn, so nothing will edit
 			// the message it may have left behind. Say so rather than leaving the
 			// thread looking like the agent is still thinking.
 			await this.rest
-				.sendMessage(threadId, "I could not start that turn, so there is nothing to show. Please try again.")
+				.sendMessage(input.threadId, "I could not start that turn, so there is nothing to show. Please try again.")
 				.catch(() => undefined);
 		});
 	}

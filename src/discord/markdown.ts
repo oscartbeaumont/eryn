@@ -48,75 +48,136 @@ export function formatMessage(markdown: string): FormattedMessage {
 	const lines = markdown.split("\n");
 	const output: string[] = [];
 	const embeds: DiscordEmbed[] = [];
-	let fence: string | undefined;
+	const state: MessageState = { fence: undefined, index: 0 };
 
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index]!;
-		const marker = fenceMarker(line);
+	while (state.index < lines.length) {
+		const line = lines[state.index] ?? "";
 
-		if (marker) {
-			if (fence === undefined) fence = marker;
-			else if (marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
+		if (consumeCodeLine(line, state, output)) {
+			state.index += 1;
+			continue;
+		}
+
+		const table = readTable(lines, state.index);
+
+		if (!table) {
 			output.push(line);
+			state.index += 1;
 			continue;
 		}
 
-		if (fence !== undefined) {
-			output.push(line);
-			continue;
-		}
+		const rendered = renderTable(table, lines.slice(table.end).join("\n").trim() === "");
 
-		const header = line.includes("|") ? splitRow(line) : undefined;
-		const align = header && index + 1 < lines.length ? delimiter(lines[index + 1]!) : undefined;
+		if (rendered.embed) embeds.push(rendered.embed);
 
-		if (!header || !align || header.length !== align.length) {
-			output.push(line);
-			continue;
-		}
+		if (rendered.text !== undefined) output.push(rendered.text);
 
-		const rows: string[][] = [];
-		let row = index + 2;
-
-		while (row < lines.length) {
-			const candidate = lines[row]!;
-
-			if (!candidate.trim() || !candidate.includes("|")) break;
-			rows.push(splitRow(candidate));
-			row++;
-		}
-
-		// A row may carry more cells than the header. When every row has exactly
-		// one more, the header is a row-label table that omitted its leading
-		// blank cell, so shift it right; otherwise keep the extra cells.
-		const widest = Math.max(header.length, ...rows.map((cells) => cells.length));
-		const shifted = widest === header.length + 1 && rows.every((cells) => cells.length === widest);
-		const paddedHeader = shifted ? ["", ...header] : fit(header, widest);
-
-		const paddedAlign: Alignment[] = shifted
-			? ["left", ...align]
-			: [...align, ...Array<Alignment>(widest - align.length).fill("left")];
-
-		const paddedRows = rows.map((cells) => fit(cells, widest));
-
-		const layout = tableLayout(paddedHeader, paddedRows);
-		const trailing = lines.slice(row).join("\n").trim() === "";
-		const embed = !layout.compact && trailing ? embedTable(paddedHeader, paddedRows) : undefined;
-
-		if (embed) {
-			embeds.push(embed);
-			index = row - 1;
-			continue;
-		}
-
-		output.push(
-			layout.compact
-				? compactTable(layout.header, paddedAlign, layout.rows, layout.widths)
-				: labelledRows(paddedHeader, paddedRows),
-		);
-		index = row - 1;
+		state.index = table.end;
 	}
 
 	return { content: output.join("\n").trimEnd(), embeds };
+}
+
+/** Where the scanner is: the open code fence, if any, and the current line. */
+interface MessageState {
+	fence: string | undefined;
+	index: number;
+}
+
+/**
+ * Copy a line that belongs to a code fence, or that opens or closes one.
+ *
+ * Returns whether the line was consumed; text inside a fence is never a table.
+ */
+function consumeCodeLine(line: string, state: MessageState, output: string[]): boolean {
+	const marker = fenceMarker(line);
+
+	if (marker) {
+		if (state.fence === undefined) state.fence = marker;
+		else if (marker[0] === state.fence[0] && marker.length >= state.fence.length) state.fence = undefined;
+		output.push(line);
+
+		return true;
+	}
+
+	if (state.fence !== undefined) {
+		output.push(line);
+
+		return true;
+	}
+
+	return false;
+}
+
+/** A table found in the message, with every row already padded to one width. */
+interface TableBlock {
+	readonly header: string[];
+	readonly align: Alignment[];
+	readonly rows: string[][];
+	/** The line after the table's last row. */
+	readonly end: number;
+}
+
+/** Read the table that starts at `start`, or undefined when that line is not one. */
+function readTable(lines: readonly string[], start: number): TableBlock | undefined {
+	const line = lines[start] ?? "";
+	const header = line.includes("|") ? splitRow(line) : undefined;
+	const align = header && start + 1 < lines.length ? delimiter(lines[start + 1] ?? "") : undefined;
+
+	if (!header || !align || header.length !== align.length) return undefined;
+
+	const rows: string[][] = [];
+	let end = start + 2;
+
+	while (end < lines.length) {
+		const candidate = lines[end] ?? "";
+
+		if (!candidate.trim() || !candidate.includes("|")) break;
+		rows.push(splitRow(candidate));
+		end += 1;
+	}
+
+	// A row may carry more cells than the header. When every row has exactly
+	// one more, the header is a row-label table that omitted its leading
+	// blank cell, so shift it right; otherwise keep the extra cells.
+	const widest = Math.max(header.length, ...rows.map((cells) => cells.length));
+	const shifted = widest === header.length + 1 && rows.every((cells) => cells.length === widest);
+	const paddedHeader = shifted ? ["", ...header] : fit(header, widest);
+
+	const paddedAlign: Alignment[] = shifted
+		? ["left", ...align]
+		: [...align, ...Array<Alignment>(widest - align.length).fill("left")];
+
+	return {
+		header: paddedHeader,
+		align: paddedAlign,
+		rows: rows.map((cells) => fit(cells, widest)),
+		end,
+	};
+}
+
+/** One table's replacement: an embed, or the text that stands in for it. */
+interface RenderedTable {
+	readonly embed?: DiscordEmbed;
+	readonly text?: string;
+}
+
+/** Lay a table out as an embed when it is wide and ends the message, else as text. */
+function renderTable(table: TableBlock, trailing: boolean): RenderedTable {
+	const layout = tableLayout(table.header, table.rows);
+
+	if (!layout.compact && trailing) {
+		const embed = embedTable(table.header, table.rows);
+
+		// A table too large for one embed field falls back to the labelled layout.
+		if (embed) return { embed };
+	}
+
+	return {
+		text: layout.compact
+			? compactTable(layout.header, table.align, layout.rows, layout.widths)
+			: labelledRows(table.header, table.rows),
+	};
 }
 
 /** The opening or closing marker of a fenced code block, if this line is one. */
