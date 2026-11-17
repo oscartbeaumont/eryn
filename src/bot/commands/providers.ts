@@ -197,9 +197,11 @@ export async function providerScreen(request: InteractionRequest, notice?: strin
 		return;
 	}
 
-	const recommended = PREFERRED_PROVIDERS.map((wanted) => providers.find((provider) => provider.id === wanted))
-		.filter((provider): provider is IntegrationOption => provider !== undefined)
-		.slice(0, 5);
+	const recommended = PREFERRED_PROVIDERS.flatMap((wanted) => {
+		const found = providers.find((provider) => provider.id === wanted);
+
+		return found ? [found] : [];
+	}).slice(0, 5);
 
 	const components: DiscordComponent[] = [];
 

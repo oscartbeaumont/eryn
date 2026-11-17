@@ -250,8 +250,14 @@ function groupOptions(profile: ProfilesState["profiles"][number]): DiscordSelect
 	return options.slice(0, MAX_SELECT_OPTIONS);
 }
 
+const EFFECT_WORDS: Record<PolicyEffect, string> = {
+	block: "blocked",
+	ask: "asks first",
+	allow: "allowed",
+};
+
 function effectWord(effect: PolicyEffect | undefined): string {
-	return effect === "block" ? "blocked" : effect === "ask" ? "asks first" : "allowed";
+	return EFFECT_WORDS[effect ?? "allow"];
 }
 
 function groupTitle(key: string): string {

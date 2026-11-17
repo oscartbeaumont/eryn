@@ -20,11 +20,11 @@ import { discordRest, type DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
 import { json } from "../http";
 import { refreshLinks } from "../mcp/links";
-import { createGuildAgent, type GuildAgentShape } from "./agent";
+import { createGuildAgent, type GuildAgent } from "./agent";
 import type { HostConfig } from "./host-config";
 import { buildRoutes } from "./routes";
 import { seedWorkspace } from "./seed";
-import { guildStore, type GuildStoreShape } from "./store";
+import { guildStore, type GuildStore } from "./store";
 import { workspaceSignature } from "./workspace-config";
 
 /** Keep a warm host briefly after the last request, then let the object hibernate. */
@@ -39,8 +39,8 @@ const SCHEDULE_SOON_MS = 5_000;
 export class BotSession extends DurableObject<Env> {
 	private readonly guildId: string;
 	private readonly rest: DiscordRest;
-	private readonly store: GuildStoreShape;
-	private readonly agent: GuildAgentShape;
+	private readonly store: GuildStore;
+	private readonly agent: GuildAgent;
 	private readonly router: (request: Request) => Promise<Response>;
 	/** Requests currently running, so a deploy restart does not cut a turn in half. */
 	private inFlight = 0;

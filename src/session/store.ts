@@ -241,4 +241,4 @@ export function guildStore(storage: DurableObjectStorage, secret: string | undef
 }
 
 /** The guild's durable state, as the routes and the object see it. */
-export type GuildStoreShape = ReturnType<typeof guildStore>;
+export type GuildStore = ReturnType<typeof guildStore>;

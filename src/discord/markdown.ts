@@ -295,13 +295,13 @@ function optionFields(header: string[], rows: string[][]): DiscordEmbedField[] |
 		const name = fieldName(header[column] ?? "", `Option ${column}`);
 
 		const value = rows
-			.map((row) => {
+			.flatMap((row) => {
 				const label = (row[0] ?? "").trim().replaceAll("**", "");
 				const cell = (row[column] ?? "").trim();
+				const line = label && cell ? `**${label}:** ${cell}` : cell;
 
-				return label && cell ? `**${label}:** ${cell}` : cell;
+				return line ? [line] : [];
 			})
-			.filter(Boolean)
 			.join("\n");
 
 		if (!value) return undefined;

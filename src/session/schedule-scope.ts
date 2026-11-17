@@ -37,7 +37,7 @@ export interface ScopeChannelCapabilities {
 }
 
 /** A schedule scope as it is stored in session metadata. */
-export interface ScheduleScopeShape {
+export interface StoredScheduleScope {
 	readonly ownerId: string;
 	readonly scheduleIds: readonly string[];
 	readonly channels: Readonly<Record<string, ScopeChannelCapabilities>>;
@@ -60,7 +60,7 @@ export function defaultScheduleScope(input: {
 	scheduleId: string;
 	capabilities: ScopeChannelCapabilities;
 	now?: number;
-}): ScheduleScopeShape {
+}): StoredScheduleScope {
 	const now = input.now ?? Date.now();
 
 	return {
@@ -81,7 +81,7 @@ export function defaultScheduleScope(input: {
  * pass through a scope written before it existed.
  */
 export function scopeAllows(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	channelId: string,
 	required: bigint,
 ): boolean {
@@ -128,7 +128,7 @@ export function scopeAllows(
  * schedule is fine, and having fewer in any one channel is not.
  */
 export function scopeCoveredBy(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	actual: Record<string, ChannelCapabilities | undefined>,
 ): boolean {
 	return Object.entries(scope.channels).every(([channelId, required]) => {
@@ -152,7 +152,7 @@ export function scopeCoveredBy(
 
 /** Whether this person may change the scope: its owner or a server manager. */
 export function canEditScheduleScope(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	userId: string,
 	manager: boolean,
 ): boolean {
@@ -166,7 +166,7 @@ export function canEditScheduleScope(
  * cannot attach their schedule to someone else's reach.
  */
 export function canCreateSchedule(
-	scope: ScheduleScopeShape | undefined,
+	scope: StoredScheduleScope | undefined,
 	authorId: string | undefined,
 ): boolean {
 	if (!authorId) return false;
@@ -176,11 +176,11 @@ export function canCreateSchedule(
 
 /** Add a channel to a scope with the capabilities the editor actually has. */
 export function addChannelToScope(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	channelId: string,
 	capabilities: ScopeChannelCapabilities,
 	now = Date.now(),
-): ScheduleScopeShape {
+): StoredScheduleScope {
 	if (scope.channels[channelId]) return scope;
 
 	return {
@@ -192,11 +192,11 @@ export function addChannelToScope(
 
 /** Remove a channel from a scope, but never the conversation itself. */
 export function removeChannelFromScope(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	channelId: string,
 	conversationId: string,
 	now = Date.now(),
-): ScheduleScopeShape {
+): StoredScheduleScope {
 	if (channelId === conversationId || !scope.channels[channelId]) return scope;
 	const channels = { ...scope.channels };
 	delete channels[channelId];
@@ -206,10 +206,10 @@ export function removeChannelFromScope(
 
 /** Add a schedule id to a scope. */
 export function addScheduleToScope(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	scheduleId: string,
 	now = Date.now(),
-): ScheduleScopeShape {
+): StoredScheduleScope {
 	if (scope.scheduleIds.includes(scheduleId)) return scope;
 
 	return { ...scope, scheduleIds: [...scope.scheduleIds, scheduleId], updatedAt: now };
@@ -217,10 +217,10 @@ export function addScheduleToScope(
 
 /** Remove a schedule id from a scope. The caller clears the scope when empty. */
 export function removeScheduleFromScope(
-	scope: ScheduleScopeShape,
+	scope: StoredScheduleScope,
 	scheduleId: string,
 	now = Date.now(),
-): ScheduleScopeShape {
+): StoredScheduleScope {
 	return {
 		...scope,
 		scheduleIds: scope.scheduleIds.filter((id) => id !== scheduleId),

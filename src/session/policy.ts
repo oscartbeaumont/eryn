@@ -417,8 +417,59 @@ export function policyTitle(policy: Policy, custom: readonly PolicyProfile[] = [
 	return found?.name ?? PRESET_LABELS[id as PolicyPreset] ?? id;
 }
 
+const EFFECT_LABELS: Record<PolicyEffect, string> = {
+	block: "blocked",
+	ask: "ask",
+	allow: "allowed",
+};
+
 function effectLabel(effect: PolicyEffect | undefined): string {
-	return effect === "block" ? "blocked" : effect === "ask" ? "ask" : "allowed";
+	return EFFECT_LABELS[effect ?? "allow"];
+}
+
+/** What a member can do with files, and with the shell's edits. */
+function workspaceSummary(workspace: PolicyEffect, edit: PolicyEffect): string {
+	if (workspace === "block") return "hidden";
+
+	if (workspace === "ask") return "ask before read";
+
+	if (edit === "block") return "read only";
+
+	if (edit === "ask") return "read, ask before write";
+
+	return "read and write";
+}
+
+/** The Discord line, before the cross-channel suffix is added. */
+function discordSummary(discord: readonly (PolicyEffect | undefined)[]): string {
+	if (discord.some((effect) => effect === "ask")) return "ask before use";
+
+	if (discord.every((effect) => effect === "allow")) return "everything";
+
+	if (discord.every((effect) => effect === "block")) return "send only";
+
+	if (discord[0] === "allow" && discord[1] === "allow" && discord[2] === "allow") return "chat and threads";
+
+	return discord[0] === "allow" ? "replies only" : "limited";
+}
+
+/** The MCP line, with the servers that differ from the all-servers default. */
+function mcpSummary(mcp: Record<string, PolicyEffect>, servers: readonly string[]): string {
+	const all = mcp[MCP_ALL] ?? "allow";
+	const blocked = servers.filter((server) => (mcp[server] ?? all) === "block");
+
+	if (all === "block") {
+		if (blocked.length === servers.length || servers.length === 0) return "blocked";
+		const allowed = servers.filter((server) => (mcp[server] ?? all) === "allow");
+
+		return `blocked except ${allowed.join(", ")}`;
+	}
+
+	if (all === "ask") return "ask before use";
+
+	if (blocked.length) return `blocked in ${blocked.join(", ")}`;
+
+	return "allowed";
 }
 
 /** Plain-language lines for the policy card and the menu. */
@@ -436,58 +487,21 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 		tools["cross-channel"],
 	];
 
-	const workspaceLine =
-		workspace === "block"
-			? "hidden"
-			: workspace === "ask"
-				? "ask before read"
-				: edit === "block"
-					? "read only"
-					: edit === "ask"
-						? "read, ask before write"
-						: "read and write";
-
-	const discordSummary = discord.some((effect) => effect === "ask")
-		? "ask before use"
-		: discord.every((effect) => effect === "allow")
-			? "everything"
-			: discord.every((effect) => effect === "block")
-				? "send only"
-				: discord[0] === "allow" && discord[1] === "allow" && discord[2] === "allow"
-					? "chat and threads"
-					: discord[0] === "allow"
-						? "replies only"
-						: "limited";
-
 	const discordLine =
 		tools["cross-channel"] === "block"
-			? `${discordSummary} (cross-channel blocked)`
-			: discordSummary;
+			? `${discordSummary(discord)} (cross-channel blocked)`
+			: discordSummary(discord);
 
 	const mcp = policy.mcp ?? {};
-	const all = mcp[MCP_ALL] ?? "allow";
-	const blocked = servers.filter((server) => (mcp[server] ?? all) === "block");
-
-	const mcpLine =
-		all === "block"
-			? blocked.length === servers.length || servers.length === 0
-				? "blocked"
-				: `blocked except ${servers.filter((server) => (mcp[server] ?? all) === "allow").join(", ")}`
-			: all === "ask"
-				? "ask before use"
-				: blocked.length
-					? `blocked in ${blocked.join(", ")}`
-					: "allowed";
-
 	const exact = Object.entries(tools).filter(([key]) => !(key in GROUP_TOOLS));
 
 	const lines = [
-		`Workspace: **${workspaceLine}**`,
+		`Workspace: **${workspaceSummary(workspace, edit)}**`,
 		`Shell: **${effectLabel(shell)}**`,
 		`Web: **${effectLabel(tools.web)}**`,
 		`Subagents: **${effectLabel(tools.subagent)}**`,
 		`Discord: **${discordLine}**`,
-		`MCP: **${mcpLine}**`,
+		`MCP: **${mcpSummary(mcp, servers)}**`,
 	];
 
 	if (exact.length) {

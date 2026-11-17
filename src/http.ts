@@ -53,7 +53,7 @@ export async function fetchWithRedirects(
 	// an external HTTPS server must not be able to redirect into the local host.
 	const allowLoopback = current.protocol === "http:" && isLoopback(current.hostname);
 	assertSupported(current, allowLoopback);
-	let options: RequestInit = { ...init, redirect: "manual" };
+	const options: RequestInit = { ...init, redirect: "manual" };
 
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
 		const response = await fetch(current, options);
@@ -77,7 +77,9 @@ export async function fetchWithRedirects(
 			const headers = new Headers(options.headers);
 			headers.delete("content-type");
 			headers.delete("content-length");
-			options = { ...options, method: "GET", body: undefined, headers };
+			options.method = "GET";
+			options.body = undefined;
+			options.headers = headers;
 		}
 	}
 

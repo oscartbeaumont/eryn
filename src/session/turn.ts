@@ -54,11 +54,11 @@ function complete(turn: Turn): void {
 /** The error detail an SDK failure carries, if any. */
 function errorDetail(error: unknown): string | undefined {
 	if (!error || typeof error !== "object") return undefined;
-	const shape = error as { message?: unknown; type?: unknown };
+	const detail = error as { message?: unknown; type?: unknown };
 
-	if (typeof shape.message === "string" && shape.message.trim()) return shape.message.trim();
+	if (typeof detail.message === "string" && detail.message.trim()) return detail.message.trim();
 
-	if (typeof shape.type === "string") return shape.type;
+	if (typeof detail.type === "string") return detail.type;
 
 	return undefined;
 }

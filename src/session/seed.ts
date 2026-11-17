@@ -13,7 +13,7 @@ import { applyEdits, modify, parse } from "jsonc-parser";
 
 import { KEYS, log } from "../config.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "../plugins/workspace/bytes.ts";
-import { fileStore, type FileStore } from "../plugins/workspace/store.ts";
+import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
 import {
 	DEFAULT_AGENTS,
 	DEFAULT_AGENTS_PATH,
@@ -118,7 +118,7 @@ async function upgradeWebSearch(store: FileStore): Promise<boolean> {
 }
 
 /** Write any missing defaults, and apply the one-time seed upgrades. */
-export async function seedWorkspace(storage: DurableObjectStorage): Promise<void> {
+export async function seedWorkspace(storage: WorkspaceStorage): Promise<void> {
 	const seeded = await storage.get<unknown>(KEYS.workspaceSeed);
 
 	if (typeof seeded === "number" && seeded >= SEED_VERSION) return;
@@ -161,7 +161,7 @@ export async function seedWorkspace(storage: DurableObjectStorage): Promise<void
  * files, so they survive. The seed marker is removed too, which makes the
  * following seed behave exactly like a fresh guild's first one.
  */
-export async function resetWorkspace(storage: DurableObjectStorage): Promise<number> {
+export async function resetWorkspace(storage: WorkspaceStorage): Promise<number> {
 	let removed = 0;
 	let startAfter: string | undefined;
 

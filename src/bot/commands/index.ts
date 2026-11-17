@@ -83,27 +83,40 @@ export function erynCommand(): DiscordCommand {
  * the previous copy answer "This command is outdated", so compare first and only
  * write when the tree really differs.
  */
+/**
+ * The comparable part of a command option. It normalises an absent `options`
+ * list and an absent `required` flag, so two registrations can be compared by
+ * value rather than by how Discord filled the fields.
+ */
+interface ComparableOption {
+	readonly name: string;
+	readonly description: string;
+	readonly type: number;
+	readonly required?: boolean;
+	readonly options: ComparableOption[];
+}
+
 export function sameCommands(
 	registered: readonly DiscordCommand[],
 	desired: readonly DiscordCommand[],
 ): boolean {
-	const shape = (command: DiscordCommand) => ({
+	const comparableCommand = (command: DiscordCommand): ComparableOption => ({
 		name: command.name,
 		description: command.description,
 		type: command.type,
-		options: (command.options ?? []).map(optionShape),
+		options: (command.options ?? []).map(optionEntry),
 	});
 
-	return Equal.equals(registered.map(shape), desired.map(shape));
+	return Equal.equals(registered.map(comparableCommand), desired.map(comparableCommand));
 }
 
-function optionShape(option: DiscordCommandOption): unknown {
+function optionEntry(option: DiscordCommandOption): ComparableOption {
 	return {
 		name: option.name,
 		description: option.description,
 		type: option.type,
 		required: option.required ?? false,
-		options: (option.options ?? []).map(optionShape),
+		options: (option.options ?? []).map(optionEntry),
 	};
 }
 

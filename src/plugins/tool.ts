@@ -46,6 +46,21 @@ export class ToolOutput {
 	}
 }
 
+/**
+ * What a tool can return: text, a result that carries files, or any JSON value.
+ *
+ * The tool editor JSON-encodes everything except a string and a
+ * {@link ToolOutput}, so this is the contract a spec's `run` has to meet.
+ */
+export type ToolResult =
+	| string
+	| number
+	| boolean
+	| null
+	| ToolOutput
+	| readonly ToolResult[]
+	| { readonly [key: string]: ToolResult };
+
 /** One tool, before it is registered with the editor. */
 export interface ToolSpec {
 	readonly name: string;
@@ -61,10 +76,10 @@ export interface ToolSpec {
 	 * A string is sent as-is, a {@link ToolOutput} becomes text plus readable
 	 * files, and any other value is JSON-encoded.
 	 */
-	run(input: Record<string, unknown>, call: ToolCall): Promise<unknown>;
+	run(input: Record<string, unknown>, call: ToolCall): Promise<ToolResult>;
 }
 
-function content(result: unknown) {
+function content(result: ToolResult) {
 	if (result instanceof ToolOutput) {
 		if (result.files.length === 0) return { content: result.text };
 

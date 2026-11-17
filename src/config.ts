@@ -28,7 +28,8 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
  * read without a declared binding so a fork can supply it, or omit it, freely.
  */
 export function optional(env: Env, name: string): string | undefined {
-	const value = (env as unknown as Record<string, unknown>)[name];
+	const bindings: Record<string, unknown> = { ...env };
+	const value = bindings[name];
 
 	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }

@@ -17,7 +17,7 @@ import {
 	removeScheduleFromScope,
 	scopeAllows,
 	scopeCoveredBy,
-	type ScheduleScopeShape,
+	type StoredScheduleScope,
 } from "./schedule-scope.ts";
 
 const CAPABILITIES = {
@@ -29,7 +29,7 @@ const CAPABILITIES = {
 	react: true,
 };
 
-const scope = (): ScheduleScopeShape =>
+const scope = (): StoredScheduleScope =>
 	defaultScheduleScope({
 		ownerId: "owner",
 		conversationId: "conversation",

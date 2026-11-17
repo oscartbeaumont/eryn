@@ -61,7 +61,7 @@ import {
 } from "./policy";
 import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
 import { resetWorkspace, seedWorkspace } from "./seed";
-import type { GuildStoreShape } from "./store";
+import type { GuildStore } from "./store";
 import { applyTurnEvent, createTurn, type Turn } from "./turn";
 import { readWorkspaceConfig, workspaceSignature } from "./workspace-config";
 
@@ -139,7 +139,7 @@ interface PendingForm {
 type FormAnswer = string | string[] | boolean;
 
 /** The service surface the session object drives. */
-export interface GuildAgentShape {
+export interface GuildAgent {
 	integrations(config: HostConfig): Promise<IntegrationOption[]>;
 	models(config: HostConfig): Promise<ModelOption[]>;
 	resolveModel(config: HostConfig): Promise<string>;
@@ -251,7 +251,7 @@ export interface GuildAgentShape {
 	close(): Promise<void>;
 }
 
-class GuildAgentImpl implements GuildAgentShape {
+class GuildAgentImpl implements GuildAgent {
 	private host: Host | undefined;
 	private abort: AbortController | undefined;
 	private consuming: Promise<void> | undefined;
@@ -314,7 +314,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		private readonly env: Env,
 		private readonly storage: DurableObjectStorage,
 		private readonly rest: DiscordRest,
-		private readonly store: GuildStoreShape,
+		private readonly store: GuildStore,
 		private readonly turnTimeoutMs: number,
 		private readonly guildId: string,
 		waitUntil?: (promise: Promise<unknown>) => void,
@@ -903,7 +903,9 @@ class GuildAgentImpl implements GuildAgentShape {
 				// The assistant's own text is deliberately ignored: the reply is
 				// whatever it posted through discord_send_message.
 			},
-			() => this.interrupt(request.threadId, false).catch(() => undefined),
+			async () => {
+				await this.interrupt(request.threadId, false).catch(() => undefined);
+			},
 		);
 	}
 
@@ -955,7 +957,9 @@ class GuildAgentImpl implements GuildAgentShape {
 						text: request.text,
 					});
 				},
-				() => this.interrupt(request.threadId, false).catch(() => undefined),
+				async () => {
+					await this.interrupt(request.threadId, false).catch(() => undefined);
+				},
 			);
 		} finally {
 			// A command may switch the session model or agent. Forget the cached
@@ -1178,7 +1182,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		threadId: string,
 		label: string,
 		start: () => Promise<void>,
-		onTimeout: () => Promise<unknown>,
+		onTimeout: () => Promise<void>,
 	): Promise<{ ok: boolean; message?: string }> {
 		const turn = this.beginTurn(threadId);
 		const startedAt = Date.now();
@@ -3262,12 +3266,12 @@ class GuildAgentImpl implements GuildAgentShape {
 	}
 
 	private async handleEvent(event: unknown): Promise<void> {
-		const shape = event as { type?: unknown; created?: unknown; data?: unknown };
+		const envelope = event as { type?: unknown; created?: unknown; data?: unknown };
 
-		if (typeof shape.type !== "string" || !shape.data || typeof shape.data !== "object") return;
-		const data = shape.data as Record<string, unknown>;
+		if (typeof envelope.type !== "string" || !envelope.data || typeof envelope.data !== "object") return;
+		const data = envelope.data as Record<string, unknown>;
 
-		if (shape.type === "form.created") {
+		if (envelope.type === "form.created") {
 			void this.onFormCreated(data).catch((error) =>
 				log("session", `could not show an MCP form: ${describeError(error)}`),
 			);
@@ -3275,19 +3279,19 @@ class GuildAgentImpl implements GuildAgentShape {
 			return;
 		}
 
-		if (shape.type === "permission.replied") {
+		if (envelope.type === "permission.replied") {
 			this.onPermissionReplied(data);
 
 			return;
 		}
 
-		if (shape.type === "form.replied" || shape.type === "form.cancelled") {
-			this.onFormSettled(data, shape.type === "form.replied" ? "replied" : "cancelled");
+		if (envelope.type === "form.replied" || envelope.type === "form.cancelled") {
+			this.onFormSettled(data, envelope.type === "form.replied" ? "replied" : "cancelled");
 
 			return;
 		}
 
-		if (shape.type === "session.inbox.enqueued") {
+		if (envelope.type === "session.inbox.enqueued") {
 			await this.onScheduleSteered(data);
 
 			return;
@@ -3297,13 +3301,13 @@ class GuildAgentImpl implements GuildAgentShape {
 
 		if (typeof sessionID !== "string") return;
 
-		if (shape.type === "session.compaction.ended" || shape.type === "session.compaction.failed") {
-			this.settleCompaction(data, shape.type === "session.compaction.ended");
+		if (envelope.type === "session.compaction.ended" || envelope.type === "session.compaction.failed") {
+			this.settleCompaction(data, envelope.type === "session.compaction.ended");
 
 			return;
 		}
 
-		if (shape.type === "permission.asked") {
+		if (envelope.type === "permission.asked") {
 			void this.onPermissionAsked(data).catch((error) =>
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
@@ -3314,7 +3318,7 @@ class GuildAgentImpl implements GuildAgentShape {
 		// A start event with no turn of ours is either a schedule firing or a
 		// prompt this object did not see. Attribute or clear the speaker before
 		// adopting, so the tools never read the previous speaker's access.
-		if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
+		if (envelope.type === "session.execution.started" || envelope.type === "session.step.started") {
 			const mapped = this.threadBySession.get(sessionID);
 			const active = mapped ? this.runs.get(mapped)?.turn : undefined;
 
@@ -3327,7 +3331,7 @@ class GuildAgentImpl implements GuildAgentShape {
 			// A schedule fires the Session directly, with no thread prompt to own
 			// the turn. Adopt it so its reply still lands in the Discord
 			// conversation recorded on the Session.
-			if (shape.type === "session.execution.started" || shape.type === "session.step.started") {
+			if (envelope.type === "session.execution.started" || envelope.type === "session.step.started") {
 				await this.adopt(sessionID);
 			}
 
@@ -3341,12 +3345,12 @@ class GuildAgentImpl implements GuildAgentShape {
 		// turn: its late `execution.interrupted` must not complete the new turn.
 		const floor = this.turnFloor.get(threadId);
 
-		if (floor !== undefined && typeof shape.created === "number" && shape.created < floor) return;
+		if (floor !== undefined && typeof envelope.created === "number" && envelope.created < floor) return;
 
 		// Ignore events that predate this turn, such as the previous one going idle.
-		if (typeof shape.created === "number" && shape.created < turn.createdAt - 1_000) return;
+		if (typeof envelope.created === "number" && envelope.created < turn.createdAt - 1_000) return;
 
-		applyTurnEvent(turn, shape.type, data);
+		applyTurnEvent(turn, envelope.type, data);
 	}
 
 	/**
@@ -3440,7 +3444,9 @@ class GuildAgentImpl implements GuildAgentShape {
 
 					if (turn) applyTurnEvent(turn, "session.step.started", {});
 				},
-				() => host.sessions.interrupt({ sessionID }).catch(() => undefined),
+				async () => {
+					await host.sessions.interrupt({ sessionID }).catch(() => undefined);
+				},
 			).catch((error) => log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`));
 		} catch (error) {
 			log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
@@ -3634,9 +3640,9 @@ export function createGuildAgent(
 	env: Env,
 	storage: DurableObjectStorage,
 	rest: DiscordRest,
-	store: GuildStoreShape,
+	store: GuildStore,
 	guildId: string,
 	waitUntil?: (promise: Promise<unknown>) => void,
-): GuildAgentShape {
+): GuildAgent {
 	return new GuildAgentImpl(env, storage, rest, store, TURN_TIMEOUT_MS, guildId, waitUntil);
 }

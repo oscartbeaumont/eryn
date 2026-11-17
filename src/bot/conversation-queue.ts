@@ -16,7 +16,7 @@
 interface Entry {
 	readonly key: string;
 	settled: boolean;
-	work?: () => Promise<unknown>;
+	work?: () => Promise<void>;
 	/** Resolves the ticket's `done` promise once the turn, if any, has finished. */
 	readonly finish: () => void;
 	/** Resolves when this message's pre-turn check is done, for the next message. */
@@ -46,7 +46,7 @@ export class ConversationTicket {
 	}
 
 	/** Run `work` once every earlier message in the conversation has settled. */
-	ready(work: () => Promise<unknown>): void {
+	ready(work: () => Promise<void>): void {
 		this.queues.settle(this.entry, work);
 	}
 
@@ -90,7 +90,7 @@ export class ConversationQueues {
 	}
 
 	/** @internal Called by {@link ConversationTicket} when its check is done. */
-	settle(entry: Entry, work?: () => Promise<unknown>): void {
+	settle(entry: Entry, work?: () => Promise<void>): void {
 		if (entry.settled) return;
 		entry.settled = true;
 		entry.work = work;

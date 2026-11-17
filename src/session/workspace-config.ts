@@ -14,7 +14,7 @@ import { parse, type ParseError } from "jsonc-parser";
 
 import { log } from "../config.ts";
 import { base64ToBytes, bytesToText } from "../plugins/workspace/bytes.ts";
-import { fileStore, type FileStore } from "../plugins/workspace/store.ts";
+import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
 
 import {
 	AGENTS_ROOT,
@@ -316,7 +316,7 @@ function protectInlineCommands(value: unknown): Record<string, unknown> | undefi
 }
 
 /** Read every file that shapes a guild's host. */
-export async function readWorkspaceConfig(storage: DurableObjectStorage): Promise<WorkspaceConfig> {
+export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<WorkspaceConfig> {
 	const store = fileStore(storage);
 	const source = (await text(store, CONFIG_PATH)) ?? (await text(store, LEGACY_CONFIG_PATH));
 	const parsed = source ? parseConfig(CONFIG_PATH, source) : {};
@@ -403,19 +403,19 @@ export async function readWorkspaceConfig(storage: DurableObjectStorage): Promis
  * Only `/eryn` matters; editing project files under `/workspace` must not
  * rebuild the OpenCode host.
  */
-export async function workspaceSignature(storage: DurableObjectStorage): Promise<string> {
+export async function workspaceSignature(storage: WorkspaceStorage): Promise<string> {
 	const store = fileStore(storage);
 	const entries = await store.list(CONFIG_ROOT);
 
 	return entries
-		.filter((entry) => shapesHost(entry.path))
+		.filter((entry) => affectsHost(entry.path))
 		.map((entry) => `${entry.path}:${entry.file.m}:${entry.file.b.length}`)
 		.sort()
 		.join("|");
 }
 
 /** Whether a file affects a host build; supporting scripts only affect the agent. */
-function shapesHost(path: string): boolean {
+function affectsHost(path: string): boolean {
 	if (path === CONFIG_PATH || path === LEGACY_CONFIG_PATH || path === INSTRUCTIONS_PATH) return true;
 
 	if (path.startsWith(`${COMMANDS_ROOT}/`) && path.endsWith(".md")) return true;

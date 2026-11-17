@@ -19,7 +19,7 @@ import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "
 import { applyElicitation } from "../mcp/elicitation";
 import { AUTH_TTL_MS } from "../mcp/paths";
 import { probeServer } from "../mcp/probe";
-import type { GuildAgentShape } from "./agent";
+import type { GuildAgent } from "./agent";
 import type { HostConfig } from "./host-config";
 import { channelProjectDirectory } from "./locations";
 import {
@@ -58,15 +58,15 @@ import {
 	type PublicLink,
 } from "./models";
 import { ROUTES } from "./paths";
-import type { GuildStoreShape } from "./store";
+import type { GuildStore } from "./store";
 
 /** Everything a route handler may use from the guild object. */
 export interface RouteContext {
 	readonly env: Env;
 	readonly guildId: string;
 	readonly rest: DiscordRest;
-	readonly store: GuildStoreShape;
-	readonly agent: GuildAgentShape;
+	readonly store: GuildStore;
+	readonly agent: GuildAgent;
 	loadConfig(refresh?: boolean): Promise<HostConfig>;
 	reconcileModel(config: HostConfig): Promise<HostConfig>;
 }

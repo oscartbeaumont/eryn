@@ -556,7 +556,9 @@ export function discordTools(
 						rest.activeThreads(guildId),
 					]);
 
-					return [...channels, ...threads].filter((entry) => allowed.has(entry.id)).map(channelSummary);
+					return [...channels, ...threads].flatMap((entry) =>
+						allowed.has(entry.id) ? [channelSummary(entry)] : [],
+					);
 				}
 
 				// Without a speaker there is nobody whose view of the server could
