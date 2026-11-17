@@ -60,38 +60,23 @@ export const antiSlopLint = {
     "anti-slop/no-chained-type-assertions": "error",
     "anti-slop/no-conditional-spread": "warn",
     "anti-slop/no-disabled-type-assertion-rules": "error",
+    "anti-slop/no-known-value-widening": "error",
     "anti-slop/no-layout-animating-transition": "error",
     "anti-slop/no-module-mocking": "error",
     "anti-slop/no-object-parameters": "error",
     "anti-slop/no-reflect-apply": "error",
     "anti-slop/no-reflect-get": "error",
     "anti-slop/no-reprovide-ambient-service": "error",
-    // This codebase decodes stored records with Effect Schema, but live Discord
-    // and MCP payloads are JSON until a field is read. `typeof` is that
-    // boundary narrowing; an extra schema per field would restate the check.
-    "anti-slop/no-runtime-typeof": "off",
+    "anti-slop/no-runtime-typeof": ["error", { allowInTypeGuards: true }],
     "anti-slop/no-shape-in-symbol-names": "error",
-    // Catch handlers and third-party payloads are genuinely unknown. The
-    // rule's `cause` exception would rename error values without adding
-    // information.
-    "anti-slop/no-unknown-parameters": "off",
+    "anti-slop/no-unknown-parameters": "error",
     "anti-slop/no-unknown-returns": "error",
     "anti-slop/no-unknown-type-aliases": "error",
-    // JSON objects are dictionaries of unchecked values by definition. The
-    // schemas own stored records; a hand-written dictionary type at a live
-    // boundary would only rename the unknown.
-    "anti-slop/no-unsafe-dictionary-type": "off",
+    "anti-slop/no-unsafe-dictionary-type": "error",
     "anti-slop/no-widen-then-assert": "error",
     "anti-slop/require-media-dimensions": "error",
     "anti-slop/require-readable-spacing": "error",
-    // Assertions here sit between an SDK's mutable JSON type and this code's
-    // domain type. A SAFETY comment on every assertion is review noise; the
-    // schemas and tests that produce the inputs are the evidence.
-    "anti-slop/require-safety-comment-for-type-assertion": "off",
-    // A mutable dictionary such as `Record<string, PolicyEffect>` is the
-    // contract when entries are added and removed dynamically. Inferred keys
-    // would make those mutations a type error.
-    "anti-slop/no-known-value-widening": "off",
+    "anti-slop/require-safety-comment-for-type-assertion": "error",
     "anti-slop-effect/no-manual-effect-error-tag": "error",
     "anti-slop-effect/no-manual-tag-comparison": "error",
     "anti-slop-effect/no-manual-tagged-construction": "warn",
@@ -177,20 +162,8 @@ export const antiSlopLint = {
   },
   overrides: [
     {
-      // The session metadata type is mutable JSON in the SDK, while a Discord
-      // context carries readonly fields. The cast goes through unknown at that
-      // one boundary; the context is JSON by construction.
-      files: ["src/session/agent.ts", "src/plugins/discord/tools.ts", "src/plugins/discord/schedule.ts"],
-      rules: { "anti-slop/no-chained-type-assertions": "off" },
-    },
-    {
       files: ["**/*.test.ts", "**/*.test.tsx", "**/tests/**"],
-      rules: {
-        "typescript/no-explicit-any": "off",
-        // Tests deliberately construct malformed and partial fixtures, which
-        // often needs a cast through unknown to model the wire shape.
-        "anti-slop/no-chained-type-assertions": "off",
-      },
+      rules: { "typescript/no-explicit-any": "off" },
     },
   ],
 } satisfies OxlintConfig;
