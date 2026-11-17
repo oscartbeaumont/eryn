@@ -5,6 +5,10 @@
  * an unknown error, so it has to work for anything that can be thrown.
  */
 
+import { Option, Schema } from "effect";
+
+import { stringField } from "./json.ts";
+
 /** A failure raised by the bot's own logic, carrying a human-readable message. */
 export class BotError extends Error {
 	constructor(message: string) {
@@ -18,15 +22,23 @@ export function botError(message: string): BotError {
 	return new BotError(message);
 }
 
-/** A one-line description of an unknown error, for logs and thread messages. */
-export function describeError(error: unknown): string {
+/**
+ * A thrown value as the JSON it can be inspected through.
+ *
+ * A `catch` binding is `unknown` by design, and this is the one boundary that
+ * turns it into something readable: an error that is not JSON is described by
+ * its `Error` fields instead.
+ */
+export function thrownJson<Thrown>(error: Thrown): Schema.Json | undefined {
+	return Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Json)(error));
+}
+
+/** A one-line description of a thrown value, for logs and thread messages. */
+export function describeError<Thrown>(error: Thrown): string {
 	if (error instanceof Error) return error.message;
+	const message = stringField(thrownJson(error), "message");
 
-	if (error && typeof error === "object") {
-		const message = (error as { message?: unknown }).message;
-
-		if (typeof message === "string" && message.trim()) return message;
-	}
+	if (message !== undefined && message.trim()) return message;
 
 	return String(error);
 }
@@ -38,7 +50,7 @@ export function describeError(error: unknown): string {
  * never leaves the object. A bucket is enough to tell "the key is wrong" from
  * "the model ran out of context" in a dashboard.
  */
-export function classifyError(error: unknown): string {
+export function classifyError<Thrown>(error: Thrown): string {
 	const message = describeError(error).toLowerCase();
 
 	// Check quota first: an exhausted account often also arrives as a 429, and

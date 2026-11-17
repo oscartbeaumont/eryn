@@ -56,12 +56,15 @@ export class ConversationTicket {
 	}
 }
 
+/** Reports a failed queued task; the error is described, never inspected. */
+type ErrorReporter = <Thrown>(message: string, error: Thrown) => void;
+
 export class ConversationQueues {
 	private readonly queues = new Map<string, Entry[]>();
 	private readonly draining = new Set<string>();
-	private readonly onError: (message: string, error: unknown) => void;
+	private readonly onError: ErrorReporter;
 
-	constructor(onError: (message: string, error: unknown) => void) {
+	constructor(onError: ErrorReporter) {
 		this.onError = onError;
 	}
 

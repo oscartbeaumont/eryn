@@ -16,13 +16,15 @@ import {
 	type DiscordModal,
 	type DiscordSelectOption,
 } from "../../discord/components";
-import type { Policy, PolicyEffect, PolicyPreset, ProfilesState } from "../../session/models";
+import type { Policy, PolicyEffect, ProfilesState } from "../../session/models";
 import {
 	DEFAULT_PROFILE,
 	GROUP_LABELS,
 	MCP_ALL,
 	POLICY_GROUPS,
 	PRESET_HINTS,
+	isBuiltinProfile,
+	isPolicyGroup,
 	profileDefinition,
 	summaryLines,
 } from "../../session/policy";
@@ -68,7 +70,7 @@ function customProfiles(state: ProfilesState) {
 }
 
 function hint(profile: ProfilesState["profiles"][number]): string {
-	return PRESET_HINTS[profile.id as PolicyPreset] ?? "Custom profile";
+	return (isBuiltinProfile(profile.id) ? PRESET_HINTS[profile.id] : undefined) ?? "Custom profile";
 }
 
 function profileOptions(state: ProfilesState): DiscordSelectOption[] {
@@ -204,6 +206,8 @@ async function detail(request: InteractionRequest, id: string): Promise<void> {
 			? "Built-in profiles can be used as the server default or per channel, but not edited."
 			: "A custom profile. It can be selected as the server default or per channel.",
 		"",
+		// SAFETY: a profile carries effect tables for tools and MCP servers, which is
+		// the whole of a policy the summary below reads.
 		...summaryLines({ tools: profile.tools, mcp: profile.mcp } as Policy, []),
 	];
 
@@ -261,7 +265,9 @@ function effectWord(effect: PolicyEffect | undefined): string {
 }
 
 function groupTitle(key: string): string {
-	return key === "mcp" ? "All MCP servers" : (GROUP_LABELS[key as keyof typeof GROUP_LABELS] ?? key);
+	return key === "mcp"
+		? "All MCP servers"
+		: ((isPolicyGroup(key) ? GROUP_LABELS[key] : undefined) ?? key);
 }
 
 function currentEffect(profile: ProfilesState["profiles"][number], key: string): PolicyEffect {

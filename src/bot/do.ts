@@ -298,6 +298,8 @@ export class BotGateway extends DurableObject<Env> {
 			// The Worker already answered Discord with a 202, so this handler still
 			// acknowledges through the interaction callback endpoint. The payload is
 			// passed on untouched; only the ids the bot needs are checked here.
+			// SAFETY: `InteractionBodySchema` checked the fields the bot reads; the
+			// rest of Discord's interaction document is passed through untouched.
 			await this.onInteraction(body as DiscordInteraction);
 			await this.ensureCommands();
 

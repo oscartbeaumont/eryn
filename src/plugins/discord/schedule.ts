@@ -9,11 +9,13 @@
  */
 
 import type { Plugin } from "@opencode/plugin";
+import { Option, Schema } from "effect";
 
 import { log } from "../../config";
 import type { DiscordRest } from "../../discord/api";
 import { DiscordAuthority } from "../../discord/authority";
 import { describeError } from "../../errors";
+import { jsonField, stringField } from "../../json.ts";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
 import {
 	addChannelToScope,
@@ -27,9 +29,6 @@ import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } fro
 
 type ScheduleTool = "create" | "delete";
 
-/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
-type SessionMetadata = NonNullable<Parameters<Plugin.Context["session"]["update"]>[0]["metadata"]>;
-
 /** The effective tool name is `opencode_schedule_create` or similar. */
 function scheduleTool(tool: string): ScheduleTool | undefined {
 	const name = tool.slice(tool.lastIndexOf(".") + 1);
@@ -41,17 +40,8 @@ function scheduleTool(tool: string): ScheduleTool | undefined {
 	return undefined;
 }
 
-function scheduleId(value: unknown): string | undefined {
-	if (!value || typeof value !== "object") return undefined;
-
-	if (typeof (value as { id?: unknown }).id === "string") return (value as { id: string }).id;
-	const output = (value as { output?: unknown }).output;
-
-	if (output && typeof output === "object" && typeof (output as { id?: unknown }).id === "string") {
-		return (output as { id: string }).id;
-	}
-
-	return undefined;
+function scheduleId(value: Schema.Json | undefined): string | undefined {
+	return stringField(value, "id") ?? stringField(jsonField(value, "output"), "id");
 }
 
 async function readContext(ctx: Plugin.Context, sessionID: string): Promise<DiscordContext | undefined> {
@@ -113,6 +103,8 @@ async function writeScope(
 		const next = update(latest);
 
 		if (!next) return;
+		// SAFETY: OpenCode spells metadata JSON with mutable arrays, while a decoded
+		// `DiscordContext` holds readonly ones; it is the same JSON.
 		await ctx.session.update({
 			sessionID,
 			metadata: {
@@ -123,7 +115,7 @@ async function writeScope(
 				[DISCORD_METADATA_KEY]: next.scope
 					? { ...latest, scheduleScope: next.scope }
 					: { ...latest, scheduleScope: undefined },
-			} as unknown as SessionMetadata,
+			} as never,
 		});
 	});
 }
@@ -172,7 +164,7 @@ export async function registerScheduleScope(
 		if (!context) return;
 
 		if (kind === "create") {
-			const id = scheduleId(event.result);
+			const id = scheduleId(event.result.output);
 
 			// Without the returned id there is no safe scope to grant. The
 			// schedule still exists, but its turns fail closed as no-speaker
@@ -215,7 +207,10 @@ export async function registerScheduleScope(
 		}
 
 		if (!context.scheduleScope) return;
-		const id = scheduleId(event.input) ?? scheduleId(event.result);
+
+		const id =
+			scheduleId(Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Json)(event.input))) ??
+			scheduleId(event.result.output);
 
 		if (!id) return;
 		await writeScope(ctx, event.sessionID, (latest) => {

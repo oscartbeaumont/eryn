@@ -38,13 +38,19 @@ export function encodeProviderChoice(providerId: string, methods: readonly Integ
 	return `${providerId}|${CODE_FOR[providerChoice(methods)]}`;
 }
 
+/** A picker value split back into the provider it names and, if present, its hint. */
+export interface ProviderChoiceValue {
+	readonly providerId: string;
+	readonly choice?: ProviderChoice;
+}
+
 /**
  * Split a picker value back into its provider and, when present, its hint.
  *
  * A value without a recognised hint is a screen rendered by an older build, so
  * the caller takes the slow but always-correct path.
  */
-export function decodeProviderChoice(value: string): { providerId: string; choice?: ProviderChoice } {
+export function decodeProviderChoice(value: string): ProviderChoiceValue {
 	const separator = value.lastIndexOf("|");
 
 	if (separator <= 0) return { providerId: value };

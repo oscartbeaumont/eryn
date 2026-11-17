@@ -10,7 +10,7 @@
  */
 
 import { env } from "cloudflare:workers";
-import { Result } from "effect";
+import { Result, type Schema } from "effect";
 import { Hex } from "effect/encoding";
 import solidHandler from "virtual:solid-ssr-handler";
 
@@ -26,10 +26,16 @@ import { withDeploy, withOrigin } from "./deploy";
 import { application, applicationId, ensureEndpoint } from "./discord/application";
 import type { DiscordInteraction } from "./discord/socket";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
+import { stringField } from "./json.ts";
 import { installUrl } from "./public";
 import { BotSession } from "./session/do";
 
 export { BotGateway, BotSession };
+
+/** Whether a field of a forwarded payload is text. */
+function isText<Value>(value: Value): value is Value & string {
+	return typeof value === "string";
+}
 
 /** What the bot object reports about itself, as `/health` passes it on. */
 interface WakeState {
@@ -58,6 +64,8 @@ export async function wake(env: Env, origin?: string): Promise<WakeState | undef
 
 		if (!response.ok) return undefined;
 
+		// SAFETY: `/wake` is this deployment's own Durable Object, and the fields
+		// read below are the ones it writes.
 		return (await response.json().catch(() => undefined)) as WakeState | undefined;
 	};
 
@@ -155,6 +163,8 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 	let interaction: DiscordInteraction | undefined;
 
 	try {
+		// SAFETY: the body is Discord's signed interaction document; the fields the
+		// bot depends on are checked below before it is forwarded.
 		interaction = JSON.parse(body) as DiscordInteraction;
 	} catch {
 		return new Response("bad request", { status: 400 });
@@ -164,7 +174,7 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 	// answered if it gets a PONG back.
 	if (interaction?.type === 1) return Response.json({ type: 1 });
 
-	if (typeof interaction?.id !== "string" || typeof interaction.token !== "string") {
+	if (!isText(interaction?.id) || !isText(interaction.token)) {
 		return new Response("bad request", { status: 400 });
 	}
 
@@ -315,11 +325,13 @@ async function readPointer(
 	const secret = sessionSecret(env);
 
 	if (!secret || !token) return undefined;
-	const pointer = await verify<{ guildId?: unknown; attemptId?: unknown }>(token, secret);
+	const pointer = await verify<Schema.JsonObject>(token, secret);
+	const guildId = stringField(pointer, "guildId");
+	const attemptId = stringField(pointer, "attemptId");
 
-	if (typeof pointer?.guildId !== "string" || typeof pointer.attemptId !== "string") return undefined;
+	if (guildId === undefined || attemptId === undefined) return undefined;
 
-	return { guildId: pointer.guildId, attemptId: pointer.attemptId };
+	return { guildId, attemptId };
 }
 
 /** A sign-in link whose signed pointer is gone or was never valid. */

@@ -230,10 +230,7 @@ function clientInformation(clientId: string, clientSecret?: string): OAuthClient
  * endpoint and nothing else. The SDK accepts a partial document as long as the
  * fields it reads are present.
  */
-function tokenRequest(tokenEndpoint: string): {
-	authorizationServerUrl: string;
-	metadata: AuthorizationServerMetadata;
-} {
+function tokenRequest(tokenEndpoint: string): TokenRequest {
 	const endpoint = requireTransport(tokenEndpoint, "the token endpoint");
 
 	return {
@@ -247,6 +244,12 @@ function tokenRequest(tokenEndpoint: string): {
 	};
 }
 
+/** What the OAuth client needs to talk to a server's token endpoint. */
+interface TokenRequest {
+	readonly authorizationServerUrl: string;
+	readonly metadata: AuthorizationServerMetadata;
+}
+
 function toTokens(tokens: OAuthTokens): McpTokens {
 	return {
 		accessToken: tokens.access_token,
@@ -257,7 +260,7 @@ function toTokens(tokens: OAuthTokens): McpTokens {
 }
 
 /** Turn a library error into the one-line answer a Discord message can show. */
-function fail(error: unknown): never {
+function fail<Thrown>(error: Thrown): never {
 	if (error instanceof McpOAuthError) throw error;
 
 	if (error instanceof RegistrationRejectedError) {

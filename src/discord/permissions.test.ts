@@ -48,7 +48,7 @@ const base = {
 	guildId: GUILD,
 	userId: "user-1",
 	roles: [role(GUILD, 0, 0n)],
-	memberRoleIds: [] as string[],
+	memberRoleIds: [] satisfies string[],
 };
 
 test("the guild owner has every permission", () => {

@@ -15,9 +15,17 @@ interface Captured {
 	init?: RequestInit;
 }
 
+/** Whether a request body is text rather than a form or a stream. */
+function isText(body: BodyInit | null | undefined): body is string {
+	return typeof body === "string";
+}
+
 /** Replace fetch for one test, returning a function that restores it. */
 function captureFetch(captured: Captured): () => void {
 	const original = globalThis.fetch;
+
+	// SAFETY: the stub takes the same arguments `fetch` does and answers with a
+	// `Response`, which is what the client under test reads.
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		captured.url = String(input);
 		captured.init = init;
@@ -44,7 +52,7 @@ test("a message without files is sent as JSON", async () => {
 		assert.match(captured.url ?? "", /\/channels\/123\/messages$/);
 		const headers = new Headers(captured.init?.headers);
 		assert.equal(headers.get("content-type"), "application/json");
-		assert.equal(typeof captured.init?.body, "string");
+		assert.ok(isText(captured.init?.body));
 	} finally {
 		restore();
 	}
@@ -77,7 +85,9 @@ test("a message with files is uploaded as multipart form data", async () => {
 		assert.ok(first instanceof Blob);
 		assert.equal(first.type, "");
 		assert.equal(await first.text(), "# Breakdown");
-		assert.equal(await (body.get("files[1]") as Blob).text(), "extra");
+		const second = body.get("files[1]");
+		assert.ok(second instanceof Blob);
+		assert.equal(await second.text(), "extra");
 
 		// fetch has to set the multipart boundary itself; a JSON content type
 		// here would make the body unreadable to Discord.

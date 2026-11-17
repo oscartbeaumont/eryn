@@ -23,8 +23,13 @@ function isLoopback(hostname: string): boolean {
 /** The loopback hosts a development deployment may talk to over plain HTTP. */
 export { isLoopback };
 
-/** A JSON response body with the status the caller wants. */
-export function json(body: unknown, status = 200): Response {
+/**
+ * A JSON response body with the status the caller wants.
+ *
+ * The body is passed straight to the platform's encoder, so its parameter type
+ * is the contract: callers build plain data and `Response.json` serialises it.
+ */
+export function json(body: Parameters<typeof Response.json>[0], status = 200): Response {
 	return Response.json(body, { status });
 }
 
@@ -48,7 +53,7 @@ export async function fetchWithRedirects(
 	input: URL | string,
 	init: RequestInit = {},
 ): Promise<Response> {
-	let current = typeof input === "string" ? new URL(input) : input;
+	let current = input instanceof URL ? input : new URL(input);
 	// Loopback HTTP is a development escape hatch, but only for the first hop:
 	// an external HTTPS server must not be able to redirect into the local host.
 	const allowLoopback = current.protocol === "http:" && isLoopback(current.hostname);

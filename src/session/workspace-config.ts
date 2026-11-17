@@ -10,6 +10,7 @@
 
 import { ConfigMarkdown } from "@opencode/core/config/markdown";
 import type { Configuration } from "@opencode/sdk/workerd";
+import type { Schema } from "effect";
 import { parse, type ParseError } from "jsonc-parser";
 
 import { log } from "../config.ts";
@@ -71,23 +72,56 @@ function text(store: FileStore, path: string): Promise<string | undefined> {
 	return store.get(path).then((file) => (file ? bytesToText(base64ToBytes(file.b)) : undefined));
 }
 
-function record(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: undefined;
+/**
+ * A JSON object whose optional members may be absent.
+ *
+ * This is the shape of a parsed config document: every leaf is decoded by the
+ * field readers below before it reaches the host, and anything left over is
+ * passed through for OpenCode to validate.
+ */
+interface ConfigObject {
+	[field: string]: Schema.Json | undefined;
 }
 
-function string(value: unknown): string | undefined {
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+/** One Markdown command, in the form OpenCode's config accepts. */
+interface CommandConfig {
+	readonly template: string;
+	readonly description?: string;
+	readonly agent?: string;
+	readonly model?: string;
+	readonly subagent?: boolean;
+	readonly subtask?: boolean;
 }
 
-function boolean(value: unknown): boolean | undefined {
-	return typeof value === "boolean" ? value : undefined;
+/** A JSON object, when the value is one. */
+function isJsonObject(value: Schema.Json | undefined): value is Schema.JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseConfig(source: string, body: string): Configuration {
+/** A JSON object, or `undefined` for every other JSON value. */
+function record(value: Schema.Json | undefined): Schema.JsonObject | undefined {
+	return isJsonObject(value) ? value : undefined;
+}
+
+/** A string value; anything else is not a string. */
+function isString(value: Schema.Json | undefined): value is string {
+	return typeof value === "string";
+}
+
+/** A non-empty, trimmed string value, or `undefined`. */
+function string(value: Schema.Json | undefined): string | undefined {
+	if (!isString(value)) return undefined;
+
+	return value.trim() ? value.trim() : undefined;
+}
+
+function boolean(value: Schema.Json | undefined): boolean | undefined {
+	return value === true || value === false ? value : undefined;
+}
+
+function parseConfig(source: string, body: string): ConfigObject {
 	const errors: ParseError[] = [];
-	const parsed: unknown = parse(body, errors, { allowTrailingComma: true });
+	const parsed = parse(body, errors, { allowTrailingComma: true });
 
 	if (errors.length) {
 		log("session", `ignored ${source}: invalid JSONC`);
@@ -103,15 +137,15 @@ function parseConfig(source: string, body: string): Configuration {
 		return {};
 	}
 
-	return object as Configuration;
+	return object;
 }
 
 /** Only HTTP(S) entries survive: local paths would resolve against `node:fs`. */
-function urls(value: unknown): string[] | undefined {
+function urls(value: Schema.Json | undefined): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 
 	const found = value.filter((entry): entry is string => {
-		if (typeof entry !== "string") return false;
+		if (!isString(entry)) return false;
 
 		try {
 			const protocol = new URL(entry).protocol;
@@ -125,7 +159,7 @@ function urls(value: unknown): string[] | undefined {
 	return found.length ? found : undefined;
 }
 
-function safe(value: unknown, field: string, source: string): string | undefined {
+function safe(value: Schema.Json | undefined, field: string, source: string): string | undefined {
 	if (value === undefined) return undefined;
 	const parsed = string(value);
 
@@ -134,8 +168,8 @@ function safe(value: unknown, field: string, source: string): string | undefined
 	return parsed;
 }
 
-async function commands(store: FileStore): Promise<Record<string, Record<string, unknown>>> {
-	const result: Record<string, Record<string, unknown>> = {};
+async function commands(store: FileStore): Promise<Record<string, CommandConfig>> {
+	const result: Record<string, CommandConfig> = {};
 
 	for (const entry of await store.list(COMMANDS_ROOT)) {
 		if (!entry.path.endsWith(".md")) continue;
@@ -166,7 +200,7 @@ async function commands(store: FileStore): Promise<Record<string, Record<string,
 		const subagent = boolean(data.subagent);
 		const subtask = boolean(data.subtask);
 
-		const info: Record<string, unknown> = {
+		const info: CommandConfig = {
 			template,
 			...(description ? { description } : {}),
 			...(agent ? { agent } : {}),
@@ -253,8 +287,8 @@ const AGENT_FIELDS = new Set([
  * alias. Unsupported frontmatter is ignored so one bad key cannot fail the
  * whole host config.
  */
-async function markdownAgents(store: FileStore): Promise<Record<string, Record<string, unknown>>> {
-	const found: Record<string, Record<string, unknown>> = {};
+async function markdownAgents(store: FileStore): Promise<Record<string, ConfigObject>> {
+	const found: Record<string, ConfigObject> = {};
 
 	for (const root of [AGENTS_ROOT, LEGACY_AGENTS_ROOT]) {
 		for (const entry of await store.list(root)) {
@@ -276,13 +310,11 @@ async function markdownAgents(store: FileStore): Promise<Record<string, Record<s
 				Object.entries(record(markdown.data) ?? {}).filter(([key]) => AGENT_FIELDS.has(key)),
 			);
 
-			if (
-				typeof data.model === "string" &&
-				!data.model.includes("#") &&
-				typeof data.variant === "string" &&
-				/^[^#]+$/.test(data.variant)
-			) {
-				data.model = `${data.model}#${data.variant}`;
+			const model = string(data.model);
+			const variant = string(data.variant);
+
+			if (model && variant && !model.includes("#") && /^[^#]+$/.test(variant)) {
+				data.model = `${model}#${variant}`;
 			}
 
 			delete data.variant;
@@ -298,32 +330,33 @@ async function markdownAgents(store: FileStore): Promise<Record<string, Record<s
 }
 
 /** Protect command shell blocks in inline config before OpenCode sees them. */
-function protectInlineCommands(value: unknown): Record<string, unknown> | undefined {
-	const entries = record(value);
+function protectInlineCommands(value: Schema.Json | undefined): ConfigObject | undefined {
+	if (!isJsonObject(value)) return undefined;
+	const result: ConfigObject = {};
 
-	if (!entries) return undefined;
-	const result: Record<string, unknown> = {};
-
-	for (const [name, item] of Object.entries(entries)) {
-		const command = record(item);
+	for (const [name, item] of Object.entries(value)) {
+		const command = isJsonObject(item) ? item : undefined;
+		const template = command !== undefined && isString(command.template) ? command.template : undefined;
 		result[name] =
-			command && typeof command.template === "string"
-				? { ...command, template: protectShellBlocks(command.template) }
+			command !== undefined && template !== undefined
+				? { ...command, template: protectShellBlocks(template) }
 				: item;
 	}
 
 	return result;
 }
 
-/** Read every file that shapes a guild's host. */
-export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<WorkspaceConfig> {
-	const store = fileStore(storage);
-	const source = (await text(store, CONFIG_PATH)) ?? (await text(store, LEGACY_CONFIG_PATH));
-	const parsed = source ? parseConfig(CONFIG_PATH, source) : {};
-	const user = parsed as Record<string, unknown>;
-
-	// Fields OpenCode would resolve through `node:fs`, plus integrations Eryn
-	// owns, are removed before the config reaches the host.
+/**
+ * Merge the document, the Markdown files, and the base every host starts from.
+ *
+ * Fields OpenCode would resolve through `node:fs`, plus integrations Eryn owns,
+ * are removed before the config reaches the host.
+ */
+function assembleConfig(
+	user: ConfigObject,
+	localCommands: Record<string, CommandConfig>,
+	localAgents: Record<string, ConfigObject>,
+): Configuration {
 	const {
 		plugins: _plugins,
 		mcp: _mcp,
@@ -346,22 +379,24 @@ export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<Wo
 		...rest
 	} = user;
 
-	const localCommands = await commands(store);
-	const localAgents = await markdownAgents(store);
 	const inlineCommands = protectInlineCommands(userCommands);
 	const skillUrls = urls(userSkills);
 	const instructionUrls = urls(userInstructions);
 	const userAgentConfig = record(userAgents);
 
-	const config: Configuration = {
+	return {
 		...BASE_CONFIG,
+		// SAFETY: OpenCode validates the leftover keys; this module only strips its own.
 		...(rest as Configuration),
 		// A guild can add rules, but cannot remove the allow-all base Eryn's
 		// policy layer is written against.
+		// SAFETY: the entries are JSON from the document; OpenCode's policy schema
+		// validates the action, resource, and effect strings.
 		permissions: [
 			...BASE_CONFIG.permissions,
 			...(Array.isArray(userPermissions) ? userPermissions : []),
 		] as never,
+		// SAFETY: OpenCode validates the agent table; this merge picks the winners.
 		agents: {
 			...BASE_CONFIG.agents,
 			...userAgentConfig,
@@ -373,6 +408,7 @@ export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<Wo
 		} as never,
 		// Eryn relies on schedules and MCP event watches, so keep both enabled
 		// even when a hand-edited config omits or disables either flag.
+		// SAFETY: both flags are booleans; OpenCode validates the rest.
 		experimental: {
 			...record(userExperimental),
 			schedules: true,
@@ -382,6 +418,7 @@ export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<Wo
 		...(instructionUrls ? { instructions: instructionUrls } : {}),
 		...(Object.keys(inlineCommands ?? {}).length || Object.keys(localCommands).length
 			? {
+					// SAFETY: both halves hold commands with string templates.
 					commands: {
 						...inlineCommands,
 						...localCommands,
@@ -389,6 +426,14 @@ export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<Wo
 				}
 			: {}),
 	};
+}
+
+/** Read every file that shapes a guild's host. */
+export async function readWorkspaceConfig(storage: WorkspaceStorage): Promise<WorkspaceConfig> {
+	const store = fileStore(storage);
+	const source = (await text(store, CONFIG_PATH)) ?? (await text(store, LEGACY_CONFIG_PATH));
+	const user = source ? parseConfig(CONFIG_PATH, source) : {};
+	const config = assembleConfig(user, await commands(store), await markdownAgents(store));
 
 	return {
 		config,

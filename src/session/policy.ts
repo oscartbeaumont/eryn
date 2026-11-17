@@ -9,6 +9,11 @@
 
 import type { McpLink, Policy, PolicyEffect, PolicyPreset, PolicyProfile } from "./models";
 
+/** The effect chosen for each tool group or MCP server. */
+export interface EffectTable {
+	[group: string]: PolicyEffect;
+}
+
 /** Groups the menu offers. A preset expands into every one of these. */
 export const POLICY_GROUPS = [
 	"workspace",
@@ -24,6 +29,11 @@ export const POLICY_GROUPS = [
 ] as const;
 
 export type PolicyGroup = (typeof POLICY_GROUPS)[number];
+
+/** Whether a key names one of the groups the menu offers. */
+export function isPolicyGroup(key: string): key is PolicyGroup {
+	return POLICY_GROUPS.some((group) => group === key);
+}
 
 /** The tools each group covers. Names are the names OpenCode gives the action. */
 export const GROUP_TOOLS: Record<PolicyGroup, readonly string[]> = {
@@ -191,7 +201,7 @@ const PRESET_MCP: Record<PolicyPreset, PolicyEffect> = {
 export const MCP_ALL = "*";
 
 /** Whether an id names a built-in profile rather than a custom one. */
-export function isBuiltinProfile(id: string): boolean {
+export function isBuiltinProfile(id: string): id is PolicyPreset {
 	return id in PRESETS;
 }
 
@@ -217,9 +227,9 @@ export function profileList(custom: readonly PolicyProfile[]): PolicyProfile[] {
 export function profileDefinition(
 	id: string,
 	custom: readonly PolicyProfile[],
-): { tools: Record<string, PolicyEffect>; mcp: Record<string, PolicyEffect> } | undefined {
+): { tools: EffectTable; mcp: EffectTable } | undefined {
 	if (isBuiltinProfile(id)) {
-		return { tools: { ...PRESETS[id as PolicyPreset] }, mcp: { [MCP_ALL]: PRESET_MCP[id as PolicyPreset] } };
+		return { tools: { ...PRESETS[id] }, mcp: { [MCP_ALL]: PRESET_MCP[id] } };
 	}
 
 	const found = custom.find((profile) => profile.id === id);
@@ -228,8 +238,8 @@ export function profileDefinition(
 }
 
 /** A custom profile's tools completed from Standard, so every group has a value. */
-export function completeTools(tools: Record<string, PolicyEffect> = {}): Record<string, PolicyEffect> {
-	const complete: Record<string, PolicyEffect> = { ...PRESETS.standard };
+export function completeTools(tools: EffectTable = {}): EffectTable {
+	const complete: EffectTable = { ...PRESETS.standard };
 
 	for (const group of POLICY_GROUPS) {
 		const effect = tools[group];
@@ -241,7 +251,7 @@ export function completeTools(tools: Record<string, PolicyEffect> = {}): Record<
 }
 
 /** A custom profile's MCP map completed with the all-servers default. */
-export function completeMcp(mcp: Record<string, PolicyEffect> = {}): Record<string, PolicyEffect> {
+export function completeMcp(mcp: EffectTable = {}): EffectTable {
 	return { [MCP_ALL]: mcp[MCP_ALL] ?? "allow", ...mcp };
 }
 
@@ -256,8 +266,8 @@ export function resolvePolicy(
 	layers: readonly (Policy | undefined)[],
 	custom: readonly PolicyProfile[] = [],
 ): Policy {
-	let tools: Record<string, PolicyEffect> = { ...PRESETS[DEFAULT_PROFILE] };
-	let mcp: Record<string, PolicyEffect> = { [MCP_ALL]: PRESET_MCP[DEFAULT_PROFILE] };
+	let tools: EffectTable = { ...PRESETS[DEFAULT_PROFILE] };
+	let mcp: EffectTable = { [MCP_ALL]: PRESET_MCP[DEFAULT_PROFILE] };
 	let elicitation: Policy["elicitation"] = "discord";
 	let profile: string = DEFAULT_PROFILE;
 
@@ -339,7 +349,11 @@ export interface PermissionRule {
 export function compilePermissions(policy: Policy, links: readonly McpLink[]): PermissionRule[] {
 	const rules: PermissionRule[] = [];
 	const effects = policy.tools ?? {};
-	const groups = Object.entries(effects).filter(([key]) => key in GROUP_TOOLS);
+
+	const groups = Object.entries(effects).filter(
+		(entry): entry is [PolicyGroup, PolicyEffect] => entry[0] in GROUP_TOOLS,
+	);
+
 	const exact = Object.entries(effects).filter(([key]) => !(key in GROUP_TOOLS));
 
 	const add = (action: string, effect: PolicyEffect, explicitAllow = false) => {
@@ -354,7 +368,7 @@ export function compilePermissions(policy: Policy, links: readonly McpLink[]): P
 	};
 
 	for (const [group, effect] of groups) {
-		for (const tool of GROUP_TOOLS[group as PolicyGroup]) add(tool, effect);
+		for (const tool of GROUP_TOOLS[group]) add(tool, effect);
 	}
 
 	const mcp = policy.mcp ?? {};
@@ -414,7 +428,7 @@ export function policyTitle(policy: Policy, custom: readonly PolicyProfile[] = [
 	if (!id) return "Custom";
 	const found = profileList(custom).find((profile) => profile.id === id);
 
-	return found?.name ?? PRESET_LABELS[id as PolicyPreset] ?? id;
+	return found?.name ?? (isBuiltinProfile(id) ? PRESET_LABELS[id] : id);
 }
 
 const EFFECT_LABELS: Record<PolicyEffect, string> = {
@@ -454,7 +468,7 @@ function discordSummary(discord: readonly (PolicyEffect | undefined)[]): string 
 }
 
 /** The MCP line, with the servers that differ from the all-servers default. */
-function mcpSummary(mcp: Record<string, PolicyEffect>, servers: readonly string[]): string {
+function mcpSummary(mcp: EffectTable, servers: readonly string[]): string {
 	const all = mcp[MCP_ALL] ?? "allow";
 	const blocked = servers.filter((server) => (mcp[server] ?? all) === "block");
 
@@ -511,6 +525,11 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
 	return lines;
 }
 
+/** The patch one approval writes: the effect for a single action. */
+export interface PolicyOverride {
+	readonly tools: EffectTable;
+}
+
 /**
  * Where a rule lives, so an approval writes the smallest possible override.
  *
@@ -518,7 +537,7 @@ export function summaryLines(policy: Policy, servers: readonly string[]): string
  * the whole server, so approving a read once does not allow every destructive
  * tool the same server exposes.
  */
-export function overrideFor(action: string, effect: PolicyEffect): { tools: Record<string, PolicyEffect> } {
+export function overrideFor(action: string, effect: PolicyEffect): PolicyOverride {
 	return { tools: { [action]: effect } };
 }
 

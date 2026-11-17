@@ -11,9 +11,10 @@
  */
 
 import { Plugin } from "@opencode/plugin";
+import type { Schema } from "effect";
 
 import { WORKSPACE_ROOT } from "../../session/locations";
-import { objectSchema, toolRun, type ToolCall, type ToolSpec } from "../tool";
+import { declaredInput, objectSchema, toolRun, type ToolCall, type ToolSpec } from "../tool";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes";
 import { resolvePath, resolveToolPath } from "./paths.ts";
 import { runShell } from "./shell";
@@ -79,7 +80,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				["filePath"],
 			),
 			async run(rawInput, call) {
-				const { filePath, offset, limit } = rawInput as ReadInput;
+				const { filePath, offset, limit } = declaredInput<ReadInput>(rawInput);
 				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
 
@@ -106,7 +107,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				["filePath", "content"],
 			),
 			async run(rawInput, call) {
-				const { filePath, content } = rawInput as FileInput & { content: string };
+				const { filePath, content } = declaredInput<FileInput & { content: string }>(rawInput);
 				const path = await resolve({ filePath }, call, "file");
 				await writeText(store, path, content);
 
@@ -127,7 +128,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				["filePath", "oldString", "newString"],
 			),
 			async run(rawInput, call) {
-				const { filePath, oldString, newString, replaceAll } = rawInput as EditInput;
+				const { filePath, oldString, newString, replaceAll } = declaredInput<EditInput>(rawInput);
 				const path = await resolve({ filePath }, call, "file");
 				const text = await readText(store, path);
 
@@ -154,7 +155,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				path: { type: "string", description: "Directory to list (defaults to the workspace root)" },
 			}),
 			async run(rawInput, call) {
-				const { path: directory } = rawInput as { path?: string };
+				const { path: directory } = declaredInput<{ path?: string }>(rawInput);
 				const prefix = await resolve({ path: directory }, call, "dir");
 				const files = (await store.list(prefix)).map((entry) => entry.path);
 
@@ -174,7 +175,7 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 				["command"],
 			),
 			async run(rawInput) {
-				const { command, cwd } = rawInput as { command: string; cwd?: string };
+				const { command, cwd } = declaredInput<{ command: string; cwd?: string }>(rawInput);
 				const workingDirectory = resolvePath(WORKSPACE_ROOT, cwd ?? ".");
 				const result = await runShell(store, command, workingDirectory, WORKSPACE_ROOT);
 				const body = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
@@ -196,7 +197,9 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 						name: spec.name,
 						description: spec.description,
 						input: spec.input,
-						execute: toolRun(spec, ctx),
+						// SAFETY: the editor validates a call against `spec.input` before it
+						// reaches `execute`, so the object matches the declared schema.
+						execute: (input, context) => toolRun(spec, ctx)(input as Schema.JsonObject, context),
 					});
 				}
 			});

@@ -18,6 +18,7 @@ import { log } from "../config";
 import { deployRestart } from "../deploy";
 import { discordRest, type DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
+import { isNumber } from "../json.ts";
 import { json } from "../http";
 import { refreshLinks } from "../mcp/links";
 import { createGuildAgent, type GuildAgent } from "./agent";
@@ -166,10 +167,12 @@ export class BotSession extends DurableObject<Env> {
 	private scheduleDueAt(): number | null {
 		try {
 			const row = this.ctx.storage.sql
-				.exec("SELECT MIN(next_due_at) AS due FROM schedule WHERE status = 'active' AND next_due_at IS NOT NULL")
-				.one() as { due: number | null };
+				.exec<{ due: number | null }>(
+					"SELECT MIN(next_due_at) AS due FROM schedule WHERE status = 'active' AND next_due_at IS NOT NULL",
+				)
+				.one();
 
-			return typeof row.due === "number" ? row.due : null;
+			return isNumber(row.due) ? row.due : null;
 		} catch {
 			// The table only exists once a session has had schedules enabled.
 			return null;
@@ -204,12 +207,12 @@ export class BotSession extends DurableObject<Env> {
 	private scheduleBusy(): boolean {
 		try {
 			const row = this.ctx.storage.sql
-				.exec(
+				.exec<{ busy: number }>(
 					`SELECT COUNT(*) AS busy FROM session_v2
 					 WHERE time_suspended IS NOT NULL
 					    OR (time_busy IS NOT NULL AND (time_idle IS NULL OR time_busy > time_idle))`,
 				)
-				.one() as { busy: number };
+				.one();
 
 			return Number(row.busy) > 0;
 		} catch {

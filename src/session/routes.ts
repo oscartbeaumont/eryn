@@ -7,13 +7,14 @@
  * its lifecycle (alarms, deploys, scheduling) rather than its endpoints.
  */
 
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 
 import { analytics as productAnalytics } from "../analytics";
 import { isValidModel, log } from "../config";
 import type { DiscordRest } from "../discord/api";
 import { describeError } from "../errors";
 import { json } from "../http";
+import { stringField, toJsonObject } from "../json.ts";
 import { describeTools } from "../mcp/describe";
 import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "../mcp/links";
 import { applyElicitation } from "../mcp/elicitation";
@@ -87,16 +88,31 @@ function urlHost(url: string): string {
 	}
 }
 
-/** Parse a request body, or produce the `400` response it should get instead. */
+/**
+ * Parse a request body, or produce the `400` response it should get instead.
+ *
+ * Both the JSON document and its decoded value come back: the guild check reads
+ * the raw document, and the handler takes the value its schema produced.
+ */
 async function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 	request: Request,
-): Promise<S["Type"] | Response> {
+): Promise<{ readonly document: Schema.JsonObject; readonly value: S["Type"] } | Response> {
 	try {
-		return Schema.decodeUnknownSync(schema)((await request.json()) as unknown);
+		const body = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Json)(await request.json()));
+
+		return {
+			document: toJsonObject(body) ?? {},
+			value: Schema.decodeUnknownSync(schema)(body),
+		};
 	} catch (error) {
 		return json({ error: `could not read the request: ${describeError(error)}` }, 400);
 	}
+}
+
+/** The route table, keyed by path. */
+interface RouteTable {
+	readonly [path: string]: Route;
 }
 
 interface Route {
@@ -104,32 +120,41 @@ interface Route {
 	readonly schema?: Schema.ConstraintDecoder<unknown>;
 	/** Whether the body names the guild and must match this object. */
 	readonly scoped?: boolean;
-	readonly handle: (body: unknown) => Promise<Response>;
-	readonly onFailure: (error: unknown) => Response;
+	/**
+	 * The route's handler.
+	 *
+	 * The parameter is `never` because the table is heterogeneous: each entry's
+	 * schema and handler agree, but the table only knows the erased shape.
+	 */
+	readonly handle: (body: never) => Promise<Response>;
+	readonly onFailure: ThrownFailure;
 }
 
-const internalFailure = (error: unknown) => json({ error: describeError(error) }, 500);
+/** A handler that turns a thrown failure into its response. */
+type ThrownFailure = <Thrown>(error: Thrown) => Response;
 
-const badGateway = (error: unknown) => json({ error: describeError(error) }, 502);
+const internalFailure: ThrownFailure = (error) => json({ error: describeError(error) }, 500);
 
-const probeFailure = (error: unknown) => json({ ok: false, tools: [], error: describeError(error) }, 502);
+const badGateway: ThrownFailure = (error) => json({ error: describeError(error) }, 502);
+
+const probeFailure: ThrownFailure = (error) => json({ ok: false, tools: [], error: describeError(error) }, 502);
 
 /** A route whose body names the guild, so it must match this object. */
 function route<S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 	handle: (body: S["Type"]) => Promise<Response>,
-	failure: (error: unknown) => Response = internalFailure,
+	failure: ThrownFailure = internalFailure,
 ): Route {
-	return { schema, scoped: true, handle: handle as (body: unknown) => Promise<Response>, onFailure: failure };
+	return { schema, scoped: true, handle, onFailure: failure };
 }
 
 /** A route whose body carries no guild id, such as an interrupt. */
 function openRoute<S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 	handle: (body: S["Type"]) => Promise<Response>,
-	failure: (error: unknown) => Response = internalFailure,
+	failure: ThrownFailure = internalFailure,
 ): Route {
-	return { schema, handle: handle as (body: unknown) => Promise<Response>, onFailure: failure };
+	return { schema, handle, onFailure: failure };
 }
 
 /** Build the route table and the dispatcher that serves it. */
@@ -147,7 +172,7 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 		if (firstProvider) await metrics.capture("setup_completed", { provider: integrationID, model: next.model });
 	};
 
-	const routes: Record<string, Route> = {
+	const routes: RouteTable = {
 		[ROUTES.config]: route(GuildRefSchema, async () => {
 			const settings = await store.settings();
 			const connections = await store.providers();
@@ -642,15 +667,17 @@ export function buildRoutes(ctx: RouteContext): (request: Request) => Promise<Re
 
 			if (parsed instanceof Response) return parsed;
 
-			if (found.scoped && guildId && (parsed as { guildId?: unknown }).guildId !== guildId) {
+			if (found.scoped && guildId && stringField(parsed.document, "guildId") !== guildId) {
 				return json({ error: "guild mismatch" }, 403);
 			}
 
-			body = parsed;
+			body = parsed.value;
 		}
 
 		try {
-			return await found.handle(body);
+			// SAFETY: `parseBody` decoded `body` with this route's schema, which is the
+			// type its handler takes; the table erases that type for every route.
+			return await found.handle(body as never);
 		} catch (error) {
 			return found.onFailure(error);
 		}

@@ -8,7 +8,10 @@
  * per isolate.
  */
 
+import { Option, Schema } from "effect";
+
 import { configuredOrigin, INTERACTIONS_PATH, log } from "../config";
+import { stringField } from "../json.ts";
 import { CLIENT_ID } from "../public";
 
 const API = "https://discord.com/api/v10";
@@ -52,20 +55,17 @@ async function fetchApplication(token: string): Promise<Application | undefined>
 			return undefined;
 		}
 
-		const body = (await response.json()) as {
-			id?: unknown;
-			verify_key?: unknown;
-			interactions_endpoint_url?: unknown;
-		};
+		const body = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Json)(await response.json()));
+		const id = stringField(body, "id");
 
-		if (typeof body.id !== "string") return undefined;
+		if (id === undefined) return undefined;
+		const verifyKey = stringField(body, "verify_key");
+		const endpoint = stringField(body, "interactions_endpoint_url");
 
 		return {
-			id: body.id,
-			...(typeof body.verify_key === "string" ? { verifyKey: body.verify_key } : {}),
-			...(typeof body.interactions_endpoint_url === "string"
-				? { endpoint: body.interactions_endpoint_url }
-				: {}),
+			id,
+			...(verifyKey === undefined ? {} : { verifyKey }),
+			...(endpoint === undefined ? {} : { endpoint }),
 		};
 	} catch (error) {
 		log("application", `could not read this application: ${String(error)}`);

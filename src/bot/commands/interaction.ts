@@ -8,6 +8,7 @@
 
 import type { Analytics } from "../../analytics";
 import { describeError } from "../../errors";
+import { isString } from "../../json.ts";
 import { actionButton, buttonRow } from "../../discord/components";
 import type { DiscordRest } from "../../discord/api";
 import type {
@@ -244,7 +245,7 @@ export function canManage(interaction: DiscordInteraction): boolean {
 	if (!interaction.guild_id) return true;
 	const raw = interaction.member?.permissions;
 
-	if (typeof raw !== "string") return false;
+	if (!isString(raw)) return false;
 
 	try {
 		return (BigInt(raw) & MANAGE_GUILD) !== 0n;

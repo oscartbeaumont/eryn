@@ -28,10 +28,14 @@ export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94
  * read without a declared binding so a fork can supply it, or omit it, freely.
  */
 export function optional(env: Env, name: string): string | undefined {
-	const bindings: Record<string, unknown> = { ...env };
-	const value = bindings[name];
+	const value = Object.entries(env).find(([key]) => key === name)?.[1];
 
-	return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+	return isText(value) && value.trim() !== "" ? value.trim() : undefined;
+}
+
+/** Whether a binding holds text rather than a service binding. */
+function isText<Binding>(value: Binding): value is Binding & string {
+	return typeof value === "string";
 }
 
 /** The public origin this deployment sets, normalised without a trailing slash. */

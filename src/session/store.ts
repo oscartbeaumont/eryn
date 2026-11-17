@@ -45,7 +45,7 @@ class GuildStoreImpl {
 		return this.secret;
 	}
 
-	private async seal(value: unknown): Promise<Sealed> {
+	private async seal(value: Schema.Json): Promise<Sealed> {
 		return await encryptSecret(this.requireSecret(), JSON.stringify(value));
 	}
 

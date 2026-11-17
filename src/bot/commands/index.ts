@@ -10,9 +10,10 @@
 import { Equal } from "effect";
 
 import type { DiscordCommand, DiscordCommandOption } from "../../discord/api";
-import type { DiscordInteraction } from "../../discord/socket";
+import type { DiscordCommandOptionPayload, DiscordInteraction } from "../../discord/socket";
 import { modalValues } from "../../discord/socket";
 import { describeError } from "../../errors";
+import { isString } from "../../json.ts";
 import type { PromptUser } from "../../session/models";
 import { scopedId, unmarshalId } from "../ids";
 import {
@@ -191,13 +192,10 @@ function requestFor(
 // --- Application commands ------------------------------------------------------
 
 /** One resolved string option on a subcommand. */
-function optionValue(sub: unknown, name: string): string | undefined {
-	const options = (sub as { options?: readonly { name?: string; value?: unknown }[] } | undefined)
-		?.options;
+function optionValue(sub: DiscordCommandOptionPayload | undefined, name: string): string | undefined {
+	const value = sub?.options?.find((option) => option.name === name)?.value;
 
-	const value = options?.find((option) => option.name === name)?.value;
-
-	return typeof value === "string" ? value : undefined;
+	return isString(value) ? value : undefined;
 }
 
 /** The accounts an interaction can carry; a guild member or a DM user. */

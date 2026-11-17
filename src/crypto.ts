@@ -7,6 +7,7 @@
  */
 
 import { Result } from "effect";
+import type { Schema } from "effect";
 import { Base64Url } from "effect/encoding";
 
 const encoder = new TextEncoder();
@@ -63,7 +64,7 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
 }
 
 /** Sign a JSON payload into a compact, URL-safe token. */
-export async function sign(payload: unknown, secret: string): Promise<string> {
+export async function sign(payload: Schema.Json, secret: string): Promise<string> {
 	const body = base64url(encoder.encode(JSON.stringify(payload)));
 	const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(body));
 
@@ -89,6 +90,8 @@ export async function verify<T>(token: string | undefined, secret: string): Prom
 
 		if (!valid) return undefined;
 
+		// SAFETY: the caller names the payload it signed with this secret; a token
+		// whose HMAC did not verify never reaches this line.
 		return JSON.parse(decoder.decode(fromBase64url(body))) as T;
 	} catch {
 		return undefined;

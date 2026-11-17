@@ -29,7 +29,9 @@ export function workspaceSkillsPlugin(
 							name: Skill.Name.make(skill.name),
 							...(skill.description ? { description: skill.description } : {}),
 							...(skill.autoinvoke === undefined ? {} : { autoinvoke: skill.autoinvoke }),
-							path: skill.path as never,
+							// SAFETY: the workspace stores this skill's absolute path; the
+							// `AbsolutePath` brand is only a compile-time marker for it.
+							path: skill.path as Skill.Info["path"],
 							content: [
 								skill.content,
 								`Supporting files, if any, live under \`${directory}\`. The \`read\` tool resolves relative paths in this skill against that directory.`,

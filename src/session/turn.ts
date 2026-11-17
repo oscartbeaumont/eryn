@@ -1,3 +1,8 @@
+import type { Schema } from "effect";
+
+import { thrownJson } from "../errors";
+import { stringField } from "../json.ts";
+
 /**
  * The in-memory state of one turn, and what a host event does to it.
  *
@@ -52,15 +57,14 @@ function complete(turn: Turn): void {
 }
 
 /** The error detail an SDK failure carries, if any. */
-function errorDetail(error: unknown): string | undefined {
-	if (!error || typeof error !== "object") return undefined;
-	const detail = error as { message?: unknown; type?: unknown };
+function errorDetail<Thrown>(error: Thrown): string | undefined {
+	if (error instanceof Error) return error.message.trim() || undefined;
+	const detail = thrownJson(error);
+	const message = stringField(detail, "message")?.trim();
 
-	if (typeof detail.message === "string" && detail.message.trim()) return detail.message.trim();
+	if (message) return message;
 
-	if (typeof detail.type === "string") return detail.type;
-
-	return undefined;
+	return stringField(detail, "type");
 }
 
 /**
@@ -70,7 +74,7 @@ function errorDetail(error: unknown): string | undefined {
  * event type. Assistant text events are ignored on purpose: the reply goes
  * through a Discord tool, not through the model's output.
  */
-export function applyTurnEvent(turn: Turn, type: string, data: Record<string, unknown>): void {
+export function applyTurnEvent(turn: Turn, type: string, data: Schema.JsonObject): void {
 	switch (type) {
 		case "session.execution.started":
 		case "session.step.started":

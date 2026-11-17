@@ -11,6 +11,8 @@
  */
 
 import { Cause, Duration, Effect, Option, Schedule, Schema } from "effect";
+
+import { booleanField, isJsonObject, jsonBody, jsonField, numberField, stringField } from "../json.ts";
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -160,12 +162,10 @@ const AuditLogSchema = Schema.Struct({
 });
 
 /** Seconds Discord asked us to wait, from a 429 body. Defaults to one second. */
-function retryDelay(body: unknown): number {
-	if (body && typeof body === "object" && "retry_after" in body) {
-		const value = (body as { retry_after?: unknown }).retry_after;
+function retryDelay(body: Schema.Json | undefined): number {
+	const value = numberField(body, "retry_after");
 
-		if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.min(value, 60) * 1_000 + 250;
-	}
+	if (value !== undefined && Number.isFinite(value) && value > 0) return Math.min(value, 60) * 1_000 + 250;
 
 	return 1_000;
 }
@@ -192,7 +192,7 @@ const retryRateLimits = Schedule.fromStep(
 		return Effect.succeed([
 			attempt,
 			Duration.millis(attempt.retryAfter ?? 1_000),
-		] as [Attempt, Duration.Duration]);
+		] satisfies [Attempt, Duration.Duration]);
 	}),
 ).pipe(Schedule.upTo({ times: MAX_RATE_LIMIT_RETRIES }));
 
@@ -224,53 +224,71 @@ export interface InteractionMessageOptions {
 	components?: readonly DiscordComponent[];
 }
 
-function permissionOverwrites(value: unknown): readonly PermissionOverwrite[] | undefined {
+function permissionOverwrites(value: Schema.Json | undefined): readonly PermissionOverwrite[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const parsed: PermissionOverwrite[] = [];
 
 	for (const entry of value) {
-		if (!entry || typeof entry !== "object") continue;
-		const overwrite = entry as Record<string, unknown>;
+		const id = stringField(entry, "id");
+		const type = numberField(entry, "type");
 
-		if (typeof overwrite.id !== "string" || typeof overwrite.type !== "number") continue;
+		if (id === undefined || type === undefined) continue;
 		parsed.push({
-			id: overwrite.id,
-			type: overwrite.type,
-			allow: typeof overwrite.allow === "string" ? overwrite.allow : "0",
-			deny: typeof overwrite.deny === "string" ? overwrite.deny : "0",
+			id,
+			type,
+			allow: stringField(entry, "allow") ?? "0",
+			deny: stringField(entry, "deny") ?? "0",
 		});
 	}
 
 	return parsed;
 }
 
-function channelRef(value: unknown): DiscordChannelRef | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const result = value as Record<string, unknown>;
+function channelRef(value: Schema.Json | undefined): DiscordChannelRef | undefined {
+	const id = stringField(value, "id");
+	const type = numberField(value, "type");
 
-	if (typeof result.id !== "string" || typeof result.type !== "number") return undefined;
-	const overwrites = permissionOverwrites(result.permission_overwrites);
+	if (id === undefined || type === undefined) return undefined;
+	const overwrites = permissionOverwrites(jsonField(value, "permission_overwrites"));
+	const guildId = stringField(value, "guild_id");
+	const parentId = stringField(value, "parent_id");
+	const name = stringField(value, "name");
+	const topic = stringField(value, "topic");
+	const position = numberField(value, "position");
+	const threadMetadata = threadMetadataOf(jsonField(value, "thread_metadata"));
 
 	return {
-		id: result.id,
-		type: result.type,
-		...(typeof result.guild_id === "string" ? { guild_id: result.guild_id } : {}),
-		...(typeof result.parent_id === "string" ? { parent_id: result.parent_id } : {}),
-		...(typeof result.name === "string" ? { name: result.name } : {}),
-		...(typeof result.topic === "string" ? { topic: result.topic } : {}),
-		...(typeof result.position === "number" ? { position: result.position } : {}),
+		id,
+		type,
+		...(guildId === undefined ? {} : { guild_id: guildId }),
+		...(parentId === undefined ? {} : { parent_id: parentId }),
+		...(name === undefined ? {} : { name }),
+		...(topic === undefined ? {} : { topic }),
+		...(position === undefined ? {} : { position }),
 		...(overwrites ? { permission_overwrites: overwrites } : {}),
-		...(result.thread_metadata && typeof result.thread_metadata === "object"
-			? { thread_metadata: result.thread_metadata as { archived?: boolean; auto_archive_duration?: number } }
-			: {}),
+		...(threadMetadata ? { thread_metadata: threadMetadata } : {}),
 	};
 }
 
+/** The archive settings Discord reports for a thread channel. */
+function threadMetadataOf(value: Schema.Json | undefined): DiscordChannelRef["thread_metadata"] {
+	if (!isJsonObject(value)) return undefined;
+	const metadata: NonNullable<DiscordChannelRef["thread_metadata"]> = {};
+	const archived = booleanField(value, "archived");
+	const autoArchiveDuration = numberField(value, "auto_archive_duration");
+
+	if (archived !== undefined) metadata.archived = archived;
+
+	if (autoArchiveDuration !== undefined) metadata.auto_archive_duration = autoArchiveDuration;
+
+	return metadata;
+}
+
 /** Decode a list of channels, dropping entries that are not one. */
-function channelRefs(value: unknown): DiscordChannelRef[] {
+function channelRefs(value: Schema.Json | undefined): DiscordChannelRef[] {
 	if (!Array.isArray(value)) return [];
 
-	return value.map(channelRef).filter((ref): ref is DiscordChannelRef => ref !== undefined);
+	return value.flatMap((entry) => channelRef(entry) ?? []);
 }
 
 /** The path of one message, which most message operations extend. */
@@ -279,10 +297,22 @@ function messagePath(channelId: string, messageId: string): string {
 }
 
 /** The id a create-style response must carry. */
-function idOf(result: { id?: unknown } | undefined, failure: string): string {
-	if (!result || typeof result.id !== "string") throw new DiscordError(failure);
+function idOf(result: Schema.Json | undefined, failure: string): string {
+	const id = stringField(result, "id");
 
-	return result.id;
+	if (id === undefined) throw new DiscordError(failure);
+
+	return id;
+}
+
+/** The JSON body of a message create or edit. */
+interface MessageBody {
+	content: string;
+	allowed_mentions: { readonly parse: readonly string[]; readonly users?: readonly string[] };
+	message_reference?: { readonly message_id: string; readonly fail_if_not_exists: boolean };
+	components?: readonly DiscordComponent[];
+	embeds?: readonly DiscordEmbed[];
+	attachments?: readonly { readonly id: string; readonly filename: string }[];
 }
 
 /**
@@ -293,7 +323,7 @@ export function discordRest(token: string) {
 	async function request<T>(
 		method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
 		path: string,
-		body?: unknown,
+		body?: Schema.Json | FormData,
 	): Promise<T | undefined> {
 		const headers = new Headers({ Authorization: `Bot ${token}` });
 		// A multipart request must set its own boundary, so its Content-Type is
@@ -304,10 +334,19 @@ export function discordRest(token: string) {
 		const encoded = multipart || body === undefined ? body : JSON.stringify(body);
 
 		const fetchOnce = Effect.promise(async (): Promise<Attempt> => {
+			// SAFETY: the body is either already a `FormData` (a valid `BodyInit`) or
+			// the string `JSON.stringify` produced from a JSON value.
 			const response = await fetch(`${API}${path}`, { method, headers, body: encoded as BodyInit | undefined });
 
-			const retryAfter =
-				response.status === 429 ? retryDelay(await response.json().catch(() => undefined)) : undefined;
+			// The 429 body is JSON by contract; decode it before reading `retry_after`.
+			const rateLimitBody =
+				response.status === 429
+					? Option.getOrUndefined(
+							Schema.decodeUnknownOption(Schema.Json)(await response.json().catch(() => undefined)),
+						)
+					: undefined;
+
+			const retryAfter = rateLimitBody === undefined ? undefined : retryDelay(rateLimitBody);
 
 			return { response, ...(retryAfter === undefined ? {} : { retryAfter }) };
 		});
@@ -322,44 +361,47 @@ export function discordRest(token: string) {
 			throw new DiscordError(`Discord returned HTTP ${response.status} for ${method} ${path}`, response.status);
 		}
 
+		// SAFETY: the caller's `T` describes the response body it asked Discord for;
+		// the decoders at each call site turn the JSON into the domain type.
 		return (await response.json()) as T;
 	}
 
 	/** POST a body and return the id of the resource Discord created. */
-	async function create(path: string, body: unknown, failure: string): Promise<{ id: string }> {
-		return { id: idOf(await request<{ id?: unknown }>("POST", path, body), failure) };
+	async function create(path: string, body: Schema.Json | FormData, failure: string): Promise<{ id: string }> {
+		return { id: idOf(await request<Schema.Json>("POST", path, body), failure) };
 	}
 
-	async function interactionCallback(interactionId: string, interactionToken: string, payload: unknown): Promise<void> {
+	async function interactionCallback(interactionId: string, interactionToken: string, payload: Schema.Json): Promise<void> {
 		await request<void>("POST", `/interactions/${interactionId}/${interactionToken}/callback`, payload);
 	}
 
 	return {
 		/** The bot's own user, which also serves as the application id. */
 		async me(): Promise<DiscordUser> {
-			const result = await request<{ id?: unknown; username?: unknown }>("GET", "/users/@me");
+			const result = await request<Schema.Json>("GET", "/users/@me");
+			const username = stringField(result, "username");
 
 			return {
 				id: idOf(result, "Discord did not return a bot user"),
-				...(typeof result?.username === "string" ? { username: result.username } : {}),
+				...(username === undefined ? {} : { username }),
 			};
 		},
 
 		/** A channel or thread, or undefined when the id does not exist. */
 		async channel(channelId: string): Promise<DiscordChannelRef | undefined> {
-			return channelRef(await request<unknown>("GET", `/channels/${channelId}`));
+			return channelRef(await request<Schema.Json>("GET", `/channels/${channelId}`));
 		},
 
 		/** Every channel the bot can see in a guild, excluding threads. */
 		async guildChannels(guildId: string): Promise<DiscordChannelRef[]> {
-			return channelRefs(await request<unknown[]>("GET", `/guilds/${guildId}/channels`));
+			return channelRefs(await request<Schema.Json>("GET", `/guilds/${guildId}/channels`));
 		},
 
 		/** Active threads in a guild, which Discord lists separately from channels. */
 		async activeThreads(guildId: string): Promise<DiscordChannelRef[]> {
-			const result = await request<{ threads?: unknown[] }>("GET", `/guilds/${guildId}/threads/active`);
+			const result = await request<Schema.Json>("GET", `/guilds/${guildId}/threads/active`);
 
-			return channelRefs(result?.threads);
+			return channelRefs(jsonField(result, "threads"));
 		},
 
 		/** One message in a channel or thread, or undefined when it does not exist. */
@@ -391,7 +433,7 @@ export function discordRest(token: string) {
 				files?: readonly DiscordUpload[];
 			} = {},
 		): Promise<{ id: string }> {
-			const body: Record<string, unknown> = {
+			const body: MessageBody = {
 				content,
 				// Suppress every ping unless a caller names the users to notify.
 				allowed_mentions: { parse: [], users: options.users ?? [] },
@@ -407,7 +449,7 @@ export function discordRest(token: string) {
 			const files = options.files ?? [];
 
 			if (files.length === 0) {
-				return await create(path, body, "Discord did not accept the message");
+				return await create(path, jsonBody(body), "Discord did not accept the message");
 			}
 
 			// Files are uploaded as multipart/form-data: the message itself goes in
@@ -434,32 +476,32 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[]; embeds?: readonly DiscordEmbed[] } = {},
 		): Promise<void> {
-			await request<void>("PATCH", messagePath(channelId, messageId), {
+			await request<void>("PATCH", messagePath(channelId, messageId), jsonBody({
 				content,
 				allowed_mentions: { parse: [] },
 				...(options.components ? { components: options.components } : {}),
 				...(options.embeds !== undefined ? { embeds: options.embeds } : {}),
-			});
+			}));
 		},
 
 		async createThread(channelId: string, messageId: string, name: string): Promise<{ id: string }> {
 			const path = `${messagePath(channelId, messageId)}/threads`;
 
-			return await create(path, { name, auto_archive_duration: 1_440 }, "Discord did not create the thread");
+			return await create(path, jsonBody({ name, auto_archive_duration: 1_440 }), "Discord did not create the thread");
 		},
 
 		/** Start a public thread in a channel, not attached to a message. */
 		async startThread(channelId: string, name: string): Promise<{ id: string }> {
 			return await create(
 				`/channels/${channelId}/threads`,
-				{ name, auto_archive_duration: 1_440 },
+				jsonBody({ name, auto_archive_duration: 1_440 }),
 				"Discord did not create the thread",
 			);
 		},
 
 		/** Archive or unarchive a thread. */
 		async setThreadArchived(threadId: string, archived: boolean, locked = false): Promise<void> {
-			await request<void>("PATCH", `/channels/${threadId}`, { archived, locked });
+			await request<void>("PATCH", `/channels/${threadId}`, jsonBody({ archived, locked }));
 		},
 
 		/** Follow a thread, so its messages stay available to the bot. */
@@ -510,20 +552,22 @@ export function discordRest(token: string) {
 		 * permissions to lend to a tool call.
 		 */
 		async guildMember(guildId: string, userId: string): Promise<{ roles: string[] } | undefined> {
-			const result = await request<{ roles?: unknown }>("GET", `/guilds/${guildId}/members/${userId}`);
+			const result = await request<Schema.Json>("GET", `/guilds/${guildId}/members/${userId}`);
+			const roles = jsonField(result, "roles");
 
-			if (!result || !Array.isArray(result.roles)) return undefined;
+			if (result === undefined || !Array.isArray(roles)) return undefined;
 
-			return { roles: result.roles.filter((role): role is string => typeof role === "string") };
+			return { roles: roles.filter((role): role is string => typeof role === "string") };
 		},
 
 		/** A guild's owner, which the permission resolver needs to grant everything. */
 		async guildInfo(guildId: string): Promise<{ ownerId?: string } | undefined> {
-			const result = await request<{ owner_id?: unknown }>("GET", `/guilds/${guildId}`);
+			const result = await request<Schema.Json>("GET", `/guilds/${guildId}`);
 
-			if (!result) return undefined;
+			if (result === undefined) return undefined;
+			const ownerId = stringField(result, "owner_id");
 
-			return typeof result.owner_id === "string" ? { ownerId: result.owner_id } : {};
+			return ownerId === undefined ? {} : { ownerId };
 		},
 
 		/**
@@ -538,7 +582,7 @@ export function discordRest(token: string) {
 		 */
 		async isThreadMember(threadId: string, userId: string): Promise<boolean | undefined> {
 			try {
-				const result = await request<unknown>("GET", `/channels/${threadId}/thread-members/${userId}`);
+				const result = await request<Schema.Json>("GET", `/channels/${threadId}/thread-members/${userId}`);
 
 				return result !== undefined;
 			} catch {
@@ -548,22 +592,19 @@ export function discordRest(token: string) {
 
 		/** The guilds the bot is a member of, with its own permissions in each. */
 		async guilds(): Promise<{ id: string; name: string; permissions?: string }[]> {
-			const result = await request<
-				{ id?: unknown; name?: unknown; permissions?: unknown }[]
-			>("GET", "/users/@me/guilds");
+			const result = await request<Schema.Json>("GET", "/users/@me/guilds");
 
 			if (!Array.isArray(result)) return [];
 
-			return result
-				.filter(
-					(guild): guild is { id: string; name: string; permissions?: unknown } =>
-						typeof guild.id === "string" && typeof guild.name === "string",
-				)
-				.map((guild) => ({
-					id: guild.id,
-					name: guild.name,
-					...(typeof guild.permissions === "string" ? { permissions: guild.permissions } : {}),
-				}));
+			return result.flatMap((guild) => {
+				const id = stringField(guild, "id");
+				const name = stringField(guild, "name");
+
+				if (id === undefined || name === undefined) return [];
+				const permissions = stringField(guild, "permissions");
+
+				return [{ id, name, ...(permissions === undefined ? {} : { permissions }) }];
+			});
 		},
 
 		/**
@@ -571,7 +612,7 @@ export function discordRest(token: string) {
 		 * learns *who* installed it. `target_id` is the bot user id.
 		 */
 		async botAddEntry(guildId: string): Promise<DiscordAuditEntry | undefined> {
-			const result = await request<unknown>(
+			const result = await request<Schema.Json>(
 				"GET",
 				`/guilds/${guildId}/audit-logs?action_type=${AUDIT_BOT_ADD}&limit=1`,
 			);
@@ -586,25 +627,30 @@ export function discordRest(token: string) {
 			content: string,
 			options: InteractionMessageOptions = {},
 		): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, {
-				type: 4,
-				data: {
-					content,
-					// Error strings and MCP text are untrusted: never let a mention
-					// token in them ping a user, role, or another bot.
-					allowed_mentions: { parse: [] },
-					flags: options.ephemeral === false ? 0 : 64,
-					...(options.components?.length ? { components: options.components } : {}),
-				},
-			});
+			await interactionCallback(
+				interactionId,
+				interactionToken,
+				jsonBody({
+					type: 4,
+					data: {
+						content,
+						// Error strings and MCP text are untrusted: never let a mention
+						// token in them ping a user, role, or another bot.
+						allowed_mentions: { parse: [] },
+						flags: options.ephemeral === false ? 0 : 64,
+						...(options.components?.length ? { components: options.components } : {}),
+					},
+				}),
+			);
 		},
 
 		/** Acknowledge an interaction without content, so slow work can finish later. */
 		async interactionDefer(interactionId: string, interactionToken: string, ephemeral = true): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, {
-				type: 5,
-				data: { flags: ephemeral ? 64 : 0 },
-			});
+			await interactionCallback(
+				interactionId,
+				interactionToken,
+				jsonBody({ type: 5, data: { flags: ephemeral ? 64 : 0 } }),
+			);
 		},
 
 		/**
@@ -621,11 +667,15 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[] } = {},
 		): Promise<void> {
-			await request<void>("PATCH", `/webhooks/${applicationId}/${interactionToken}/messages/@original`, {
-				content,
-				allowed_mentions: { parse: [] },
-				...(options.components ? { components: options.components } : {}),
-			});
+			await request<void>(
+				"PATCH",
+				`/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+				jsonBody({
+					content,
+					allowed_mentions: { parse: [] },
+					...(options.components ? { components: options.components } : {}),
+				}),
+			);
 		},
 
 		/** Replace the message a component interaction came from. Same rule applies. */
@@ -635,14 +685,18 @@ export function discordRest(token: string) {
 			content: string,
 			options: { components?: readonly DiscordComponent[] } = {},
 		): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, {
-				type: 7,
-				data: {
-					content,
-					allowed_mentions: { parse: [] },
-					...(options.components ? { components: options.components } : {}),
-				},
-			});
+			await interactionCallback(
+				interactionId,
+				interactionToken,
+				jsonBody({
+					type: 7,
+					data: {
+						content,
+						allowed_mentions: { parse: [] },
+						...(options.components ? { components: options.components } : {}),
+					},
+				}),
+			);
 		},
 
 		/** Acknowledge a component interaction without touching its message, so it can be deleted. */
@@ -657,7 +711,7 @@ export function discordRest(token: string) {
 
 		/** Open a modal in response to a component or command interaction. */
 		async interactionModal(interactionId: string, interactionToken: string, modal: DiscordModal): Promise<void> {
-			await interactionCallback(interactionId, interactionToken, { type: 9, data: modal });
+			await interactionCallback(interactionId, interactionToken, jsonBody({ type: 9, data: modal }));
 		},
 
 		/** The application's current global commands. */
@@ -678,10 +732,11 @@ export function discordRest(token: string) {
 
 		/** Discord's recommended gateway shard count for this bot. */
 		async gatewayShards(): Promise<number> {
-			const result = await request<{ shards?: unknown }>("GET", "/gateway/bot");
+			const result = await request<Schema.Json>("GET", "/gateway/bot");
+			const shards = numberField(result, "shards");
 
-			if (typeof result?.shards === "number" && Number.isFinite(result.shards) && result.shards >= 1) {
-				return Math.floor(result.shards);
+			if (shards !== undefined && Number.isFinite(shards) && shards >= 1) {
+				return Math.floor(shards);
 			}
 
 			throw new DiscordError("Discord did not return a shard count");
@@ -689,11 +744,9 @@ export function discordRest(token: string) {
 
 		/** Where Discord currently posts interactions, from the application object. */
 		async interactionsEndpoint(): Promise<string | undefined> {
-			const result = await request<{ interactions_endpoint_url?: unknown }>("GET", "/applications/@me");
+			const result = await request<Schema.Json>("GET", "/applications/@me");
 
-			return typeof result?.interactions_endpoint_url === "string"
-				? result.interactions_endpoint_url
-				: undefined;
+			return stringField(result, "interactions_endpoint_url");
 		},
 
 		/**
@@ -703,12 +756,12 @@ export function discordRest(token: string) {
 		 * rejected endpoint leaves gateway delivery untouched.
 		 */
 		async setInteractionsEndpoint(url: string): Promise<void> {
-			await request<unknown>("PATCH", "/applications/@me", { interactions_endpoint_url: url });
+			await request<Schema.Json>("PATCH", "/applications/@me", jsonBody({ interactions_endpoint_url: url }));
 		},
 
 		/** Replace the application's global commands. */
 		async overwriteCommands(applicationId: string, commands: readonly DiscordCommand[]): Promise<void> {
-			await request<unknown>("PUT", `/applications/${applicationId}/commands`, commands);
+			await request<Schema.Json>("PUT", `/applications/${applicationId}/commands`, jsonBody(commands));
 		},
 
 		/** Replace the application's commands in one guild. */
@@ -717,7 +770,11 @@ export function discordRest(token: string) {
 			guildId: string,
 			commands: readonly DiscordCommand[],
 		): Promise<void> {
-			await request<unknown>("PUT", `/applications/${applicationId}/guilds/${guildId}/commands`, commands);
+			await request<Schema.Json>(
+				"PUT",
+				`/applications/${applicationId}/guilds/${guildId}/commands`,
+				jsonBody(commands),
+			);
 		},
 	};
 }

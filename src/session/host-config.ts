@@ -14,6 +14,7 @@ import { withDeploy } from "../deploy";
 import type { DiscordRest } from "../discord/api";
 import { resolveOrigin } from "../discord/application";
 import { describeError } from "../errors";
+import type { Schema } from "effect";
 import {
 	agentInstructionsPlugin,
 	commandShellPlugin,
@@ -57,12 +58,16 @@ export interface HostBuildOptions {
  * Integrations that supply provider ids other than their own. The catalogue
  * filter has to keep those providers' models, or the host never sees them.
  */
-const INTEGRATION_PROVIDERS: Record<string, readonly string[]> = {
+interface IntegrationProviders {
+	readonly [integrationID: string]: readonly string[];
+}
+
+const INTEGRATION_PROVIDERS: IntegrationProviders = {
 	opencode: ["opencode-go"],
 };
 
 /** POST one internal body to the bot gateway, throwing when it refuses. */
-async function postToGateway(env: Env, path: string, body: Record<string, unknown>): Promise<void> {
+async function postToGateway(env: Env, path: string, body: Schema.Json): Promise<void> {
 	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
 
 	const response = await stub.fetch(

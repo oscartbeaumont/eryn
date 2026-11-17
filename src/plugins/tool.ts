@@ -7,15 +7,29 @@
  */
 
 import type { Plugin } from "@opencode/plugin";
+import type { Schema } from "effect";
 
 import { describeError } from "../errors.ts";
+import { toJsonObject } from "../json.ts";
 
 /** The JSON-schema shape OpenCode's tool editor expects. */
-export function objectSchema(properties: Record<string, unknown>, required: string[] = []) {
+export function objectSchema(properties: Schema.JsonObject, required: string[] = []) {
 	return { type: "object", properties, required, additionalProperties: false };
 }
 
 export type ObjectSchema = ReturnType<typeof objectSchema>;
+
+/**
+ * Read a tool call's input as the shape its `objectSchema` declares.
+ *
+ * The editor validates every call against that schema before it reaches
+ * `execute`, so the object already carries these fields; this is the one place
+ * that says so, rather than an assertion at each tool.
+ */
+export function declaredInput<T>(input: Schema.JsonObject): T {
+	// SAFETY: the tool's `objectSchema` was validated by the editor before the call.
+	return input as T;
+}
 
 /** What a tool can know about the call it is part of. */
 export interface ToolCall {
@@ -71,12 +85,17 @@ export interface ToolSpec {
 	 * output. Both adapters run this outside their own error handling, so an
 	 * `ask` or `deny` ends the step instead of being reported to the model.
 	 */
-	guard?(input: Record<string, unknown>, call: ToolCall): Promise<void>;
+	guard?(input: Schema.JsonObject, call: ToolCall): Promise<void>;
 	/**
 	 * A string is sent as-is, a {@link ToolOutput} becomes text plus readable
 	 * files, and any other value is JSON-encoded.
 	 */
-	run(input: Record<string, unknown>, call: ToolCall): Promise<ToolResult>;
+	run(input: Schema.JsonObject, call: ToolCall): Promise<ToolResult>;
+}
+
+/** Whether a tool result is plain text, which the editor sends as-is. */
+function isText(result: ToolResult): result is string {
+	return typeof result === "string";
 }
 
 function content(result: ToolResult) {
@@ -96,7 +115,7 @@ function content(result: ToolResult) {
 		};
 	}
 
-	return { content: typeof result === "string" ? result : JSON.stringify(result, null, 2) };
+	return { content: isText(result) ? result : JSON.stringify(result, null, 2) };
 }
 
 /**
@@ -110,7 +129,7 @@ function content(result: ToolResult) {
 async function assertAllowed(
 	ctx: Plugin.Context | undefined,
 	spec: ToolSpec,
-	rawInput: unknown,
+	rawInput: Schema.Json | undefined,
 	call: ToolCall,
 ): Promise<void> {
 	if (!ctx) return;
@@ -125,8 +144,8 @@ async function assertAllowed(
 
 /** Adapt a spec to the editor's `execute`, letting a thrown error fail the call. */
 export function toolRun(spec: ToolSpec, ctx?: Plugin.Context) {
-	return async (rawInput: unknown, call: ToolCall) => {
-		const input = (rawInput ?? {}) as Record<string, unknown>;
+	return async (rawInput: Schema.Json | undefined, call: ToolCall) => {
+		const input = toJsonObject(rawInput) ?? {};
 		await assertAllowed(ctx, spec, rawInput, call);
 		await spec.guard?.(input, call);
 
@@ -136,8 +155,8 @@ export function toolRun(spec: ToolSpec, ctx?: Plugin.Context) {
 
 /** Adapt a spec to the editor's `execute`, reporting a thrown error to the model. */
 export function toolExecute(spec: ToolSpec, ctx?: Plugin.Context) {
-	return async (rawInput: unknown, call: ToolCall) => {
-		const input = (rawInput ?? {}) as Record<string, unknown>;
+	return async (rawInput: Schema.Json | undefined, call: ToolCall) => {
+		const input = toJsonObject(rawInput) ?? {};
 		// Outside the try: a permission denial is not an error the model should
 		// retry or report as a result. The guard runs here for the same reason.
 		await assertAllowed(ctx, spec, rawInput, call);

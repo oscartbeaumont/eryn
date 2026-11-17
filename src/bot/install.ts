@@ -14,10 +14,13 @@
  * and the greeting is deleted once a provider is connected.
  */
 
+import type { Schema } from "effect";
+
 import type { Analytics } from "../analytics";
 import { actionButton, buttonRow } from "../discord/components";
 import { DiscordError, type DiscordAuditEntry, type DiscordRest } from "../discord/api";
 import { log } from "../config";
+import { isJsonObject, numberField, stringField } from "../json.ts";
 import { SETUP_MENU_ID } from "./ids";
 
 /** Only a very recent install is announced; a READY replay of old guilds is not. */
@@ -176,22 +179,25 @@ export async function dismissInstallGreeting(
 	guildId: string,
 ): Promise<void> {
 	const key = marker(guildId);
-	const greeting = await storage.get<InstallGreeting>(key);
+	const greeting = await storage.get<Schema.Json>(key);
 
-	if (!greeting || typeof greeting !== "object") return;
+	if (!isJsonObject(greeting)) return;
 
 	if (greeting.dismissed === true) return;
 
-	if (typeof greeting.channelId !== "string" || typeof greeting.messageId !== "string") return;
+	const channelId = stringField(greeting, "channelId");
+	const messageId = stringField(greeting, "messageId");
+
+	if (channelId === undefined || messageId === undefined) return;
 
 	try {
-		await rest.deleteMessage(greeting.channelId, greeting.messageId);
+		await rest.deleteMessage(channelId, messageId);
 	} catch (error) {
 		// A message a human already removed is as good as deleted. Anything else is
 		// worth retrying, which the next setup screen does because the record is
 		// left undismissed.
 		if (!(error instanceof DiscordError && error.status === 404)) {
-			log("gateway", `could not delete the install message in ${greeting.channelId}: ${String(error)}`);
+			log("gateway", `could not delete the install message in ${channelId}: ${String(error)}`);
 
 			return;
 		}
@@ -200,5 +206,10 @@ export async function dismissInstallGreeting(
 	// Keep the record as a dismissed marker: a READY replay re-reads the audit log
 	// for a recent install, and without it the greeting would be posted again
 	// right after the admin finished setting up.
-	await storage.put(key, { ...greeting, dismissed: true } satisfies InstallGreeting);
+	await storage.put(key, {
+		channelId,
+		messageId,
+		sentAt: numberField(greeting, "sentAt") ?? Date.now(),
+		dismissed: true,
+	} satisfies InstallGreeting);
 }

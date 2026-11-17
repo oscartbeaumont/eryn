@@ -20,6 +20,7 @@
  */
 
 import type { Plugin } from "@opencode/plugin";
+import type { Schema } from "effect";
 
 import {
 	MAX_CONTENT,
@@ -34,6 +35,7 @@ import {
 } from "../../discord/api";
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
+import { stringField } from "../../json.ts";
 import { actionButton, buttonRow, selectRow } from "../../discord/components";
 import { formatMessage, type FormattedMessage } from "../../discord/markdown";
 import { Permission } from "../../discord/permissions";
@@ -51,7 +53,7 @@ import {
 import { base64ToBytes } from "../workspace/bytes";
 import { resolvePath } from "../workspace/paths.ts";
 import type { FileStore } from "../workspace/store";
-import { objectSchema, toolExecute, ToolOutput, type ToolCall, type ToolSpec } from "../tool";
+import { declaredInput, objectSchema, toolExecute, ToolOutput, type ToolCall, type ToolSpec } from "../tool";
 import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {
@@ -151,7 +153,7 @@ async function readMessageImages(messages: readonly DiscordMessageView[]): Promi
 			url,
 			...(attachment.filename ? { name: attachment.filename } : {}),
 			...(attachment.content_type ? { contentType: attachment.content_type } : {}),
-			...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
+			...(attachment.size === undefined ? {} : { size: attachment.size }),
 		})),
 	);
 
@@ -200,9 +202,6 @@ async function readUploads(store: FileStore, paths: readonly string[]): Promise<
 
 	return uploads;
 }
-
-/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
-type SessionMetadata = NonNullable<Parameters<Plugin.Context["session"]["update"]>[0]["metadata"]>;
 
 /** A message to watch for a thread being created from it. */
 export interface MessageWatch {
@@ -383,6 +382,8 @@ export function discordTools(
 			const next = update(context.scheduleScope, context);
 
 			if (next === context.scheduleScope) return;
+			// SAFETY: OpenCode spells metadata JSON with mutable arrays, while a
+			// decoded `DiscordContext` holds readonly ones; it is the same JSON.
 			await ctx.session.update({
 				sessionID,
 				metadata: {
@@ -392,7 +393,7 @@ export function discordTools(
 					[DISCORD_METADATA_KEY]: next
 						? { ...context, scheduleScope: next }
 						: { ...context, scheduleScope: undefined },
-				} as unknown as SessionMetadata,
+				} as never,
 			});
 		});
 	};
@@ -514,10 +515,10 @@ export function discordTools(
 	/** A guard for a tool whose target is named by one input field. */
 	const guardChannel =
 		(key: "channelId" | "threadId") =>
-		async (input: Record<string, unknown>, call: ToolCall): Promise<void> => {
-			const channelId = input[key];
+		async (input: Schema.JsonObject, call: ToolCall): Promise<void> => {
+			const channelId = stringField(input, key);
 
-			if (typeof channelId === "string") await crossChannel(call, channelId);
+			if (channelId !== undefined) await crossChannel(call, channelId);
 		};
 
 	/** The conversation a watch should notify, from the calling session's metadata. */
@@ -611,7 +612,7 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, limit, before } = rawInput as ChannelInput & { limit?: number; before?: string };
+				const { channelId, limit, before } = declaredInput<ChannelInput & { limit?: number; before?: string }>(rawInput);
 				const channelInfo = await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -663,11 +664,11 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, content, replyTo, files: rawFiles } = rawInput as ChannelInput & {
+				const { channelId, content, replyTo, files: rawFiles } = declaredInput<ChannelInput & {
 					content?: string;
 					replyTo?: string;
 					files?: string[];
-				};
+				}>(rawInput);
 
 				const found = await channel(channelId);
 
@@ -729,11 +730,11 @@ export function discordTools(
 				["question"],
 			),
 			async run(rawInput, call) {
-				const { question, options: rawOptions, multiple } = rawInput as {
+				const { question, options: rawOptions, multiple } = declaredInput<{
 					question: string;
 					options?: string[];
 					multiple?: boolean;
-				};
+				}>(rawInput);
 
 				const context = await sessionContext(call.sessionID);
 
@@ -811,7 +812,7 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, name: rawName, messageId } = rawInput as ChannelInput & { name: string; messageId?: string };
+				const { channelId, name: rawName, messageId } = declaredInput<ChannelInput & { name: string; messageId?: string }>(rawInput);
 				await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -846,7 +847,7 @@ export function discordTools(
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId } = rawInput as MessageInput;
+				const { channelId, messageId } = declaredInput<MessageInput>(rawInput);
 
 				if (THREAD_TYPES.has((await channel(channelId)).type)) {
 					throw new Error(`A thread cannot be created from a message inside ${channelId}.`);
@@ -875,7 +876,7 @@ export function discordTools(
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId } = rawInput as MessageInput;
+				const { channelId, messageId } = declaredInput<MessageInput>(rawInput);
 				await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -902,7 +903,7 @@ export function discordTools(
 			),
 			guard: guardChannel("threadId"),
 			async run(rawInput, call) {
-				const { threadId, locked } = rawInput as ThreadInput & { locked?: boolean };
+				const { threadId, locked } = declaredInput<ThreadInput & { locked?: boolean }>(rawInput);
 				await thread(threadId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -923,7 +924,7 @@ export function discordTools(
 			input: objectSchema({ threadId: THREAD_ID }, ["threadId"]),
 			guard: guardChannel("threadId"),
 			async run(rawInput, call) {
-				const { threadId } = rawInput as ThreadInput;
+				const { threadId } = declaredInput<ThreadInput>(rawInput);
 				await thread(threadId);
 				// A private thread additionally requires membership (or manager
 				// rights); the resolver enforces that as part of ViewChannel.
@@ -941,7 +942,7 @@ export function discordTools(
 			input: objectSchema({ threadId: THREAD_ID }, ["threadId"]),
 			guard: guardChannel("threadId"),
 			async run(rawInput, call) {
-				const { threadId } = rawInput as ThreadInput;
+				const { threadId } = declaredInput<ThreadInput>(rawInput);
 				await thread(threadId);
 				await requireChannelPermission(call.sessionID, threadId, Permission.ViewChannel, "leave that thread");
 				await rest.leaveThread(threadId);
@@ -958,7 +959,7 @@ export function discordTools(
 			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId } = rawInput as ChannelInput;
+				const { channelId } = declaredInput<ChannelInput>(rawInput);
 				await subscribableChannel(channelId);
 				await requireManageGuild(call.sessionID, "subscribe Eryn to a channel");
 				await setSubscription("channel", channelId, true);
@@ -974,7 +975,7 @@ export function discordTools(
 			input: objectSchema({ channelId: CHANNEL_ID }, ["channelId"]),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId } = rawInput as ChannelInput;
+				const { channelId } = declaredInput<ChannelInput>(rawInput);
 				await subscribableChannel(channelId);
 				await requireManageGuild(call.sessionID, "unsubscribe Eryn from a channel");
 				await setSubscription("channel", channelId, false);
@@ -998,7 +999,7 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId, emoji, remove } = rawInput as MessageInput & { emoji: string; remove?: boolean };
+				const { channelId, messageId, emoji, remove } = declaredInput<MessageInput & { emoji: string; remove?: boolean }>(rawInput);
 				await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -1027,7 +1028,7 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId, content } = rawInput as MessageInput & { content: string };
+				const { channelId, messageId, content } = declaredInput<MessageInput & { content: string }>(rawInput);
 				await channel(channelId);
 				const message = await rest.message(channelId, messageId);
 
@@ -1062,7 +1063,7 @@ export function discordTools(
 			input: objectSchema({ channelId: CHANNEL_ID, messageId: MESSAGE_ID }, ["channelId", "messageId"]),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId } = rawInput as MessageInput;
+				const { channelId, messageId } = declaredInput<MessageInput>(rawInput);
 				await channel(channelId);
 				const message = await rest.message(channelId, messageId);
 
@@ -1095,7 +1096,7 @@ export function discordTools(
 			),
 			guard: guardChannel("channelId"),
 			async run(rawInput, call) {
-				const { channelId, messageId, remove } = rawInput as MessageInput & { remove?: boolean };
+				const { channelId, messageId, remove } = declaredInput<MessageInput & { remove?: boolean }>(rawInput);
 				await channel(channelId);
 				await requireChannelPermission(
 					call.sessionID,
@@ -1123,7 +1124,9 @@ export function discordTools(
 						name: spec.name,
 						description: spec.description,
 						input: spec.input,
-						execute: toolExecute(spec, ctx),
+						// SAFETY: the editor validates a call against `spec.input` before it
+						// reaches `execute`, so the object matches the declared schema.
+						execute: (input, context) => toolExecute(spec, ctx)(input as Schema.JsonObject, context),
 					});
 				}
 			});

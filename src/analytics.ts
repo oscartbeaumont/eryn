@@ -100,13 +100,11 @@ export function analytics(
 }
 
 function clean(properties: Record<string, AnalyticsValue>): Record<string, string | number | boolean> {
-	const cleaned: Record<string, string | number | boolean> = {};
-
-	for (const [name, value] of Object.entries(properties)) {
-		if (value !== undefined) cleaned[name] = value;
-	}
-
-	return cleaned;
+	return Object.fromEntries(
+		Object.entries(properties).filter(
+			(entry): entry is [string, string | number | boolean] => entry[1] !== undefined,
+		),
+	);
 }
 
 /**

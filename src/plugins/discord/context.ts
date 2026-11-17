@@ -23,7 +23,7 @@ export const DISCORD_METADATA_KEY = "discord";
  * Read a context back out of a session's metadata, or `undefined` when it is
  * absent or malformed.
  */
-export function readDiscordContext(metadata: Record<string, unknown> | undefined): DiscordContext | undefined {
+export function readDiscordContext(metadata: Schema.JsonObject | undefined): DiscordContext | undefined {
 	const parsed = Schema.decodeUnknownOption(DiscordContextSchema)(metadata?.[DISCORD_METADATA_KEY]);
 
 	return Option.isSome(parsed) ? parsed.value : undefined;

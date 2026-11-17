@@ -13,6 +13,13 @@ import type { Plugin } from "@opencode/plugin";
 /** Both hooks that build the messages a request will read. */
 const PROMPT_HOOKS = ["context", "compaction"] as const;
 
+/** Whether the block is fixed text rather than a producer of it. */
+function isStaticBlock(
+	block: string | ((sessionID: string) => Promise<string | undefined>),
+): block is string {
+	return typeof block === "string";
+}
+
 /**
  * Append a block to both prompt hooks.
  *
@@ -31,7 +38,7 @@ export async function appendToSystemPrompt(
 	for (const name of PROMPT_HOOKS) {
 		await ctx.session.hook(name, async (event) => {
 			if (event.system.some((part) => part.text.includes(marker))) return;
-			const text = typeof block === "string" ? block : await block(event.sessionID);
+			const text = isStaticBlock(block) ? block : await block(event.sessionID);
 
 			if (!text) return;
 			event.system.push({ type: "text", text });

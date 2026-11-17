@@ -92,7 +92,7 @@ export async function fetchAttachmentFiles(
 			continue;
 		}
 
-		if (typeof attachment.size === "number" && attachment.size > MAX_ATTACHMENT_BYTES) {
+		if (attachment.size !== undefined && attachment.size > MAX_ATTACHMENT_BYTES) {
 			notes.push(`${name}: larger than 5 MB`);
 			continue;
 		}

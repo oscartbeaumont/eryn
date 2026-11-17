@@ -13,6 +13,7 @@
 import type { DiscordChannelRef, DiscordRest } from "../discord/api";
 import { guildPermissions, parsePermissions } from "../discord/permissions";
 import type { DiscordChannel, DiscordMessage } from "../discord/socket";
+import { isNumber } from "../json.ts";
 import type { DiscordContext } from "../session/models";
 
 /** A long-lived guild object should not remember every channel forever. */
@@ -58,7 +59,7 @@ export class DiscordLookups {
 	 * being invisible until this object restarts.
 	 */
 	remember(channel: DiscordChannel): DiscordChannelRef | undefined {
-		if (typeof channel.type !== "number") return undefined;
+		if (!isNumber(channel.type)) return undefined;
 
 		const ref: DiscordChannelRef = {
 			id: channel.id,

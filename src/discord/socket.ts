@@ -16,7 +16,10 @@
  * from a Durable Object alarm) before that cap is reached.
  */
 
+import { Schema } from "effect";
+
 import { describeError } from "../errors";
+import { isString, jsonBody, numberField, stringField } from "../json.ts";
 import type { DiscordAttachment, DiscordUser } from "./api";
 import type { DiscordComponent } from "./components";
 
@@ -120,6 +123,13 @@ export interface DiscordModalSubmitComponent {
 }
 
 /** The subset of a Discord interaction this bot reads. */
+/** One option on an application command, including a subcommand's own options. */
+export interface DiscordCommandOptionPayload {
+	readonly name?: string;
+	readonly type?: number;
+	readonly options?: readonly { readonly name?: string; readonly type?: number; readonly value?: Schema.Json }[];
+}
+
 export interface DiscordInteraction {
 	id: string;
 	application_id: string;
@@ -136,11 +146,7 @@ export interface DiscordInteraction {
 		values?: readonly string[];
 		components?: readonly { components?: readonly DiscordModalSubmitComponent[] }[];
 		/** The resolved subcommand path of an application command. */
-		options?: readonly {
-			name?: string;
-			type?: number;
-			options?: readonly { name?: string; type?: number; value?: unknown }[];
-		}[];
+		options?: readonly DiscordCommandOptionPayload[];
 	};
 	member?: { user?: DiscordUser; nick?: string; permissions?: string };
 	user?: DiscordUser;
@@ -170,60 +176,52 @@ export interface DiscordSocketHandlers {
 	onChannelDelete(channel: DiscordChannel): void;
 }
 
-type DiscordEventHandler = (data: unknown, handlers: DiscordSocketHandlers) => void;
+type DiscordEventHandler = (data: Schema.Json | undefined, handlers: DiscordSocketHandlers) => void;
 
-/** A dispatch payload that is a channel, or `undefined` when it is not one. */
-function asChannel(data: unknown): DiscordChannel | undefined {
-	const channel = data as DiscordChannel | undefined;
-
-	return channel && typeof channel.id === "string" ? channel : undefined;
+/**
+ * Hand a dispatch payload to its handler once the fields the handler reads are
+ * present; anything else is dropped, because a malformed event is not worth
+ * failing the connection over.
+ */
+function dispatch<T>(data: Schema.Json | undefined, required: readonly string[], use: (payload: T) => void): void {
+	if (required.some((key) => stringField(data, key) === undefined)) return;
+	// SAFETY: the caller names the fields its handler reads; a dispatch carrying
+	// them is the payload Discord documents for that event.
+	use(data as T);
 }
 
-function dispatchChannelUpdate(data: unknown, handlers: DiscordSocketHandlers): void {
-	const channel = asChannel(data);
-
-	if (channel) handlers.onChannelUpdate(channel);
+function dispatchChannelUpdate(data: Schema.Json | undefined, handlers: DiscordSocketHandlers): void {
+	dispatch(data, ["id"], (channel: DiscordChannel) => handlers.onChannelUpdate(channel));
 }
 
-function dispatchChannelDelete(data: unknown, handlers: DiscordSocketHandlers): void {
-	const channel = asChannel(data);
+function dispatchChannelDelete(data: Schema.Json | undefined, handlers: DiscordSocketHandlers): void {
+	dispatch(data, ["id"], (channel: DiscordChannel) => handlers.onChannelDelete(channel));
+}
 
-	if (channel) handlers.onChannelDelete(channel);
+/** Dispatch handlers keyed by Discord's gateway event name. */
+interface DiscordEventHandlerTable {
+	readonly [event: string]: DiscordEventHandler;
 }
 
 /**
  * The gateway dispatch events this bot acts on, keyed by Discord's event name.
  * Each handler ignores a payload that is not the shape its event promises.
  */
-const DISCORD_EVENTS: Record<string, DiscordEventHandler> = {
+const DISCORD_EVENTS: DiscordEventHandlerTable = {
 	MESSAGE_CREATE(data, handlers) {
-		const message = data as DiscordMessage | undefined;
-
-		if (message && typeof message.id === "string" && typeof message.channel_id === "string") {
-			handlers.onMessage(message);
-		}
+		dispatch(data, ["id", "channel_id"], (message: DiscordMessage) => handlers.onMessage(message));
 	},
 	INTERACTION_CREATE(data, handlers) {
-		const interaction = data as DiscordInteraction | undefined;
-
-		if (interaction && typeof interaction.id === "string" && typeof interaction.token === "string") {
-			handlers.onInteraction(interaction);
-		}
+		dispatch(data, ["id", "token"], (interaction: DiscordInteraction) => handlers.onInteraction(interaction));
 	},
 	GUILD_CREATE(data, handlers) {
-		const guild = data as DiscordGuildCreate | undefined;
-
-		if (guild && typeof guild.id === "string") handlers.onGuild(guild);
+		dispatch(data, ["id"], (guild: DiscordGuildCreate) => handlers.onGuild(guild));
 	},
 	GUILD_UPDATE(data, handlers) {
-		const guild = data as DiscordGuildCreate | undefined;
-
-		if (guild && typeof guild.id === "string") handlers.onGuildUpdate(guild);
+		dispatch(data, ["id"], (guild: DiscordGuildCreate) => handlers.onGuildUpdate(guild));
 	},
 	THREAD_CREATE(data, handlers) {
-		const thread = data as DiscordChannel | undefined;
-
-		if (thread && typeof thread.id === "string") handlers.onThreadCreate(thread);
+		dispatch(data, ["id"], (thread: DiscordChannel) => handlers.onThreadCreate(thread));
 	},
 	// A thread is a channel: Discord names a thread update THREAD_UPDATE, but
 	// other updates can arrive as CHANNEL_UPDATE, so both go to the same place.
@@ -234,12 +232,14 @@ const DISCORD_EVENTS: Record<string, DiscordEventHandler> = {
 	THREAD_DELETE: dispatchChannelDelete,
 };
 
-interface GatewayPayload {
-	op: number;
-	t?: string;
-	s?: number | null;
-	d?: unknown;
-}
+const GatewayPayloadSchema = Schema.Struct({
+	op: Schema.Number,
+	t: Schema.optional(Schema.String),
+	s: Schema.optional(Schema.Union([Schema.Number, Schema.Null])),
+	d: Schema.optional(Schema.Json),
+});
+
+type GatewayPayload = typeof GatewayPayloadSchema.Type;
 
 /** One connection: a single shard of the bot's gateway. */
 class DiscordShard {
@@ -418,12 +418,13 @@ class DiscordShard {
 	private receive(event: MessageEvent): void {
 		const raw = event.data;
 
-		if (typeof raw !== "string") return;
+		if (!isString(raw)) return;
 
 		let payload: GatewayPayload;
 
 		try {
-			payload = JSON.parse(raw) as GatewayPayload;
+			// Every frame is JSON; decode the envelope before touching any field.
+			payload = Schema.decodeUnknownSync(GatewayPayloadSchema)(JSON.parse(raw));
 		} catch {
 			this.log(this.say("gateway sent unreadable JSON"));
 
@@ -432,22 +433,24 @@ class DiscordShard {
 
 		switch (payload.op) {
 			case 10: {
-				const interval = (payload.d as { heartbeat_interval?: unknown } | undefined)?.heartbeat_interval;
+				const interval = numberField(payload.d, "heartbeat_interval");
 
-				if (typeof interval === "number" && interval > 0) this.intervalMs = Math.max(5_000, interval);
+				if (interval !== undefined && interval > 0) this.intervalMs = Math.max(5_000, interval);
 
 				if (this.session) {
-					this.send({ op: 6, d: { token: this.token, session_id: this.session, seq: this.sequence ?? 0 } });
+					this.send(jsonBody({ op: 6, d: { token: this.token, session_id: this.session, seq: this.sequence ?? 0 } }));
 				} else {
-					this.send({
-						op: 2,
-						d: {
-							token: this.token,
-							intents: INTENTS,
-							shard: [this.shard.index, this.shard.count],
-							properties: { os: "cloudflare-workers", browser: "eryn", device: "eryn" },
-						},
-					});
+					this.send(
+						jsonBody({
+							op: 2,
+							d: {
+								token: this.token,
+								intents: INTENTS,
+								shard: [this.shard.index, this.shard.count],
+								properties: { os: "cloudflare-workers", browser: "eryn", device: "eryn" },
+							},
+						}),
+					);
 				}
 
 				this.startHeartbeat();
@@ -476,12 +479,12 @@ class DiscordShard {
 			}
 
 			case 0: {
-				if (typeof payload.s === "number") this.sequence = payload.s;
+				if (payload.s !== null && payload.s !== undefined) this.sequence = payload.s;
 
 				if (payload.t === "READY") {
-					const session = (payload.d as { session_id?: unknown } | undefined)?.session_id;
+					const session = stringField(payload.d, "session_id");
 
-					if (typeof session === "string") this.session = session;
+					if (session !== undefined) this.session = session;
 					this.attempt = 0;
 					this.log(this.say("gateway connected"));
 				} else if (payload.t === "RESUMED") {
@@ -502,7 +505,7 @@ class DiscordShard {
 	private sendHeartbeat(): void {
 		if (!this.open) return;
 		this.awaitingAck += 1;
-		this.send({ op: 1, d: this.sequence });
+		this.send(jsonBody({ op: 1, d: this.sequence }));
 	}
 
 	private startHeartbeat(): void {
@@ -556,7 +559,7 @@ class DiscordShard {
 		}, delay);
 	}
 
-	private send(payload: unknown): void {
+	private send(payload: Schema.Json): void {
 		const socket = this.socket;
 
 		if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -613,7 +616,7 @@ export class DiscordSocket {
 	}
 
 	/** How many shards are connected, for the health endpoint. */
-	get status(): { total: number; open: number } {
+	get status() {
 		return { total: this.shards.length, open: this.shards.filter((shard) => shard.open).length };
 	}
 
@@ -642,14 +645,13 @@ export class DiscordSocket {
 
 /** The component payload a modal submit carries, flattened to `custom_id -> value`. */
 export function modalValues(interaction: DiscordInteraction): Record<string, string> {
-	const values: Record<string, string> = {};
-
-	for (const row of interaction.data?.components ?? []) {
-		for (const component of row.components ?? []) {
-			if (typeof component.custom_id !== "string") continue;
-			values[component.custom_id] = component.value ?? component.values?.[0] ?? "";
-		}
-	}
-
-	return values;
+	return Object.fromEntries(
+		(interaction.data?.components ?? []).flatMap((row) =>
+			(row.components ?? []).flatMap((component) =>
+				isString(component.custom_id)
+					? [[component.custom_id, component.value ?? component.values?.[0] ?? ""]]
+					: [],
+			),
+		),
+	);
 }

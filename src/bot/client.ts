@@ -7,9 +7,10 @@
 
 import { Option, Schema } from "effect";
 
+import { botError } from "../errors";
+import { stringField } from "../json.ts";
 import { withDeploy } from "../deploy";
 import { ROUTES } from "../session/paths";
-import { botError } from "../errors";
 import {
 	ApprovalReplyResponseSchema,
 	CommandListResponseSchema,
@@ -69,7 +70,7 @@ const ProfilesResponseSchema = Schema.Struct({ ok: Schema.Boolean, ...ProfilesSt
 
 const PolicyStateResponseSchema = Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema });
 
-function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S["Type"] {
+function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: Schema.Json | undefined): S["Type"] {
 	return Option.getOrThrowWith(Schema.decodeUnknownOption(schema)(input), () =>
 		botError("the guild session returned an unexpected shape"),
 	);
@@ -95,7 +96,7 @@ export class SessionClient {
 	private async call<S extends Schema.ConstraintDecoder<unknown>>(
 		path: string,
 		schema: S,
-		body: Record<string, unknown> = {},
+		body: Schema.JsonObject = {},
 	): Promise<S["Type"]> {
 		const response = await this.stub().fetch(
 			`https://bot.internal${path}`,
@@ -106,15 +107,12 @@ export class SessionClient {
 			}),
 		);
 
-		const payload = (await response.json().catch(() => undefined)) as unknown;
+		const payload = Option.getOrUndefined(
+			Schema.decodeUnknownOption(Schema.Json)(await response.json().catch(() => undefined)),
+		);
 
 		if (!response.ok) {
-			const message =
-				payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
-					? (payload as { error: string }).error
-					: `the guild session returned HTTP ${response.status}`;
-
-			throw botError(message);
+			throw botError(stringField(payload, "error") ?? `the guild session returned HTTP ${response.status}`);
 		}
 
 		return decode(schema, payload);

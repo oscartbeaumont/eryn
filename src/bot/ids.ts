@@ -37,8 +37,14 @@ export function scopedId(base: string, dmGuildId?: string): string {
 	return clip(dmGuildId ? `${INSTALL_PREFIX}${dmGuildId}:${base}` : base);
 }
 
+/** A custom id split back into its base and the guild an install DM scoped it to. */
+export interface UnmarshalledId {
+	readonly id: string;
+	readonly dmGuildId?: string;
+}
+
 /** Split an install-flow id back into its base and the guild it belongs to. */
-export function unmarshalId(customId: string): { id: string; dmGuildId?: string } {
+export function unmarshalId(customId: string): UnmarshalledId {
 	if (!customId.startsWith(INSTALL_PREFIX)) return { id: customId };
 	const rest = customId.slice(INSTALL_PREFIX.length);
 	const separator = rest.indexOf(":");

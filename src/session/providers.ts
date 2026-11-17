@@ -9,6 +9,8 @@
 
 import { Option, Schema } from "effect";
 
+import { isString } from "../json.ts";
+
 import {
 	HostProviderFieldSchema,
 	type HostProviderField,
@@ -74,7 +76,7 @@ function describeField(field: HostProviderField): ProviderField | undefined {
 		...common,
 		type,
 		...(field.placeholder ? { placeholder: field.placeholder } : {}),
-		...(typeof field.default === "string" ? { default: field.default } : {}),
+		...(isString(field.default) ? { default: field.default } : {}),
 		...(field.options ? { options: field.options } : {}),
 	};
 }
@@ -117,7 +119,7 @@ function describeMethod(method: HostMethod): IntegrationMethodOption | undefined
 }
 
 /** The integration's methods, skipping any the host described in a shape we cannot read. */
-export function describeMethods(methods: unknown): IntegrationMethodOption[] {
+export function describeMethods(methods: Schema.Json | undefined): IntegrationMethodOption[] {
 	if (!Array.isArray(methods)) return [];
 
 	return methods.flatMap((value) => {

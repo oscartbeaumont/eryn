@@ -9,10 +9,12 @@
  * otherwise left alone.
  */
 
+import type { Schema } from "effect";
 import { applyEdits, modify, parse } from "jsonc-parser";
 
 import { KEYS, log } from "../config.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "../plugins/workspace/bytes.ts";
+import { isJsonObject, isNumber } from "../json.ts";
 import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
 import {
 	DEFAULT_AGENTS,
@@ -98,9 +100,9 @@ async function upgradeWebSearch(store: FileStore): Promise<boolean> {
 
 	if (!file) return false;
 	const current = bytesToText(base64ToBytes(file.b));
-	const parsed: unknown = parse(current, [], { allowTrailingComma: true });
+	const parsed = parse(current, [], { allowTrailingComma: true });
 
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+	if (!isJsonObject(parsed)) return false;
 
 	if ("websearch" in parsed) return false;
 
@@ -119,9 +121,10 @@ async function upgradeWebSearch(store: FileStore): Promise<boolean> {
 
 /** Write any missing defaults, and apply the one-time seed upgrades. */
 export async function seedWorkspace(storage: WorkspaceStorage): Promise<void> {
-	const seeded = await storage.get<unknown>(KEYS.workspaceSeed);
+	const seeded = await storage.get<Schema.Json>(KEYS.workspaceSeed);
+	const version = isNumber(seeded) ? seeded : 0;
 
-	if (typeof seeded === "number" && seeded >= SEED_VERSION) return;
+	if (version >= SEED_VERSION) return;
 
 	const store = fileStore(storage);
 	let written = 0;
@@ -135,9 +138,9 @@ export async function seedWorkspace(storage: WorkspaceStorage): Promise<void> {
 		written += 1;
 	}
 
-	const upgradedVoice = typeof seeded === "number" && seeded < 2 ? await upgradeDefaultVoice(store) : false;
-	const upgradedAttribution = typeof seeded === "number" && seeded < 3 ? await upgradeAttribution(store) : false;
-	const upgradedWebSearch = typeof seeded === "number" && seeded < 4 ? await upgradeWebSearch(store) : false;
+	const upgradedVoice = version > 0 && version < 2 ? await upgradeDefaultVoice(store) : false;
+	const upgradedAttribution = version > 0 && version < 3 ? await upgradeAttribution(store) : false;
+	const upgradedWebSearch = version > 0 && version < 4 ? await upgradeWebSearch(store) : false;
 	await storage.put(KEYS.workspaceSeed, SEED_VERSION);
 
 	const upgrades = [

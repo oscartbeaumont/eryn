@@ -8,10 +8,14 @@
  * Discord conversation: a thread, or a subscribed channel.
  */
 
+import { Agent } from "@opencode/plugin";
+import type { Schema } from "effect";
+
 import { analytics as productAnalytics, type Analytics } from "../analytics";
 import { KEYS, log } from "../config";
 import { actionButton, buttonRow, linkButton, selectRow, type DiscordActionRow, type DiscordButton } from "../discord/components";
 import { classifyError, describeError } from "../errors";
+import { isJsonObject, isString, jsonField, numberField, stringField, toJsonObject } from "../json.ts";
 import {
 	DEFAULT_THREAD_NAME,
 	DiscordError,
@@ -66,9 +70,6 @@ import { applyTurnEvent, createTurn, type Turn } from "./turn";
 import { readWorkspaceConfig, workspaceSignature } from "./workspace-config";
 
 export type { HostConfig };
-
-/** The JSON metadata boundary: stored scope arrays are readonly for readers. */
-type SessionMetadata = NonNullable<Parameters<HostInterface["sessions"]["update"]>[0]["metadata"]>;
 
 const TURN_TIMEOUT_MS = 900_000;
 
@@ -509,7 +510,7 @@ class GuildAgentImpl implements GuildAgent {
 					methods: describeMethods(entry.methods),
 				});
 			} catch (error) {
-				log("session", `could not describe ${String((entry as { id?: unknown }).id)}: ${describeError(error)}`);
+				log("session", `could not describe ${String(entry.id)}: ${describeError(error)}`);
 			}
 		}
 
@@ -584,7 +585,7 @@ class GuildAgentImpl implements GuildAgent {
 		const directlyConnected = config.connections.some((connection) => connection.integrationID === provider);
 
 		const model = await resolveModelChoice(config.model, directlyConnected, () =>
-			this.models(config).catch(() => [] as ModelOption[]),
+			this.models(config).catch(() => []),
 		);
 
 		if (model !== config.model) log("session", `using ${model} instead of ${config.model}`);
@@ -747,7 +748,7 @@ class GuildAgentImpl implements GuildAgent {
 	): Promise<DiscordContext | undefined> {
 		if (!base) return undefined;
 		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
-		const stored = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+		const stored = readDiscordContext(session?.metadata);
 		// The stored context is authoritative. Falling back to the gateway's
 		// snapshot when a session exists could resurrect a scope that was
 		// cleared since that snapshot was taken.
@@ -935,7 +936,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		const defaultAgent =
 			before?.agent ??
-			(typeof workspace.config.default_agent === "string" ? workspace.config.default_agent : "build");
+			(workspace.config.default_agent ?? "build");
 
 		try {
 			return await this.runTurn(
@@ -967,7 +968,7 @@ class GuildAgentImpl implements GuildAgent {
 			// choices, not the command's.
 			this.appliedModels.delete(request.threadId);
 			await host.sessions
-				.switchAgent({ sessionID, agent: defaultAgent as never })
+				.switchAgent({ sessionID, agent: Agent.ID.make(defaultAgent) })
 				.catch((error) => log("session", `could not restore the session agent: ${describeError(error)}`));
 		}
 	}
@@ -1000,14 +1001,10 @@ class GuildAgentImpl implements GuildAgent {
 		}
 
 		// File-backed commands win by name and are always current.
-		for (const [name, info] of Object.entries(
-			(workspace.config.commands ?? {}) as Record<string, { description?: unknown }>,
-		)) {
+		for (const [name, info] of Object.entries(workspace.config.commands ?? {})) {
 			merged.set(name, {
 				name,
-				...(typeof info.description === "string" && info.description
-					? { description: info.description }
-					: {}),
+				...(info.description ? { description: info.description } : {}),
 			});
 		}
 
@@ -1097,12 +1094,14 @@ class GuildAgentImpl implements GuildAgent {
 	}
 
 	/** Resolve the command waiting on a manual compaction, if there is one. */
-	private settleCompaction(data: Record<string, unknown>, ended: boolean): void {
-		if (data.reason !== "manual" || typeof data.sessionID !== "string") return;
-		const pending = this.compactions.get(data.sessionID);
+	private settleCompaction(data: Schema.JsonObject, ended: boolean): void {
+		const sessionID = stringField(data, "sessionID");
+
+		if (data.reason !== "manual" || sessionID === undefined) return;
+		const pending = this.compactions.get(sessionID);
 
 		if (!pending) return;
-		this.compactions.delete(data.sessionID);
+		this.compactions.delete(sessionID);
 		clearTimeout(pending.timer);
 		pending.resolve(ended ? "ended" : "failed");
 	}
@@ -1560,13 +1559,13 @@ class GuildAgentImpl implements GuildAgent {
 			return;
 		}
 
-		const entries = await this.storage.list({ prefix: KEYS.session });
+		const entries = await this.storage.list<Schema.Json>({ prefix: KEYS.session });
 
 		for (const [key, value] of entries) {
-			if (typeof value !== "string") continue;
+			if (!isString(value)) continue;
 			const threadId = key.slice(KEYS.session.length);
 			const session = await host.sessions.get({ sessionID: value }).catch(() => undefined);
-			const context = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+			const context = readDiscordContext(session?.metadata);
 
 			if (!context) continue;
 
@@ -1750,8 +1749,8 @@ class GuildAgentImpl implements GuildAgent {
 	}
 
 	/** A request settled somewhere else, such as an interrupt or a timeout. */
-	private onPermissionReplied(data: Record<string, unknown>): void {
-		const requestID = typeof data.requestID === "string" ? data.requestID : undefined;
+	private onPermissionReplied(data: Schema.JsonObject): void {
+		const requestID = stringField(data, "requestID");
 
 		if (!requestID) return;
 		const pending = this.pendingApprovals.get(requestID);
@@ -1762,8 +1761,8 @@ class GuildAgentImpl implements GuildAgent {
 		this.settleApproval(pending, data.reply === "reject" ? "🚫 Rejected." : "✅ Approved.");
 	}
 
-	private onFormSettled(data: Record<string, unknown>, status: "replied" | "cancelled"): void {
-		const formID = typeof data.id === "string" ? data.id : undefined;
+	private onFormSettled(data: Schema.JsonObject, status: "replied" | "cancelled"): void {
+		const formID = stringField(data, "id");
 
 		if (!formID) return;
 		const pending = this.pendingForms.get(formID);
@@ -1809,10 +1808,10 @@ class GuildAgentImpl implements GuildAgent {
 			.catch(() => undefined);
 	}
 
-	private async onPermissionAsked(data: Record<string, unknown>): Promise<void> {
-		const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
-		const requestId = typeof data.id === "string" ? data.id : undefined;
-		const action = typeof data.action === "string" ? data.action : undefined;
+	private async onPermissionAsked(data: Schema.JsonObject): Promise<void> {
+		const sessionID = stringField(data, "sessionID");
+		const requestId = stringField(data, "id");
+		const action = stringField(data, "action");
 
 		if (!sessionID || !requestId || !action) return;
 
@@ -1839,8 +1838,8 @@ class GuildAgentImpl implements GuildAgent {
 		}
 
 		const resources = Array.isArray(data.resources) ? data.resources.map(String) : [];
-		const metadata = data.metadata && typeof data.metadata === "object" ? (data.metadata as Record<string, unknown>) : undefined;
-		const detail = describeApproval(action, resources, metadata, typeof data.message === "string" ? data.message : undefined);
+		const metadata = toJsonObject(data.metadata);
+		const detail = describeApproval(action, resources, metadata, stringField(data, "message"));
 		const requester = this.requesterByThread.get(found.threadId);
 
 		const content = [
@@ -1914,7 +1913,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (!host) return undefined;
 		const session = await host.sessions.get({ sessionID }).catch(() => undefined);
-		const context = readDiscordContext(session?.metadata as Record<string, unknown> | undefined);
+		const context = readDiscordContext(session?.metadata);
 
 		if (!context) return undefined;
 		const threadId = known ?? context.thread.id;
@@ -1981,16 +1980,16 @@ class GuildAgentImpl implements GuildAgent {
 		// metadata or the inbox has already drained.
 		try {
 			const rows = this.storage.sql
-				.exec(
+				.exec<{ id: string; last_message_id: string | null }>(
 					`SELECT id, last_message_id FROM schedule
 					 WHERE session_id = ? AND last_message_id IS NOT NULL`,
 					sessionID,
 				)
-				.toArray() as { id?: unknown; last_message_id?: unknown }[];
+				.toArray();
 
 			const row = rows.find((entry) => entry.last_message_id === latestId);
 
-			return typeof row?.id === "string" ? { scheduleId: row.id } : undefined;
+			return row === undefined ? undefined : { scheduleId: row.id };
 		} catch {
 			// The table only exists once a session has had schedules enabled.
 			return undefined;
@@ -2047,15 +2046,12 @@ class GuildAgentImpl implements GuildAgent {
 	 * human's already-finished steps are unaffected; later ones are restricted,
 	 * and they can retry a cross-channel request after the turn.
 	 */
-	private async onScheduleSteered(data: Record<string, unknown>): Promise<void> {
-		const sessionID = data.sessionID;
+	private async onScheduleSteered(data: Schema.JsonObject): Promise<void> {
+		const sessionID = stringField(data, "sessionID");
+		const item = toJsonObject(data.item);
 
-		const item = data.item as
-			| { type?: unknown; payload?: { metadata?: unknown } }
-			| undefined;
-
-		if (typeof sessionID !== "string" || item?.type !== "user") return;
-		const scheduleId = scheduleIdOf(item.payload?.metadata);
+		if (sessionID === undefined || item?.type !== "user") return;
+		const scheduleId = scheduleIdOf(jsonField(jsonField(item, "payload"), "metadata"));
 
 		if (!scheduleId) return;
 		const threadId = this.threadBySession.get(sessionID);
@@ -2071,7 +2067,7 @@ class GuildAgentImpl implements GuildAgent {
 		try {
 			await this.withPrincipalLock(sessionID, async () => {
 				const session = await host.sessions.get({ sessionID });
-				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				const stored = readDiscordContext(session.metadata);
 
 				if (!stored) return;
 
@@ -2115,7 +2111,7 @@ class GuildAgentImpl implements GuildAgent {
 				// attributing it here would clear the parent conversation's speaker
 				// from a child that is not a conversation at all.
 				if (session.parentID) return false;
-				const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+				const stored = readDiscordContext(session.metadata);
 
 				if (!stored) return false;
 				const wake = await this.scheduleWake(sessionID);
@@ -2180,7 +2176,7 @@ class GuildAgentImpl implements GuildAgent {
 			}
 
 			const session = await host.sessions.get({ sessionID });
-			const context = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			const context = readDiscordContext(session.metadata);
 			const scope = context?.scheduleScope;
 
 			if (!scope || scope.scheduleIds.length === 0) return { ok: true };
@@ -2237,7 +2233,7 @@ class GuildAgentImpl implements GuildAgent {
 					if (!fresh) return undefined;
 
 					const freshContext = readDiscordContext(
-						fresh.metadata as Record<string, unknown> | undefined,
+						fresh.metadata,
 					);
 
 					// The last schedule was deleted while this check ran. Do not
@@ -2504,7 +2500,7 @@ class GuildAgentImpl implements GuildAgent {
 			if (field.type === "boolean") {
 				answer[field.key] = value === true;
 			} else if (field.type === "number" || field.type === "integer") {
-				const number = typeof value === "string" ? Number(value) : Number.NaN;
+				const number = isString(value) ? Number(value) : Number.NaN;
 
 				if (!Number.isFinite(number)) return { ok: false, message: `**${field.title}** must be a number.` };
 				answer[field.key] = field.type === "integer" ? Math.trunc(number) : number;
@@ -2691,20 +2687,12 @@ class GuildAgentImpl implements GuildAgent {
 		this.settleForm(pending, `Cancelled: ${message}`);
 	}
 
-	private async onFormCreated(data: Record<string, unknown>): Promise<void> {
-		const form = data.form as
-			| {
-					id?: unknown;
-					sessionID?: unknown;
-					title?: unknown;
-					metadata?: unknown;
-					fields?: unknown;
-			  }
-			| undefined;
+	private async onFormCreated(data: Schema.JsonObject): Promise<void> {
+		const form = toJsonObject(data.form);
+		const formId = form === undefined ? undefined : stringField(form, "id");
+		const formSessionID = form === undefined ? undefined : stringField(form, "sessionID");
 
-		if (!form || typeof form.id !== "string" || typeof form.sessionID !== "string") return;
-		const formId = form.id;
-		const formSessionID = form.sessionID;
+		if (formId === undefined || formSessionID === undefined) return;
 
 		if (this.pendingForms.has(formId)) return;
 
@@ -2748,17 +2736,16 @@ class GuildAgentImpl implements GuildAgent {
 			return;
 		}
 
-		const metadata = form.metadata && typeof form.metadata === "object" ? (form.metadata as Record<string, unknown>) : undefined;
+		const metadata = form === undefined ? undefined : toJsonObject(form.metadata);
 		const isMcp = metadata?.kind === "mcp-elicitation";
-		const server = isMcp && typeof metadata?.server === "string" ? metadata.server : "Eryn";
+		const server = (isMcp ? stringField(metadata, "server") : undefined) ?? "Eryn";
 		const links = this.currentConfig?.links ?? (await this.store.links());
 		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
-		const fields = Array.isArray(form.fields) ? form.fields.map(formField).filter(Boolean) as FormField[] : [];
-		const message = typeof metadata?.message === "string" ? metadata.message : undefined;
+		const rawFields = form === undefined ? undefined : jsonField(form, "fields");
+		const fields = Array.isArray(rawFields) ? rawFields.flatMap((field) => formField(field) ?? []) : [];
+		const message = stringField(metadata, "message");
 
-		const title = typeof form.title === "string" && form.title.trim()
-			? form.title.trim()
-			: `${server} needs some information`;
+		const title = stringField(form, "title")?.trim() || `${server} needs some information`;
 
 		const requester = this.requesterByThread.get(found.threadId);
 
@@ -2890,12 +2877,14 @@ class GuildAgentImpl implements GuildAgent {
 	private async saveDiscordContext(
 		host: HostInterface,
 		sessionID: string,
-		metadata: Record<string, unknown> | undefined,
+		metadata: Schema.JsonObject | undefined,
 		discord: DiscordContext,
 	): Promise<void> {
+		// SAFETY: OpenCode spells metadata JSON with mutable arrays, while a decoded
+		// `DiscordContext` holds readonly ones; the stored value is the same JSON.
 		await host.sessions.update({
 			sessionID,
-			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord } as unknown as SessionMetadata,
+			metadata: { ...metadata, [DISCORD_METADATA_KEY]: discord } as never,
 		});
 	}
 
@@ -2923,7 +2912,7 @@ class GuildAgentImpl implements GuildAgent {
 		// A rename event carries no speaker or scope. Keep what the stored
 		// context already has so a rename between two messages neither erases
 		// who may act nor drops the schedules' capability scope.
-		const existing = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+		const existing = readDiscordContext(session.metadata);
 
 		const merged: DiscordContext = {
 			...discord,
@@ -3156,9 +3145,9 @@ class GuildAgentImpl implements GuildAgent {
 		const cached = this.sessionByThread.get(threadId);
 
 		if (cached) return cached;
-		const stored = await this.storage.get<unknown>(KEYS.session + threadId);
+		const stored = await this.storage.get<Schema.Json>(KEYS.session + threadId);
 
-		if (typeof stored !== "string") return undefined;
+		if (!isString(stored)) return undefined;
 		this.remember(threadId, stored);
 
 		return stored;
@@ -3265,13 +3254,14 @@ class GuildAgentImpl implements GuildAgent {
 		this.consuming = settled;
 	}
 
-	private async handleEvent(event: unknown): Promise<void> {
-		const envelope = event as { type?: unknown; created?: unknown; data?: unknown };
+	private async handleEvent(event: Schema.Json | undefined): Promise<void> {
+		const type = stringField(event, "type");
+		const data = toJsonObject(jsonField(event, "data"));
+		const created = numberField(event, "created");
 
-		if (typeof envelope.type !== "string" || !envelope.data || typeof envelope.data !== "object") return;
-		const data = envelope.data as Record<string, unknown>;
+		if (type === undefined || data === undefined) return;
 
-		if (envelope.type === "form.created") {
+		if (type === "form.created") {
 			void this.onFormCreated(data).catch((error) =>
 				log("session", `could not show an MCP form: ${describeError(error)}`),
 			);
@@ -3279,35 +3269,35 @@ class GuildAgentImpl implements GuildAgent {
 			return;
 		}
 
-		if (envelope.type === "permission.replied") {
+		if (type === "permission.replied") {
 			this.onPermissionReplied(data);
 
 			return;
 		}
 
-		if (envelope.type === "form.replied" || envelope.type === "form.cancelled") {
-			this.onFormSettled(data, envelope.type === "form.replied" ? "replied" : "cancelled");
+		if (type === "form.replied" || type === "form.cancelled") {
+			this.onFormSettled(data, type === "form.replied" ? "replied" : "cancelled");
 
 			return;
 		}
 
-		if (envelope.type === "session.inbox.enqueued") {
+		if (type === "session.inbox.enqueued") {
 			await this.onScheduleSteered(data);
 
 			return;
 		}
 
-		const sessionID = data.sessionID;
+		const sessionID = stringField(data, "sessionID");
 
-		if (typeof sessionID !== "string") return;
+		if (sessionID === undefined) return;
 
-		if (envelope.type === "session.compaction.ended" || envelope.type === "session.compaction.failed") {
-			this.settleCompaction(data, envelope.type === "session.compaction.ended");
+		if (type === "session.compaction.ended" || type === "session.compaction.failed") {
+			this.settleCompaction(data, type === "session.compaction.ended");
 
 			return;
 		}
 
-		if (envelope.type === "permission.asked") {
+		if (type === "permission.asked") {
 			void this.onPermissionAsked(data).catch((error) =>
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
@@ -3318,7 +3308,7 @@ class GuildAgentImpl implements GuildAgent {
 		// A start event with no turn of ours is either a schedule firing or a
 		// prompt this object did not see. Attribute or clear the speaker before
 		// adopting, so the tools never read the previous speaker's access.
-		if (envelope.type === "session.execution.started" || envelope.type === "session.step.started") {
+		if (type === "session.execution.started" || type === "session.step.started") {
 			const mapped = this.threadBySession.get(sessionID);
 			const active = mapped ? this.runs.get(mapped)?.turn : undefined;
 
@@ -3331,7 +3321,7 @@ class GuildAgentImpl implements GuildAgent {
 			// A schedule fires the Session directly, with no thread prompt to own
 			// the turn. Adopt it so its reply still lands in the Discord
 			// conversation recorded on the Session.
-			if (envelope.type === "session.execution.started" || envelope.type === "session.step.started") {
+			if (type === "session.execution.started" || type === "session.step.started") {
 				await this.adopt(sessionID);
 			}
 
@@ -3345,12 +3335,12 @@ class GuildAgentImpl implements GuildAgent {
 		// turn: its late `execution.interrupted` must not complete the new turn.
 		const floor = this.turnFloor.get(threadId);
 
-		if (floor !== undefined && typeof envelope.created === "number" && envelope.created < floor) return;
+		if (floor !== undefined && created !== undefined && created < floor) return;
 
 		// Ignore events that predate this turn, such as the previous one going idle.
-		if (typeof envelope.created === "number" && envelope.created < turn.createdAt - 1_000) return;
+		if (created !== undefined && created < turn.createdAt - 1_000) return;
 
-		applyTurnEvent(turn, envelope.type, data);
+		applyTurnEvent(turn, type, data);
 	}
 
 	/**
@@ -3377,7 +3367,7 @@ class GuildAgentImpl implements GuildAgent {
 			// A subagent is not a conversation of its own: its events must not
 			// rebind the parent thread or take over the parent's turn.
 			if (session.parentID) return;
-			const stored = readDiscordContext(session.metadata as Record<string, unknown> | undefined);
+			const stored = readDiscordContext(session.metadata);
 			// A scheduled turn starts from metadata with no message to carry a
 			// rename, so correct the names before following the turn.
 			const refreshed = stored ? await this.refreshContext(stored) : undefined;
@@ -3482,31 +3472,26 @@ async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<
  * The runner writes `{ schedule: { id, run, dueAt, ... } }` when it prompts a
  * session. A human message has no such key.
  */
-function scheduleIdOf(metadata: unknown): string | undefined {
-	if (!metadata || typeof metadata !== "object") return undefined;
-	const schedule = (metadata as { schedule?: unknown }).schedule;
-
-	if (!schedule || typeof schedule !== "object") return undefined;
-	const id = (schedule as { id?: unknown }).id;
-
-	return typeof id === "string" ? id : undefined;
+function scheduleIdOf(metadata: Schema.Json | undefined): string | undefined {
+	return stringField(jsonField(metadata, "schedule"), "id");
 }
 
 /** A one-line, human-readable description of what an approval is for. */
 function describeApproval(
 	action: string,
 	resources: readonly string[],
-	metadata: Record<string, unknown> | undefined,
+	metadata: Schema.JsonObject | undefined,
 	message: string | undefined,
 ): string {
-	const input = metadata?.input && typeof metadata.input === "object" ? (metadata.input as Record<string, unknown>) : undefined;
+	const input = toJsonObject(jsonField(metadata, "input"));
 	const first = resources.find((resource) => resource !== "*");
-	const command = typeof input?.command === "string" ? input.command : undefined;
-	const path = typeof input?.filePath === "string" ? input.filePath : first;
+	const command = stringField(input, "command");
+	const path = stringField(input, "filePath") ?? first;
+	const targetChannelId = stringField(metadata, "targetChannelId");
 	let detail: string;
 
-	if (action === "discord.cross-channel" && typeof metadata?.targetChannelId === "string") {
-		detail = `Act in another Discord channel: <#${metadata.targetChannelId}>`;
+	if (action === "discord.cross-channel" && targetChannelId !== undefined) {
+		detail = `Act in another Discord channel: <#${targetChannelId}>`;
 	} else if ((action === "bash" || action === "shell") && command) detail = `Run \`${command}\``;
 	else if ((action === "edit" || action === "write" || action === "read") && path) detail = `${action === "read" ? "Read" : "Change"} \`${path}\``;
 	else if (message) detail = message;
@@ -3591,47 +3576,50 @@ function formAnswerLabel(field: FormField, answer: FormAnswer): string {
 }
 
 /** Normalise one OpenCode form field for Discord. */
-function formField(raw: unknown): FormField | undefined {
-	if (!raw || typeof raw !== "object") return undefined;
-	const field = raw as Record<string, unknown>;
+function formField(raw: Schema.Json): FormField | undefined {
+	if (!isJsonObject(raw)) return undefined;
+	const key = stringField(raw, "key");
 
-	if (typeof field.key !== "string") return undefined;
+	if (key === undefined) return undefined;
 
 	// A hidden field is not a question; the server supplies its answer or its
 	// `when` condition excludes it, so showing it would be a lie.
-	if (field.hidden === true) return undefined;
+	if (raw.hidden === true) return undefined;
 
-	const options = Array.isArray(field.options)
-		? field.options.flatMap((option) => {
-				if (typeof option === "string") return [{ value: option, label: option }];
+	const listed = jsonField(raw, "options");
 
-				if (!option || typeof option !== "object") return [];
-				const candidate = option as { value?: unknown; label?: unknown; description?: unknown };
+	const options = Array.isArray(listed)
+		? listed.flatMap((option) => {
+				if (isString(option)) return [{ value: option, label: option }];
 
-				if (typeof candidate.value !== "string") return [];
+				const value = stringField(option, "value");
 
-				return [
-					{
-						value: candidate.value,
-						label: typeof candidate.label === "string" ? candidate.label : candidate.value,
-						...(typeof candidate.description === "string" ? { description: candidate.description } : {}),
-					},
-				];
+				if (value === undefined) return [];
+				const label = stringField(option, "label") ?? value;
+				const description = stringField(option, "description");
+
+				return [{ value, label, ...(description === undefined ? {} : { description }) }];
 			})
 		: undefined;
 
+	const description = stringField(raw, "description");
+	const placeholder = stringField(raw, "placeholder");
+	const url = stringField(raw, "url");
+	const minItems = numberField(raw, "minItems");
+	const maxItems = numberField(raw, "maxItems");
+
 	return {
-		key: field.key,
-		title: typeof field.title === "string" ? field.title : field.key,
-		type: typeof field.type === "string" ? field.type : "string",
-		required: field.required === true,
-		...(typeof field.description === "string" ? { description: field.description } : {}),
-		...(typeof field.placeholder === "string" ? { placeholder: field.placeholder } : {}),
-		...(typeof field.url === "string" ? { url: field.url } : {}),
+		key,
+		title: stringField(raw, "title") ?? key,
+		type: stringField(raw, "type") ?? "string",
+		required: raw.required === true,
+		...(description === undefined ? {} : { description }),
+		...(placeholder === undefined ? {} : { placeholder }),
+		...(url === undefined ? {} : { url }),
 		...(options?.length ? { options } : {}),
-		...(field.custom === true ? { custom: true } : {}),
-		...(typeof field.minItems === "number" ? { minItems: field.minItems } : {}),
-		...(typeof field.maxItems === "number" ? { maxItems: field.maxItems } : {}),
+		...(raw.custom === true ? { custom: true } : {}),
+		...(minItems === undefined ? {} : { minItems }),
+		...(maxItems === undefined ? {} : { maxItems }),
 	};
 }
 

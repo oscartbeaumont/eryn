@@ -45,7 +45,7 @@ export function attachmentsOf(message: DiscordMessage): PromptAttachment[] {
 				url,
 				...(attachment.filename ? { name: attachment.filename } : {}),
 				...(attachment.content_type ? { contentType: attachment.content_type } : {}),
-				...(typeof attachment.size === "number" ? { size: attachment.size } : {}),
+				...(attachment.size === undefined ? {} : { size: attachment.size }),
 			},
 		];
 	});

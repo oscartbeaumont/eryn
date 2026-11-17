@@ -20,12 +20,14 @@ import {
 	MCP_ALL,
 	POLICY_GROUPS,
 	PRESET_HINTS,
+	isBuiltinProfile,
+	isPolicyGroup,
 	matchProfile,
 	policyTitle,
 	summaryLines,
-	type PolicyGroup,
+	type EffectTable,
 } from "../../session/policy";
-import type { Policy, PolicyEffect, PolicyPreset, PolicyState } from "../../session/models";
+import type { Policy, PolicyEffect, PolicyState } from "../../session/models";
 import {
 	claim,
 	closeRow,
@@ -160,7 +162,10 @@ function menuRows(state: PolicyState) {
 		...state.profiles.slice(0, MAX_SELECT_OPTIONS - 1).map((profile) => ({
 			label: profile.name,
 			value: profile.id,
-			description: (PRESET_HINTS[profile.id as PolicyPreset] ?? "Custom profile").slice(0, 100),
+			description: ((isBuiltinProfile(profile.id) ? PRESET_HINTS[profile.id] : undefined) ?? "Custom profile").slice(
+				0,
+				100,
+			),
 			default: !inherits && active === profile.id,
 		})),
 	];
@@ -273,7 +278,7 @@ function groupTitle(key: string): string {
 
 	if (key.startsWith("mcp:")) return key.slice(4);
 
-	return GROUP_LABELS[key as PolicyGroup] ?? key;
+	return (isPolicyGroup(key) ? GROUP_LABELS[key] : undefined) ?? key;
 }
 
 function currentEffect(state: PolicyState, key: string): PolicyEffect {
@@ -324,8 +329,8 @@ async function applyEffect(
 
 	if (!target) return;
 	const state = await request.session.policy(stateRequest(target));
-	const tools: Record<string, PolicyEffect> = { ...state.own?.tools };
-	const mcp: Record<string, PolicyEffect> = { ...state.own?.mcp };
+	const tools: EffectTable = { ...state.own?.tools };
+	const mcp: EffectTable = { ...state.own?.mcp };
 
 	if (key === "mcp") {
 		if (effect === "inherit") delete mcp[MCP_ALL];
@@ -406,7 +411,7 @@ export async function policyComponent(
 	if (customId.startsWith(PRESET_ID)) {
 		const value = customId.slice(PRESET_ID.length);
 
-		if ((LISTED_PROFILES as readonly string[]).includes(value)) {
+		if (LISTED_PROFILES.some((id) => id === value)) {
 			return await claim(request, "update", () => applyProfile(request, value));
 		}
 	}

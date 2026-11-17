@@ -258,7 +258,7 @@ function renderAttachment(file: Attachment): string {
 
 	if (file.content_type) entries.push(["contentType", file.content_type]);
 
-	if (typeof file.size === "number") entries.push(["size", String(file.size)]);
+	if (file.size !== undefined) entries.push(["size", String(file.size)]);
 
 	return `  ${selfClosing("attachment", entries)}`;
 }
