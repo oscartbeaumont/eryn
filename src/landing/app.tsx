@@ -79,7 +79,7 @@ function Action(props: {
 			class={
 				props.primary
 					? "inline-flex items-center justify-center rounded-md border border-ink bg-ink px-[18px] py-[13px] text-sm font-semibold text-canvas transition-colors hover:border-[#d9d9de] hover:bg-[#d9d9de]"
-					: "inline-flex items-center justify-center rounded-md border border-line bg-white/5 px-[18px] py-[13px] text-sm font-semibold text-ink transition-colors hover:border-[#3a3a42] hover:bg-white/[0.07]"
+					: "inline-flex items-center justify-center rounded-md border border-line bg-[#141418] px-[18px] py-[13px] text-sm font-semibold text-ink transition-colors hover:border-[#3a3a42] hover:bg-[#1b1b21]"
 			}
 			href={props.href}
 			rel={props.href.startsWith("http") ? "noreferrer" : undefined}
