@@ -1,0 +1,49 @@
+minimumReleaseAgeExclude:
+  - '@cloudflare/build-output-utils@1.0.0-rc.1'
+  - '@cloudflare/config@1.0.0-rc.1'
+  - '@cloudflare/runtime-types@0.1.30'
+  - '@cloudflare/vite-plugin@2.0.0-rc.1'
+  - '@opencode/ai@2.3.2'
+  - '@opencode/client@2.3.2'
+  - '@opencode/codemode@2.3.2'
+  - '@opencode/core@2.3.2'
+  - '@opencode/plugin-browser@2.3.2'
+  - '@opencode/plugin@2.3.2'
+  - '@opencode/protocol@2.3.2'
+  - '@opencode/schema@2.3.2'
+  - '@opencode/sdk@2.3.2'
+  - '@opencode/server@2.3.2'
+  - '@opencode/simulation@2.3.2'
+  - '@opencode/util@2.3.2'
+  - '@solidjs/compiler-darwin-arm64@2.0.0'
+  - '@solidjs/compiler-darwin-x64@2.0.0'
+  - '@solidjs/compiler-linux-arm64-gnu@2.0.0'
+  - '@solidjs/compiler-linux-x64-gnu@2.0.0'
+  - '@solidjs/compiler-wasm32-wasi@2.0.0'
+  - '@solidjs/compiler-win32-x64-msvc@2.0.0'
+  - '@solidjs/compiler@2.0.0'
+  - '@solidjs/signals@2.0.0'
+  - '@solidjs/vite-plugin@3.0.1'
+  - '@solidjs/web@2.0.0'
+  - cf@1.0.0-rc.1
+  - miniflare@5.20261117.0-beta
+  - solid-js@2.0.0
+
+allowBuilds:
+  esbuild: true
+  workerd: true
+  '@mongodb-js/zstd': false
+  '@parcel/watcher': false
+  core-js: false
+  node-liblzma: false
+  tree-sitter-bash: false
+  tree-sitter-powershell: false
+
+overrides:
+  seroval: ^1.7.6
+  seroval-plugins: ^1.7.6
+  fast-xml-parser@<5.12.0: 5.12.0
+  glob@>=9.0.0 <=14.0.1: 14.0.2
+  minimatch@>=7.0.0 <11.0.1: 11.0.1
+  undici@>=7.0.0 <7.30.1: 7.30.1
+  zod@<4.6.6: 4.6.7
