@@ -5,7 +5,7 @@
   "engines": {
     "node": "^22.18.0 || >=23.5.0"
   },
-  "packageManager": "pnpm@10.33.1",
+  "packageManager": "pnpm@12.21.0",
   "scripts": {
     "dev": "cf dev",
     "build": "cf build",
@@ -30,7 +30,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "2.0.0-rc.1",
     "@oxlint/plugins": "1.94.0",
-    "@solidjs/vite-plugin": "3.0.0",
+    "@solidjs/vite-plugin": "3.0.1",
     "@solidjs/web": "2.0.0",
     "@tailwindcss/vite": "^4.3.5",
     "@types/node": "^26.6.6",
@@ -40,28 +40,5 @@
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "workerd"
-    ],
-    "ignoredBuiltDependencies": [
-      "@parcel/watcher",
-      "tree-sitter-bash",
-      "tree-sitter-powershell",
-      "@mongodb-js/zstd",
-      "node-liblzma",
-      "core-js"
-    ],
-    "overrides": {
-      "seroval": "^1.7.6",
-      "seroval-plugins": "^1.7.6",
-      "fast-xml-parser@<5.12.0": "5.12.0",
-      "glob@>=9.0.0 <=14.0.1": "14.0.2",
-      "minimatch@>=7.0.0 <11.0.1": "11.0.1",
-      "undici@>=7.0.0 <7.30.1": "7.30.1",
-      "zod@<4.6.6": "4.6.7"
-    }
   }
 }
