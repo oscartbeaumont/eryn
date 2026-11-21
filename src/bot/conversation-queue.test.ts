@@ -23,7 +23,7 @@ test("a slower check cannot let a later message overtake an earlier one", async 
 		order.push("second");
 	});
 	// The second is ready first, but must wait for the first message.
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise((resolve) => { setTimeout(resolve, 0); });
 	assert.equal(order.length, 0);
 
 	first.ready(async () => {

@@ -8,30 +8,13 @@
  */
 
 import { describeError } from "../../errors";
-import {
-	actionButton,
-	buttonRow,
-	linkButton,
-	selectRow,
-	type DiscordButton,
-	type DiscordComponent,
-	type DiscordSelectOption,
-	type DiscordModal,
-} from "../../discord/components";
+import { actionButton, buttonRow, linkButton, selectRow } from '../../discord/components';
+import type { DiscordButton, DiscordComponent, DiscordSelectOption, DiscordModal } from '../../discord/components';
 import type { IntegrationOption } from "../../session/models";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID, payloadId } from "../ids";
 import { decodeProviderChoice, encodeProviderChoice } from "../provider-choice";
-import {
-	claim,
-	responder,
-	backRow,
-	removeRow,
-	retryRow,
-	textInput,
-	textModal,
-	MAX_SELECT_OPTIONS,
-	type InteractionRequest,
-} from "./interaction";
+import { claim, responder, backRow, removeRow, retryRow, textInput, textModal, MAX_SELECT_OPTIONS } from './interaction';
+import type { InteractionRequest } from './interaction';
 import { modelScreen } from "./models";
 
 /** The setup menu's provider button, owned here so this module can re-render itself. */
@@ -150,8 +133,7 @@ function signInRow(request: InteractionRequest, integrationID: string, attemptID
 	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
 	buttons.push(
 		actionButton("I've finished", OAUTH_CHECK_ID.of(`${integrationID}:${attemptID}`, request.dmGuildId), 3),
-	);
-	buttons.push(actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
+	 actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
 
 	return buttonRow(buttons);
 }
@@ -215,8 +197,7 @@ export async function providerScreen(request: InteractionRequest, notice?: strin
 			options: providerOptions(providers),
 		}),
 		buttonRow([actionButton("Search all providers", request.id(SEARCH_ID), 2)]),
-	);
-	components.push(buttonRow(navigation));
+	 buttonRow(navigation));
 
 	await answer.reply(providerScreenLines(connected, providers, notice).join("\n"), components);
 }
@@ -230,11 +211,9 @@ function emptyProviderLines(connected: readonly string[], notice: string | undef
 	lines.push("**Providers**");
 
 	if (connected.length) {
-		lines.push(`Connected: **${connected.join("**, **")}**`);
-		lines.push("This deployment has no other provider it can connect right now.");
+		lines.push(`Connected: **${connected.join("**, **")}**`, "This deployment has no other provider it can connect right now.");
 	} else {
-		lines.push("No provider is connected yet — Eryn needs one to answer.");
-		lines.push("Eryn cannot connect any inference provider in this deployment right now.");
+		lines.push("No provider is connected yet — Eryn needs one to answer.", "Eryn cannot connect any inference provider in this deployment right now.");
 	}
 
 	return lines;
@@ -253,11 +232,9 @@ function providerScreenLines(
 	lines.push("**Providers**");
 
 	if (connected.length) {
-		lines.push(`Connected: **${connected.join("**, **")}**`);
-		lines.push("Pick another to add it, or a connected one to replace its credentials.");
+		lines.push(`Connected: **${connected.join("**, **")}**`, "Pick another to add it, or a connected one to replace its credentials.");
 	} else {
-		lines.push("No provider is connected yet — Eryn needs one to answer.");
-		lines.push("Pick a provider below.");
+		lines.push("No provider is connected yet — Eryn needs one to answer.", "Pick a provider below.");
 	}
 
 	if (providers.length > MAX_SELECT_OPTIONS) {
@@ -369,7 +346,7 @@ async function pickProviderMethod(request: InteractionRequest, value: string): P
 	}
 
 	if (methods.length === 1) {
-		const method = methods[0]!;
+		const method = methods[0];
 
 		if (method.type === "key") {
 			// An older screen carried no hint, or the methods changed since it was
@@ -449,8 +426,7 @@ async function startProviderMethod(
 		const buttons: DiscordButton[] = [];
 
 		if (result.url.length <= MAX_LINK_URL) buttons.push(linkButton("Open sign-in page", result.url));
-		buttons.push(actionButton("Enter code", CODE_ID.of(integrationID, request.dmGuildId), 1));
-		buttons.push(actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
+		buttons.push(actionButton("Enter code", CODE_ID.of(integrationID, request.dmGuildId), 1), actionButton("Back", request.id(PROVIDER_SCREEN_ID), 2));
 		const lines = [`**${integrationID}** needs a code to finish signing in.`];
 
 		if (result.instructions) lines.push(result.instructions);
@@ -586,7 +562,7 @@ async function promptRemoveProvider(request: InteractionRequest): Promise<void> 
 	}
 
 	if (providers.length === 1) {
-		await confirmProviderRemoval(request, providers[0]!.integrationID);
+		await confirmProviderRemoval(request, providers[0].integrationID);
 
 		return;
 	}

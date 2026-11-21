@@ -11,17 +11,14 @@
 import { ConfigMarkdown } from "@opencode/core/config/markdown";
 import type { Configuration } from "@opencode/sdk/workerd";
 import type { Schema } from "effect";
-import { parse, type ParseError } from "jsonc-parser";
+import { parse } from 'jsonc-parser';
+import type { ParseError } from 'jsonc-parser';
 
 import { log } from "../config.ts";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import { base64ToBytes, bytesToText } from "../plugins/workspace/bytes.ts";
-import {
-	fileStore,
-	type FileStore,
-	type StoredEntry,
-	type WorkspaceStorage,
-} from "../plugins/workspace/store.ts";
+import { fileStore } from '../plugins/workspace/store.ts';
+import type { FileStore, StoredEntry, WorkspaceStorage } from '../plugins/workspace/store.ts';
 
 import {
 	AGENTS_ROOT,
@@ -127,7 +124,7 @@ function boolean(value: Schema.Json | undefined): boolean | undefined {
 
 function parseConfig(source: string, body: string): ConfigObject {
 	const errors: ParseError[] = [];
-	const parsed = parse(body, errors, { allowTrailingComma: true });
+	const parsed = parse(body, errors, { allowTrailingComma: true }) as Schema.Json | undefined;
 
 	if (errors.length) {
 		log("session", `ignored ${source}: invalid JSONC`);
@@ -150,7 +147,7 @@ function parseConfig(source: string, body: string): ConfigObject {
 function urls(value: Schema.Json | undefined): string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 
-	const found = value.filter((entry): entry is string => {
+	const found = value.filter((entry: Schema.Json): entry is string => {
 		if (!isString(entry)) return false;
 
 		try {
@@ -461,7 +458,7 @@ function assembleConfig(
 				...BASE_CONFIG.agents.title,
 				...record(userAgentConfig?.title),
 			},
-		} as never,
+		},
 		// Eryn relies on schedules and MCP event watches, so keep both enabled
 		// even when a hand-edited config omits or disables either flag.
 		// SAFETY: both flags are booleans; OpenCode validates the rest.
@@ -469,7 +466,7 @@ function assembleConfig(
 			...record(userExperimental),
 			schedules: true,
 			mcp_events: true,
-		} as never,
+		},
 	};
 
 	if (skillUrls) config.skills = skillUrls;

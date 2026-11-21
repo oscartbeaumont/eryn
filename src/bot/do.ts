@@ -22,36 +22,27 @@
 import { DurableObject } from "cloudflare:workers";
 import { Option, Schema } from "effect";
 
-import { analytics as productAnalytics, type Analytics } from "../analytics";
+import { analytics as productAnalytics } from '../analytics';
+import type { Analytics } from '../analytics';
 import { INTERACTIONS_PATH, log as botLog } from "../config";
 import { ORIGIN_HEADER, deployRestart } from "../deploy";
 import { describeError } from "../errors";
 import { isLoopback, json } from "../http";
-import {
-	DEFAULT_THREAD_NAME,
-	DiscordError,
-	THREAD_TYPES,
-	discordRest,
-	type DiscordChannelRef,
-	type DiscordRest,
-	type DiscordUser,
-} from "../discord/api";
+import { DEFAULT_THREAD_NAME, DiscordError, THREAD_TYPES, discordRest } from '../discord/api';
+import type { DiscordChannelRef, DiscordRest, DiscordUser } from '../discord/api';
 import { applicationId, resolveOrigin } from "../discord/application";
 import { renderChannelRenamed, renderMessage, renderThreadCreated } from "../discord/render";
-import {
-	DiscordSocket,
-	type DiscordChannel,
-	type DiscordGuildCreate,
-	type DiscordInteraction,
-	type DiscordMessage,
-	type DiscordSocketHandlers,
-} from "../discord/socket";
-import { type Mutable } from "../mutable.ts";
-import { DiscordContextSchema, type DiscordContext, type PromptRequest } from "../session/models";
-import { erynCommand, handleInteraction, sameCommands, type CommandContext } from "./commands";
+import { DiscordSocket } from '../discord/socket';
+import type { DiscordChannel, DiscordGuildCreate, DiscordInteraction, DiscordMessage, DiscordSocketHandlers } from '../discord/socket';
+import type { Mutable } from '../mutable.ts';
+import { DiscordContextSchema } from '../session/models';
+import type { DiscordContext, PromptRequest } from '../session/models';
+import { erynCommand, handleInteraction, sameCommands } from './commands';
+import type { CommandContext } from './commands';
 import { canManage } from "./commands/interaction";
 import { SessionClient } from "./client";
-import { ConversationQueues, type ConversationTicket } from "./conversation-queue";
+import { ConversationQueues } from './conversation-queue';
+import type { ConversationTicket } from './conversation-queue';
 import { dismissInstallGreeting, maybeAnnounceInstall } from "./install";
 import { DiscordLookups } from "./lookups";
 import { attachmentsOf, authorInfo, isBotMessage, isMention, isReplyTo, isStopText, mentionInfo, stripMention, threadName } from "./message";
@@ -239,7 +230,7 @@ export class BotGateway extends DurableObject<Env> {
 		// A fresh instance — after a deploy reset or an eviction — has no socket.
 		// Connect and arm the keepalive alarm before the first request, so the bot
 		// comes back on its own and is not evicted before the next cron wake.
-		state.blockConcurrencyWhile(() => this.keepAlive());
+		void state.blockConcurrencyWhile(() => this.keepAlive());
 	}
 
 	/** The events the gateway passes on, counted so a restart can wait for them. */
@@ -262,7 +253,7 @@ export class BotGateway extends DurableObject<Env> {
 	private track(run: () => Promise<void>, failure: string): void {
 		this.active += 1;
 		void run()
-			.catch((error) => log(`${failure}: ${describeError(error)}`))
+			.catch((error: unknown) => log(`${failure}: ${describeError(error)}`))
 			.finally(() => {
 				this.active -= 1;
 			});
@@ -423,7 +414,7 @@ export class BotGateway extends DurableObject<Env> {
 	/** Resolve the bot identity and connect. Idempotent. */
 	private ensure(): Promise<void> {
 		if (!this.token) return Promise.resolve();
-		this.initialization ??= this.initialize().catch((error) => {
+		this.initialization ??= this.initialize().catch((error: unknown) => {
 			this.initialization = undefined;
 			log(`initialization failed, will retry on the next wake: ${describeError(error)}`);
 		});
@@ -456,7 +447,7 @@ export class BotGateway extends DurableObject<Env> {
 
 		const stored = await this.ctx.storage.get<number>("gateway:shards").catch(() => undefined);
 
-		const recommended = await this.rest.gatewayShards().catch((error) => {
+		const recommended = await this.rest.gatewayShards().catch((error: unknown) => {
 			log(`could not read the recommended shard count: ${describeError(error)}`);
 
 			return undefined;
@@ -469,7 +460,7 @@ export class BotGateway extends DurableObject<Env> {
 		if (shards === undefined) throw new Error("Discord's shard count is not known yet");
 
 		if (recommended !== undefined && recommended !== stored) {
-			await this.ctx.storage.put("gateway:shards", recommended).catch((error) => {
+			await this.ctx.storage.put("gateway:shards", recommended).catch((error: unknown) => {
 				log(`could not remember the shard count: ${describeError(error)}`);
 			});
 		}
@@ -500,7 +491,7 @@ export class BotGateway extends DurableObject<Env> {
 		if (!origin) return;
 		const url = `${origin}${INTERACTIONS_PATH}`;
 
-		const current = await this.rest.interactionsEndpoint().catch((error) => {
+		const current = await this.rest.interactionsEndpoint().catch((error: unknown) => {
 			log(`could not read the interactions endpoint: ${describeError(error)}`);
 
 			return undefined;
@@ -529,7 +520,7 @@ export class BotGateway extends DurableObject<Env> {
 	private ensureCommands(): Promise<void> {
 		if (this.commandsSynced || !this.token) return Promise.resolve();
 		this.commands ??= this.registerCommands()
-			.catch((error) => log(`could not register the commands, will retry: ${describeError(error)}`))
+			.catch((error: unknown) => log(`could not register the commands, will retry: ${describeError(error)}`))
 			.finally(() => {
 				this.commands = undefined;
 			});
@@ -594,7 +585,7 @@ export class BotGateway extends DurableObject<Env> {
 	private async syncCommands(applicationId: string): Promise<boolean> {
 		const desired = [erynCommand()];
 
-		const registered = await this.rest.listCommands(applicationId).catch((error) => {
+		const registered = await this.rest.listCommands(applicationId).catch((error: unknown) => {
 			log(`could not read the global commands, leaving them alone: ${describeError(error)}`);
 
 			return undefined;
@@ -677,7 +668,7 @@ export class BotGateway extends DurableObject<Env> {
 			this.gateway.stop();
 			this.gateway = undefined;
 			await this.ctx.storage.delete("gateway:shards").catch(() => undefined);
-			await this.connectGateway().catch((error) => log(`could not rebuild the gateway: ${describeError(error)}`));
+			await this.connectGateway().catch((error: unknown) => log(`could not rebuild the gateway: ${describeError(error)}`));
 		}
 
 		// A pending restart owns the alarm; replacing it with the keepalive would
@@ -802,7 +793,7 @@ export class BotGateway extends DurableObject<Env> {
 		// before; only a fresh thread needs a notice.
 		if (await this.ownsThread(thread.id)) return;
 
-		await this.rest.joinThread(thread.id).catch((error) => {
+		await this.rest.joinThread(thread.id).catch((error: unknown) => {
 			log(`could not join new thread ${thread.id}: ${describeError(error)}`);
 		});
 		await this.ctx.storage.put(THREAD_PREFIX + thread.id, true);
@@ -946,7 +937,7 @@ export class BotGateway extends DurableObject<Env> {
 	): Promise<DiscordContext | undefined> {
 		if (!(await this.ownsThread(channelId)) && !(await this.ownsChannel(channelId))) return undefined;
 
-		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error) => {
+		const allowed = await this.session(guildId).canInteract(channelId, userId).catch((error: unknown) => {
 			log(`could not check schedule access to ${channelId}: ${describeError(error)}`);
 
 			return { ok: false, message: "Eryn could not verify your access to this conversation." };
@@ -1078,7 +1069,7 @@ export class BotGateway extends DurableObject<Env> {
 		const discord = await this.lookups.context(guildId, parent, { id: ref.id, name: ref.name }, kind);
 		await this.session(guildId)
 			.updateContext(ref.id, discord)
-			.catch((error) => log(`could not record the rename of ${ref.id}: ${describeError(error)}`));
+			.catch((error: unknown) => log(`could not record the rename of ${ref.id}: ${describeError(error)}`));
 	}
 
 	/**
@@ -1095,7 +1086,7 @@ export class BotGateway extends DurableObject<Env> {
 		const isThread = THREAD_TYPES.has(channel.type ?? 0);
 
 		if (!(await this.owns(channel))) return;
-		await this.stopThread(guildId, channel.id, true).catch((error) =>
+		await this.stopThread(guildId, channel.id, true).catch((error: unknown) =>
 			log(`could not stop the turn in deleted ${isThread ? "thread" : "channel"} ${channel.id}: ${describeError(error)}`),
 		);
 		await this.ctx.storage.delete((isThread ? THREAD_PREFIX : CHANNEL_PREFIX) + channel.id);
@@ -1152,7 +1143,7 @@ export class BotGateway extends DurableObject<Env> {
 		// must not be dropped.
 		await this.rest
 			.joinThread(channel.id)
-			.catch((error) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
+			.catch((error: unknown) => log(`could not join mentioned thread ${channel.id}: ${describeError(error)}`));
 		await this.ctx.storage.put(THREAD_PREFIX + channel.id, true);
 
 		return true;
@@ -1212,7 +1203,7 @@ export class BotGateway extends DurableObject<Env> {
 			if (text) {
 				const answered: { consumed: boolean; message?: string } = await this.session(guildId)
 					.answerFormText({ threadId: channel.id, userId: authorId, text })
-					.catch((error) => {
+					.catch((error: unknown) => {
 						log(`could not answer a form in ${channel.id}: ${describeError(error)}`);
 
 						return { consumed: false };
@@ -1236,7 +1227,7 @@ export class BotGateway extends DurableObject<Env> {
 
 				// A scheduled conversation has a capability scope. A member below that
 				// scope may still read a public thread, but must not steer the session.
-				const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error) => {
+				const allowed = await this.session(guildId).canInteract(channel.id, authorId).catch((error: unknown) => {
 					log(`could not check schedule access to ${channel.id}: ${describeError(error)}`);
 
 					return { ok: false, message: "Eryn could not verify your access to this conversation." };
@@ -1332,7 +1323,7 @@ export class BotGateway extends DurableObject<Env> {
 			if (authorId) {
 				await this.rest
 					.addThreadMember(threadId, authorId)
-					.catch((error) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
+					.catch((error: unknown) => log(`could not add ${authorId} to thread ${threadId}: ${describeError(error)}`));
 			}
 
 			if (!text && attachmentsOf(message).length === 0) {
@@ -1435,7 +1426,7 @@ export class BotGateway extends DurableObject<Env> {
 	 */
 	private async stopThread(guildId: string | undefined, threadId: string, gone = false): Promise<void> {
 		if (guildId === undefined) return;
-		await this.session(guildId).interrupt(threadId, gone).catch((error) => {
+		await this.session(guildId).interrupt(threadId, gone).catch((error: unknown) => {
 			log(`could not interrupt ${threadId}: ${describeError(error)}`);
 		});
 	}

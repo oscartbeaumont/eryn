@@ -44,7 +44,7 @@ async function readCapped(response: Response, limit: number): Promise<Uint8Array
 	let total = 0;
 
 	while (true) {
-		const { done, value } = await reader.read();
+		const { done, value }: { done: boolean; value?: Uint8Array } = await reader.read();
 
 		if (done) break;
 

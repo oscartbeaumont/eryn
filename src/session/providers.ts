@@ -10,15 +10,10 @@
 import { Option, Schema } from "effect";
 
 import { isString } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 
-import {
-	HostProviderFieldSchema,
-	type HostProviderField,
-	type IntegrationMethodOption,
-	type ModelOption,
-	type ProviderField,
-} from "./models";
+import { HostProviderFieldSchema } from './models';
+import type { HostProviderField, IntegrationMethodOption, ModelOption, ProviderField } from './models';
 
 /**
  * One way a provider can be connected, as far as this deployment can use it.
@@ -148,7 +143,7 @@ export function needsLocalCallback(url: string): boolean {
 		const redirect = new URL(url).searchParams.get("redirect_uri");
 
 		if (!redirect) return false;
-		const host = new URL(redirect).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+		const host = new URL(redirect).hostname.toLowerCase().replaceAll(/^\[|\]$/g, "");
 
 		return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
 	} catch {

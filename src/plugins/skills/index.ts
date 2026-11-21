@@ -9,7 +9,7 @@
 
 import { Plugin, Skill } from "@opencode/plugin";
 
-import { type Mutable } from "../../mutable.ts";
+import type { Mutable } from '../../mutable.ts';
 import type { WorkspaceSkill } from "../../session/workspace-config";
 
 /** Point a session's later file reads at the skill it just activated. */

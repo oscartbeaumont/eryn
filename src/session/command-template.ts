@@ -19,5 +19,5 @@ export function shellBlockPattern(): RegExp {
 
 /** Replace `!`...`` with a form OpenCode's command evaluator ignores. */
 export function protectShellBlocks(template: string): string {
-	return template.replace(SHELL_BLOCK, (_, source: string) => `${PROTECTED_PREFIX}${source}\``);
+	return template.replaceAll(SHELL_BLOCK, (_, source: string) => `${PROTECTED_PREFIX}${source}\``);
 }

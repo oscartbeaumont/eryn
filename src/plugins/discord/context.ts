@@ -14,7 +14,8 @@
 import { Option, Schema } from "effect";
 
 import { selfClosing } from "../../discord/xml.ts";
-import { DiscordContextSchema, type DiscordContext } from "../../session/models.ts";
+import { DiscordContextSchema } from '../../session/models.ts';
+import type { DiscordContext } from '../../session/models.ts';
 
 /** Metadata key holding a conversation's Discord context on its OpenCode session. */
 export const DISCORD_METADATA_KEY = "discord";
@@ -48,8 +49,7 @@ export function describeDiscordContext(context: DiscordContext): string {
 	// separate thread there would point the model at a thread that does not
 	// exist.
 	if (kind === "thread") {
-		entries.push(["thread", context.thread.name ?? context.thread.id]);
-		entries.push(["threadId", context.thread.id]);
+		entries.push(["thread", context.thread.name ?? context.thread.id], ["threadId", context.thread.id]);
 	}
 
 	return `${DISCORD_MARKER}\n${selfClosing("discord", entries)}`;

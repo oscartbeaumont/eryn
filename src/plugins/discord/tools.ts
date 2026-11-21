@@ -22,27 +22,20 @@
 import type { Plugin } from "@opencode/plugin";
 import type { Schema } from "effect";
 
-import {
-	MAX_CONTENT,
-	MAX_FILE_BYTES,
-	MAX_FILES,
-	THREAD_TYPES,
-	type DiscordAttachment,
-	type DiscordChannelRef,
-	type DiscordMessageView,
-	type DiscordRest,
-	type DiscordUpload,
-} from "../../discord/api";
+import { MAX_CONTENT, MAX_FILE_BYTES, MAX_FILES, THREAD_TYPES } from '../../discord/api';
+import type { DiscordAttachment, DiscordChannelRef, DiscordMessageView, DiscordRest, DiscordUpload } from '../../discord/api';
 import type { DiscordAuthority } from "../../discord/authority";
 import { isBotAuthored } from "../../discord/authorship";
 import { stringField } from "../../json.ts";
-import { type Mutable } from "../../mutable.ts";
+import type { Mutable } from '../../mutable.ts';
 import { actionButton, buttonRow, selectRow } from "../../discord/components";
-import { formatMessage, type FormattedMessage } from "../../discord/markdown";
+import { formatMessage } from '../../discord/markdown';
+import type { FormattedMessage } from '../../discord/markdown';
 import { Permission } from "../../discord/permissions";
 import { renderChannel, renderMessage } from "../../discord/render";
 import { uploadNames } from "../../discord/uploads";
-import { fetchAttachmentFiles, type AttachmentFile } from "../../session/attachments";
+import { fetchAttachmentFiles } from '../../session/attachments';
+import type { AttachmentFile } from '../../session/attachments';
 import { WORKSPACE_ROOT } from "../../session/locations";
 import type { DiscordContext, PromptAttachment, ScheduleScope } from "../../session/models";
 import {
@@ -54,7 +47,8 @@ import {
 import { base64ToBytes } from "../workspace/bytes";
 import { resolvePath } from "../workspace/paths.ts";
 import type { FileStore } from "../workspace/store";
-import { declaredInput, objectSchema, toolExecute, ToolOutput, type ToolCall, type ToolSpec } from "../tool";
+import { declaredInput, objectSchema, toolExecute, ToolOutput } from '../tool';
+import type { ToolCall, ToolSpec } from '../tool';
 import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 function channelSummary(channel: DiscordChannelRef) {

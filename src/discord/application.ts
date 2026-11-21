@@ -12,7 +12,7 @@ import { Option, Schema } from "effect";
 
 import { configuredOrigin, INTERACTIONS_PATH, log } from "../config";
 import { stringField } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import { CLIENT_ID } from "../public";
 
 const API = "https://discord.com/api/v10";

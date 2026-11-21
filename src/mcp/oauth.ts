@@ -17,25 +17,8 @@
  * to share memory.
  */
 
-import {
-	AuthorizationServerMismatchError,
-	type AuthorizationServerMetadata,
-	discoverOAuthServerInfo,
-	exchangeAuthorization,
-	type FetchLike,
-	InsecureTokenEndpointError,
-	IssuerMismatchError,
-	OAuthError,
-	type OAuthClientInformationMixed,
-	type OAuthClientMetadata,
-	type OAuthTokens,
-	refreshAuthorization,
-	registerClient,
-	RegistrationRejectedError,
-	resolveClientMetadata,
-	resourceUrlFromServerUrl,
-	startAuthorization,
-} from "@modelcontextprotocol/client";
+import { AuthorizationServerMismatchError, discoverOAuthServerInfo, exchangeAuthorization, InsecureTokenEndpointError, IssuerMismatchError, OAuthError, refreshAuthorization, registerClient, RegistrationRejectedError, resolveClientMetadata, resourceUrlFromServerUrl, startAuthorization } from '@modelcontextprotocol/client';
+import type { AuthorizationServerMetadata, FetchLike, OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/client';
 
 import { describeError } from "../errors";
 import { externalFetch, isSecureUrl } from "../http";

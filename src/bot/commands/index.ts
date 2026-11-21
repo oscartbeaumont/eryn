@@ -15,20 +15,11 @@ import type { DiscordCommandOptionPayload, DiscordInteraction } from "../../disc
 import { modalValues } from "../../discord/socket";
 import { describeError } from "../../errors";
 import { isString } from "../../json.ts";
-import { type Mutable } from "../../mutable.ts";
+import type { Mutable } from '../../mutable.ts';
 import type { PromptUser } from "../../session/models";
 import { scopedId, unmarshalId } from "../ids";
-import {
-	canManage,
-	denyConfiguration,
-	guarded,
-	rejectInteraction,
-	responder,
-	textInput,
-	textModal,
-	type CommandContext,
-	type InteractionRequest,
-} from "./interaction";
+import { canManage, denyConfiguration, guarded, rejectInteraction, responder, textInput, textModal } from './interaction';
+import type { CommandContext, InteractionRequest } from './interaction';
 import { mcpComponent, mcpModal } from "./mcp";
 import { modelComponent, modelModalSubmit, modelScreen } from "./models";
 import { policyComponent, policyMenu } from "./policy";
@@ -99,17 +90,17 @@ interface ComparableOption {
 	readonly options: ComparableOption[];
 }
 
+const comparableCommand = (command: DiscordCommand): ComparableOption => ({
+	name: command.name,
+	description: command.description,
+	type: command.type,
+	options: (command.options ?? []).map(optionEntry),
+});
+
 export function sameCommands(
 	registered: readonly DiscordCommand[],
 	desired: readonly DiscordCommand[],
 ): boolean {
-	const comparableCommand = (command: DiscordCommand): ComparableOption => ({
-		name: command.name,
-		description: command.description,
-		type: command.type,
-		options: (command.options ?? []).map(optionEntry),
-	});
-
 	return Equal.equals(registered.map(comparableCommand), desired.map(comparableCommand));
 }
 
@@ -492,7 +483,7 @@ async function handleApproval(
 	const result = await ctx
 		.session(guildId)
 		.replyApproval(approval)
-		.catch((error) => ({ ok: false, message: describeError(error) }));
+		.catch((error: unknown) => ({ ok: false, message: describeError(error) }));
 
 	const message = result.ok
 		? decision === "block"
@@ -679,7 +670,7 @@ async function answerForm(
 	run: () => Promise<{ ok: boolean; message?: string }>,
 ): Promise<void> {
 	await ctx.rest.interactionDefer(interaction.id, interaction.token, true).catch(() => undefined);
-	const result = await run().catch((error) => ({ ok: false, message: describeError(error) }));
+	const result = await run().catch((error: unknown) => ({ ok: false, message: describeError(error) }));
 
 	if (result.ok) {
 		// The session edits the form message itself; remove the ephemeral
@@ -717,7 +708,7 @@ async function handleFormModal(
 	const result = await ctx
 		.session(guildId)
 		.replyForm(formId, values, formAuth(interaction))
-		.catch((error) => ({ ok: false, message: describeError(error) }));
+		.catch((error: unknown) => ({ ok: false, message: describeError(error) }));
 
 	await ctx.rest
 		.interactionEditOriginal(

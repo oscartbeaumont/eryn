@@ -12,8 +12,9 @@
     "deploy": "cf deploy",
     "typecheck": "cf workers types && tsc && tsc -p tsconfig.landing.json",
     "check": "pnpm lint && pnpm typecheck && pnpm build",
-    "lint": "oxlint --deny-warnings",
-    "lint:fix": "oxlint --fix",
+    "prelint": "cf workers types",
+    "lint": "effect-tsgo oxlint --deny-warnings",
+    "lint:fix": "effect-tsgo oxlint --fix",
     "test": "node --experimental-strip-types --test src/bot/*.test.ts src/discord/*.test.ts src/plugins/*.test.ts src/session/*.test.ts"
   },
   "dependencies": {
@@ -28,14 +29,16 @@
     "just-bash": "3.6.1"
   },
   "devDependencies": {
+    "@cloudflare/oxlint-config": "0.1.0",
     "@cloudflare/vite-plugin": "2.0.0-rc.1",
-    "@oxlint/plugins": "1.94.0",
+    "@effect/tsgo": "0.73.2",
     "@solidjs/vite-plugin": "3.0.1",
     "@solidjs/web": "2.0.0",
     "@tailwindcss/vite": "^4.3.5",
     "@types/node": "^26.6.6",
     "cf": "1.0.0-rc.1",
     "oxlint": "1.94.0",
+    "oxlint-tsgolint": "7.0.2007",
     "solid-js": "2.0.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",

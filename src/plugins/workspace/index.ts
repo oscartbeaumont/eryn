@@ -14,11 +14,13 @@ import { Plugin } from "@opencode/plugin";
 import type { Schema } from "effect";
 
 import { WORKSPACE_ROOT } from "../../session/locations";
-import { declaredInput, objectSchema, toolRun, type ToolCall, type ToolSpec } from "../tool";
+import { declaredInput, objectSchema, toolRun } from '../tool';
+import type { ToolCall, ToolSpec } from '../tool';
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes";
 import { resolvePath, resolveToolPath } from "./paths.ts";
 import { runShell } from "./shell";
-import { fileStore, type FileStore, type StoredFile } from "./store";
+import { fileStore } from './store';
+import type { FileStore, StoredFile } from './store';
 
 export { WORKSPACE_ROOT };
 

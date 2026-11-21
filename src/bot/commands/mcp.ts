@@ -8,32 +8,16 @@
  */
 
 import { describeError } from "../../errors";
-import {
-	actionButton,
-	buttonRow,
-	linkButton,
-	selectRow,
-	type DiscordButton,
-	type DiscordComponent,
-	type DiscordModal,
-	type DiscordSelectOption,
-} from "../../discord/components";
+import { actionButton, buttonRow, linkButton, selectRow } from '../../discord/components';
+import type { DiscordButton, DiscordComponent, DiscordModal, DiscordSelectOption } from '../../discord/components';
 import { describeTools } from "../../mcp/describe";
 import { applyElicitation, elicitationOf, parseElicitation } from "../../mcp/elicitation";
-import { type Mutable } from "../../mutable.ts";
+import type { Mutable } from '../../mutable.ts';
 import type { ElicitationMode, McpLink, McpProbeResponse, PublicLink } from "../../session/models";
 import type { SessionClient } from "../client";
 import { SETUP_MENU_ID, payloadId } from "../ids";
-import {
-	claim,
-	responder,
-	backRow,
-	removeRow,
-	textInput,
-	textModal,
-	MAX_SELECT_OPTIONS,
-	type InteractionRequest,
-} from "./interaction";
+import { claim, responder, backRow, removeRow, textInput, textModal, MAX_SELECT_OPTIONS } from './interaction';
+import type { InteractionRequest } from './interaction';
 
 /** Discord rejects a link button whose URL is longer than this. */
 const MAX_LINK_URL = 512;
@@ -156,9 +140,11 @@ export async function mcpScreen(request: InteractionRequest): Promise<void> {
 	const buttons: DiscordButton[] = [actionButton("Link a server", SCREEN_ADD_ID, 1)];
 
 	if (links.length) {
-		buttons.push(actionButton("Test all", SCREEN_TEST_ID, 2));
-		buttons.push(actionButton("Approvals", SCREEN_APPROVALS_ID, 2));
-		buttons.push(actionButton("Remove", SCREEN_REMOVE_ID, 3));
+		buttons.push(
+			actionButton("Test all", SCREEN_TEST_ID, 2),
+			actionButton("Approvals", SCREEN_APPROVALS_ID, 2),
+			actionButton("Remove", SCREEN_REMOVE_ID, 3),
+		);
 	}
 
 	buttons.push(actionButton("Back", SETUP_MENU_ID, 2));
@@ -442,8 +428,7 @@ function signInRow(attemptId: string, url?: string) {
 	const buttons: DiscordButton[] = [];
 
 	if (url && url.length <= MAX_LINK_URL) buttons.push(linkButton("Sign in", url));
-	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3));
-	buttons.push(actionButton("Back", MCP_SCREEN_ID, 2));
+	buttons.push(actionButton("I've finished", AUTH_CHECK_ID.of(attemptId), 3), actionButton("Back", MCP_SCREEN_ID, 2));
 
 	return buttonRow(buttons);
 }

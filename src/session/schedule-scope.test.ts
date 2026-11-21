@@ -7,18 +7,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Permission } from "../discord/permissions.ts";
-import {
-	addChannelToScope,
-	addScheduleToScope,
-	canCreateSchedule,
-	canEditScheduleScope,
-	defaultScheduleScope,
-	removeChannelFromScope,
-	removeScheduleFromScope,
-	scopeAllows,
-	scopeCoveredBy,
-	type StoredScheduleScope,
-} from "./schedule-scope.ts";
+import { addChannelToScope, addScheduleToScope, canCreateSchedule, canEditScheduleScope, defaultScheduleScope, removeChannelFromScope, removeScheduleFromScope, scopeAllows, scopeCoveredBy } from './schedule-scope.ts';
+import type { StoredScheduleScope } from './schedule-scope.ts';
 
 const CAPABILITIES = {
 	read: true,

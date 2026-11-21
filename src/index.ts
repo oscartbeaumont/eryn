@@ -10,7 +10,8 @@
  */
 
 import { env } from "cloudflare:workers";
-import { Result, type Schema } from "effect";
+import { Result } from 'effect';
+import type { Schema } from 'effect';
 import { Hex } from "effect/encoding";
 import solidHandler from "virtual:solid-ssr-handler";
 
@@ -76,7 +77,7 @@ export async function wake(env: Env, origin?: string): Promise<WakeState | undef
 	// every anonymous /health request into a ten-second stream of DO calls when
 	// the bot is simply disconnected.
 	for (let attempt = 0; attempt < 3 && (!state || state.restart); attempt++) {
-		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await new Promise((resolve) => { setTimeout(resolve, 1_000); });
 		state = (await call().catch(() => undefined)) ?? state;
 	}
 
@@ -197,7 +198,7 @@ async function handleInteractions(request: Request, ctx: ExecutionContext): Prom
 			.then((response) => {
 				if (!response.ok) log("interactions", `the bot object returned HTTP ${response.status}`);
 			})
-			.catch((error) => log("interactions", `could not deliver the interaction: ${String(error)}`)),
+			.catch((error: unknown) => log("interactions", `could not deliver the interaction: ${String(error)}`)),
 	);
 
 	return new Response(null, { status: 202 });
@@ -309,8 +310,8 @@ async function handleMcpCallback(request: Request, url: URL): Promise<Response> 
 			`${escapeHtml(result.message ?? "The server did not accept the sign-in.")} You can close this tab and try again from Discord.`,
 			400,
 		);
-	} catch (failure) {
-		log("callback", `the MCP sign-in callback failed: ${String(failure)}`);
+	} catch (error_) {
+		log("callback", `the MCP sign-in callback failed: ${String(error_)}`);
 
 		return page(
 			"Sign-in did not complete",

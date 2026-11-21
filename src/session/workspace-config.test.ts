@@ -12,7 +12,8 @@ import { expandShellBlocks } from "../plugins/commands/index.ts";
 import { workspaceSkillsPlugin } from "../plugins/skills/index.ts";
 import { bytesToBase64, textToBytes } from "../plugins/workspace/bytes.ts";
 import { resolveToolPath } from "../plugins/workspace/paths.ts";
-import { fileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
+import { fileStore } from '../plugins/workspace/store.ts';
+import type { WorkspaceStorage } from '../plugins/workspace/store.ts';
 import { protectShellBlocks } from "./command-template.ts";
 import {
 	DEFAULT_AGENTS_PATH,
@@ -20,12 +21,8 @@ import {
 	DEFAULT_EXPLAIN_COMMAND_PATH,
 } from "./defaults.ts";
 import { resetWorkspace, seedWorkspace } from "./seed.ts";
-import {
-	CONFIG_PATH,
-	readWorkspaceConfig,
-	workspaceSignature,
-	type WorkspaceConfig,
-} from "./workspace-config.ts";
+import { CONFIG_PATH, readWorkspaceConfig, workspaceSignature } from './workspace-config.ts';
+import type { WorkspaceConfig } from './workspace-config.ts';
 
 /** A skill as the plugin hands it to the editor, which is what these tests read. */
 interface AddedSkill {
@@ -422,7 +419,7 @@ test("workspace skills register with their real guild paths", async () => {
 	};
 
 	// SAFETY: the double implements the `skill` and `event` members `setup` uses.
-	await plugin!.setup(context as never);
+	await plugin.setup(context as never);
 
 	assert.equal(added.length, 1);
 	assert.equal(added[0]?.id, "release");
@@ -458,15 +455,15 @@ test("an activated skill records its directory for relative reads", async () => 
 			},
 		},
 		event: {
-			subscribe: async function* () {
+			async *subscribe () {
 				yield { data: { sessionID: "ses_1", id: "release" } };
 			},
 		},
 	};
 
 	// SAFETY: the double implements the `skill` and `event` members `setup` uses.
-	await plugin!.setup(context as never);
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await plugin.setup(context as never);
+	await new Promise((resolve) => { setTimeout(resolve, 0); });
 	assert.equal(active.get("ses_1"), "/eryn/.opencode/skills/release");
 });
 

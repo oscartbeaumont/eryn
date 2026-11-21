@@ -8,17 +8,13 @@
  * opens a fresh ephemeral menu rather than editing that message.
  */
 
-import {
-	actionButton,
-	buttonRow,
-	linkButton,
-	type DiscordButton,
-	type DiscordComponent,
-} from "../../discord/components";
+import { actionButton, buttonRow, linkButton } from '../../discord/components';
+import type { DiscordButton, DiscordComponent } from '../../discord/components';
 import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
 import { grantPermissionsUrl, missingPermissionNames } from "../permissions";
 import { MCP_SCREEN_ID, mcpScreen } from "./mcp";
-import { claim, responder, closeRow, type InteractionRequest } from "./interaction";
+import { claim, responder, closeRow } from './interaction';
+import type { InteractionRequest } from './interaction';
 import { MODEL_SCREEN_ID } from "./models";
 import { PROFILES_SCREEN_ID } from "./profiles";
 import { PROVIDER_SCREEN_ID } from "./providers";
@@ -106,8 +102,7 @@ function menuRows(request: InteractionRequest, ready: boolean, grantUrl: string 
 	if (ready) buttons.push(actionButton("Choose model", request.id(MODEL_SCREEN_ID), 2));
 
 	if (!request.dmGuildId) {
-		buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2));
-		buttons.push(actionButton("Permissions", request.id(PROFILES_SCREEN_ID), 2));
+		buttons.push(actionButton("MCP servers", request.id(MCP_SCREEN_ID), 2), actionButton("Permissions", request.id(PROFILES_SCREEN_ID), 2));
 	}
 
 	buttons.push(actionButton("Close", request.id(SETUP_CLOSE_ID), 2));

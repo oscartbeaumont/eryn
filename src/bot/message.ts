@@ -8,7 +8,7 @@
 
 import { DEFAULT_THREAD_NAME } from "../discord/api.ts";
 import type { DiscordMessage } from "../discord/socket";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import type { PromptAttachment, PromptUser } from "../session/models.ts";
 
 /** Discord permits 100 characters in a thread name. */
@@ -160,7 +160,7 @@ export function stripMention(content: string, botUserId: string | undefined, rol
 
 /** Derive a thread name from the request, inside Discord's 100 character limit. */
 export function threadName(content: string): string {
-	const text = content.replace(/\s+/g, " ").trim();
+	const text = content.replaceAll(/\s+/g, " ").trim();
 
 	if (!text) return DEFAULT_THREAD_NAME;
 

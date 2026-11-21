@@ -9,17 +9,12 @@
  * including a 401 challenge, into data the bot can show.
  */
 
-import {
-	Client,
-	extractWWWAuthenticateParams,
-	SdkHttpError,
-	StreamableHTTPClientTransport,
-	type AuthProvider,
-} from "@modelcontextprotocol/client";
+import { Client, extractWWWAuthenticateParams, SdkHttpError, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import type { AuthProvider } from '@modelcontextprotocol/client';
 
 import { describeError } from "../errors";
 import { externalFetch, isSecureUrl } from "../http";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import type { McpProbeResponse, McpToolSummary } from "../session/models";
 
 const REQUEST_TIMEOUT_MS = 10_000;

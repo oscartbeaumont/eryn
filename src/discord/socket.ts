@@ -233,9 +233,9 @@ const DISCORD_EVENTS: DiscordEventHandlerTable = {
 };
 
 const GatewayPayloadSchema = Schema.Struct({
-	op: Schema.Number,
+	op: Schema.Finite,
 	t: Schema.optional(Schema.String),
-	s: Schema.optional(Schema.Union([Schema.Number, Schema.Null])),
+	s: Schema.optional(Schema.Union([Schema.Finite, Schema.Null])),
 	d: Schema.optional(Schema.Json),
 });
 
@@ -416,7 +416,7 @@ class DiscordShard {
 	}
 
 	private receive(event: MessageEvent): void {
-		const raw = event.data;
+		const raw = event.data as Schema.Json | undefined;
 
 		if (!isString(raw)) return;
 

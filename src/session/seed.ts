@@ -15,8 +15,9 @@ import { applyEdits, modify, parse } from "jsonc-parser";
 import { KEYS, log } from "../config.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "../plugins/workspace/bytes.ts";
 import { isJsonObject, isNumber } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
-import { fileStore, type FileStore, type WorkspaceStorage } from "../plugins/workspace/store.ts";
+import type { Mutable } from '../mutable.ts';
+import { fileStore } from '../plugins/workspace/store.ts';
+import type { FileStore, WorkspaceStorage } from '../plugins/workspace/store.ts';
 import {
 	DEFAULT_AGENTS,
 	DEFAULT_AGENTS_PATH,
@@ -101,7 +102,7 @@ async function upgradeWebSearch(store: FileStore): Promise<boolean> {
 
 	if (!file) return false;
 	const current = bytesToText(base64ToBytes(file.b));
-	const parsed = parse(current, [], { allowTrailingComma: true });
+	const parsed = parse(current, [], { allowTrailingComma: true }) as Schema.Json | undefined;
 
 	if (!isJsonObject(parsed)) return false;
 
@@ -192,7 +193,7 @@ export async function resetWorkspace(storage: WorkspaceStorage): Promise<number>
 		removed += keys.length;
 
 		if (keys.length < 1_000) break;
-		startAfter = keys[keys.length - 1];
+		startAfter = keys.at(-1);
 	}
 
 	await storage.delete(KEYS.workspaceSeed);

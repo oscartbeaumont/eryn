@@ -126,7 +126,7 @@ test("a table too large for one embed field falls back to labelled blocks", () =
 });
 
 test("a table with a pipe inside a cell uses the readable layout", () => {
-	const input = ["| Left | Right |", "| --- | --- |", "| a \\| b | c |"].join("\n");
+	const input = ["| Left | Right |", "| --- | --- |", String.raw`| a \| b | c |`].join("\n");
 	assert.equal(formatMessage(input).content, ["**a | b**", "- **Right:** c"].join("\n"));
 });
 
