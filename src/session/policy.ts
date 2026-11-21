@@ -7,7 +7,7 @@
  * own permission list, so a blocked tool is not offered to the model at all.
  */
 
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import type { McpLink, Policy, PolicyEffect, PolicyPreset, PolicyProfile } from "./models";
 
 /** The effect chosen for each tool group or MCP server. */
@@ -312,7 +312,11 @@ export function isDefaultPolicy(
 	const resolved = resolvePolicy([policy], custom);
 	const tools = resolved.tools ?? {};
 	const mcp = resolved.mcp ?? {};
-	const baseline = profileDefinition(defaultProfile, custom) ?? profileDefinition(DEFAULT_PROFILE, custom)!;
+	const baseline = profileDefinition(defaultProfile, custom) ?? profileDefinition(DEFAULT_PROFILE, custom);
+
+	// The built-in default always resolves; failing closed keeps a broken
+	// catalogue from being treated as the default policy.
+	if (!baseline) return false;
 
 	// An exact tool or per-server override is not visible in the group values,
 	// but it still changes behaviour, so it is never "default".
@@ -330,7 +334,7 @@ export function isDefaultPolicy(
 
 /** The wildcard that covers every tool one MCP server exposes. */
 export function mcpActionPrefix(server: string): string {
-	return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}_*`;
+	return `${server.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}_*`;
 }
 
 /** An OpenCode permission rule. */

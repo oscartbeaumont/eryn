@@ -13,7 +13,8 @@ import { Plugin } from "@opencode/plugin";
 import { shellBlockPattern } from "../../session/command-template.ts";
 import { WORKSPACE_ROOT } from "../../session/locations.ts";
 import { runShell } from "../workspace/shell.ts";
-import { fileStore, type FileStore } from "../workspace/store.ts";
+import { fileStore } from '../workspace/store.ts';
+import type { FileStore } from '../workspace/store.ts';
 
 /**
  * Run each block in order, because a later block may read what an earlier one

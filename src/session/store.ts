@@ -12,26 +12,11 @@
 
 import { Option, Schema } from "effect";
 import { DEFAULT_MODEL, KEYS } from "../config";
-import { decryptSecret, encryptSecret, type Sealed } from "../crypto";
+import { decryptSecret, encryptSecret } from '../crypto';
+import type { Sealed } from '../crypto';
 import { botError } from "../errors";
-import {
-	GuildSettingsSchema,
-	McpLinkSchema,
-	PendingMcpAuthSchema,
-	PendingOAuthSchema,
-	PolicyCardSchema,
-	PolicyProfileSchema,
-	PolicySchema,
-	ProviderConnectionSchema,
-	type GuildSettings,
-	type McpLink,
-	type PendingMcpAuth,
-	type PendingOAuth,
-	type Policy,
-	type PolicyCard,
-	type PolicyProfile,
-	type ProviderConnection,
-} from "./models";
+import { GuildSettingsSchema, McpLinkSchema, PendingMcpAuthSchema, PendingOAuthSchema, PolicyCardSchema, PolicyProfileSchema, PolicySchema, ProviderConnectionSchema } from './models';
+import type { GuildSettings, McpLink, PendingMcpAuth, PendingOAuth, Policy, PolicyCard, PolicyProfile, ProviderConnection } from './models';
 
 class GuildStoreImpl {
 	constructor(
@@ -58,7 +43,7 @@ class GuildStoreImpl {
 
 		if (plaintext === undefined) return undefined;
 
-		return Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(schema))(plaintext));
+		return Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(schema))(plaintext));
 	}
 
 	/**

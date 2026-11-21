@@ -13,19 +13,13 @@ import { log, sessionSecret } from "../config";
 import { randomToken, sign } from "../crypto";
 import { describeError } from "../errors";
 import { resolveOrigin } from "../discord/application";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import type { McpLink, PendingMcpAuth } from "../session/models";
-import {
-	discover,
-	exchangeCode,
-	initiate,
-	refreshTokens,
-	type InitiateInput,
-	type McpDiscovery,
-	type McpTokens,
-} from "./oauth";
+import { discover, exchangeCode, initiate, refreshTokens } from './oauth';
+import type { InitiateInput, McpDiscovery, McpTokens } from './oauth';
 import { MCP_CALLBACK_PATH, MCP_START_PATH, AUTH_TTL_MS } from "./paths";
-import { probeServer, type ProbeOptions, type ProbeResult } from "./probe";
+import { probeServer } from './probe';
+import type { ProbeOptions, ProbeResult } from './probe';
 
 /**
  * The slice of guild storage a link needs.

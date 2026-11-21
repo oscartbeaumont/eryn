@@ -17,8 +17,10 @@
 import type { Schema } from "effect";
 
 import type { Analytics } from "../analytics";
-import { actionButton, buttonRow, type DiscordComponent } from "../discord/components";
-import { DiscordError, type DiscordAuditEntry, type DiscordRest } from "../discord/api";
+import { actionButton, buttonRow } from '../discord/components';
+import type { DiscordComponent } from '../discord/components';
+import { DiscordError } from '../discord/api';
+import type { DiscordAuditEntry, DiscordRest } from '../discord/api';
 import { log } from "../config";
 import { isJsonObject, numberField, stringField } from "../json.ts";
 import { SETUP_MENU_ID } from "./ids";

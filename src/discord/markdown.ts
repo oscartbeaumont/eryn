@@ -191,13 +191,13 @@ function splitRow(line: string): string[] {
 
 	if (text.startsWith("|")) text = text.slice(1);
 
-	if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+	if (text.endsWith("|") && !text.endsWith(String.raw`\|`)) text = text.slice(0, -1);
 
 	const cells: string[] = [];
 	let cell = "";
 
 	for (let index = 0; index < text.length; index++) {
-		const char = text[index]!;
+		const char = text[index];
 
 		if (char === "\\" && text[index + 1] === "|") {
 			cell += "|";
@@ -267,7 +267,7 @@ function tableLayout(header: string[], rows: string[][]): TableLayout {
 /** An aligned, box-drawn table for data that fits without scrolling. */
 function compactTable(header: string[], align: Alignment[], rows: string[][], widths: number[]): string {
 	const line = (cells: string[]) =>
-		`│ ${cells.map((cell, column) => alignCell(cell, widths[column]!, align[column]!)).join(" │ ")} │`;
+		`│ ${cells.map((cell, column) => alignCell(cell, widths[column], align[column])).join(" │ ")} │`;
 
 	const rule = (left: string, middle: string, right: string) =>
 		`${left}${widths.map((width) => "─".repeat(width + 2)).join(middle)}${right}`;
@@ -387,7 +387,7 @@ function columnFields(header: string[], rows: string[][]): DiscordEmbedField[] |
 
 /** A field name without the Markdown that Discord would show literally. */
 function fieldName(cell: string, fallback: string): string {
-	const name = cell.replace(/(\*\*|__|`)/g, "").trim();
+	const name = cell.replaceAll(/(\*\*|__|`)/g, "").trim();
 
 	return name || fallback;
 }
@@ -410,10 +410,10 @@ function alignCell(text: string, width: number, alignment: Alignment): string {
 /** Drop the Markdown that a code block would show literally. */
 function plain(text: string): string {
 	return text
-		.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
-		.replace(/(\*\*|__|~~|`)/g, "")
-		.replace(/(^|[^\w*])\*([^*]+)\*/g, "$1$2")
-		.replace(/(^|[^\w_])_([^_]+)_/g, "$1$2");
+		.replaceAll(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+		.replaceAll(/(\*\*|__|~~|`)/g, "")
+		.replaceAll(/(^|[^\w*])\*([^*]+)\*/g, "$1$2")
+		.replaceAll(/(^|[^\w_])_([^_]+)_/g, "$1$2");
 }
 
 /** Code-point ranges that take two columns in a monospace font. */
@@ -435,7 +435,7 @@ function displayWidth(text: string): number {
 	let width = 0;
 
 	for (const char of text) {
-		const code = char.codePointAt(0)!;
+		const code = char.codePointAt(0) ?? 0;
 		width += WIDE.some(([start, end]) => code >= start && code <= end) ? 2 : 1;
 	}
 

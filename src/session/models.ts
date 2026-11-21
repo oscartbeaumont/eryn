@@ -45,8 +45,8 @@ export const ScheduleScopeSchema = Schema.Struct({
 	ownerId: Schema.String,
 	scheduleIds: Schema.Array(Schema.String),
 	channels: Schema.Record(Schema.String, ScheduleChannelScopeSchema),
-	createdAt: Schema.Number,
-	updatedAt: Schema.Number,
+	createdAt: Schema.Finite,
+	updatedAt: Schema.Finite,
 });
 
 export type ScheduleScope = typeof ScheduleScopeSchema.Type;
@@ -98,7 +98,7 @@ export const McpOAuthSchema = Schema.Struct({
 	clientId: Schema.String,
 	clientSecret: Schema.optional(Schema.String),
 	tokenEndpoint: Schema.String,
-	expiresAt: Schema.Number,
+	expiresAt: Schema.Finite,
 	scope: Schema.optional(Schema.String),
 	/** The RFC 8707 resource indicator, when the server asked for one. */
 	resource: Schema.optional(Schema.String),
@@ -125,7 +125,7 @@ export const McpLinkSchema = Schema.Struct({
 	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
 	token: Schema.optional(Schema.String),
 	oauth: Schema.optional(McpOAuthSchema),
-	createdAt: Schema.Number,
+	createdAt: Schema.Finite,
 });
 
 export type McpLink = typeof McpLinkSchema.Type;
@@ -137,7 +137,7 @@ export const PublicLinkSchema = Schema.Struct({
 	url: Schema.String,
 	kind: Schema.optional(Schema.Literals(["eryn", "external"])),
 	elicitation: Schema.optional(Schema.Literals(["off", "discord", "browser", "agent"])),
-	createdAt: Schema.Number,
+	createdAt: Schema.Finite,
 });
 
 export type PublicLink = typeof PublicLinkSchema.Type;
@@ -194,7 +194,7 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	status: Schema.Literals(["pending", "complete", "failed"]),
 	message: Schema.optional(Schema.String),
 	linkId: Schema.optional(Schema.String),
-	createdAt: Schema.Number,
+	createdAt: Schema.Finite,
 });
 
 export type PendingMcpAuth = typeof PendingMcpAuthSchema.Type;
@@ -246,7 +246,7 @@ export type ProviderConnection = typeof ProviderConnectionSchema.Type;
 export const GuildSettingsSchema = Schema.Struct({
 	model: Schema.String,
 	configuredBy: Schema.optional(Schema.String),
-	updatedAt: Schema.Number,
+	updatedAt: Schema.Finite,
 });
 
 export type GuildSettings = typeof GuildSettingsSchema.Type;
@@ -314,7 +314,7 @@ export const PolicySchema = Schema.Struct({
 	/** MCP server name to an effect; `*` is every server. */
 	mcp: Schema.optional(Schema.Record(Schema.String, PolicyEffectSchema)),
 	elicitation: Schema.optional(ElicitationModeSchema),
-	updatedAt: Schema.optional(Schema.Number),
+	updatedAt: Schema.optional(Schema.Finite),
 });
 
 export type Policy = typeof PolicySchema.Type;
@@ -333,8 +333,8 @@ export const PolicyProfileSchema = Schema.Struct({
 	mcp: Schema.Record(Schema.String, PolicyEffectSchema),
 	/** Built-in profiles never appear in storage; this marks the API copy. */
 	builtin: Schema.optional(Schema.Boolean),
-	createdAt: Schema.Number,
-	updatedAt: Schema.Number,
+	createdAt: Schema.Finite,
+	updatedAt: Schema.Finite,
 });
 
 export type PolicyProfile = typeof PolicyProfileSchema.Type;
@@ -404,8 +404,8 @@ export const FormFieldSchema = Schema.Struct({
 	options: Schema.optional(Schema.Array(FormFieldOptionSchema)),
 	/** Whether the server accepts a value outside `options`. */
 	custom: Schema.optional(Schema.Boolean),
-	minItems: Schema.optional(Schema.Number),
-	maxItems: Schema.optional(Schema.Number),
+	minItems: Schema.optional(Schema.Finite),
+	maxItems: Schema.optional(Schema.Finite),
 });
 
 export type FormField = typeof FormFieldSchema.Type;
@@ -416,7 +416,7 @@ export const FormViewSchema = Schema.Struct({
 	title: Schema.String,
 	fields: Schema.Array(FormFieldSchema),
 	/** Indices of the fields already answered in the conversation. */
-	answered: Schema.Array(Schema.Number),
+	answered: Schema.Array(Schema.Finite),
 });
 
 export type FormView = typeof FormViewSchema.Type;
@@ -430,7 +430,7 @@ const ProviderFieldBase = {
 	description: Schema.optional(Schema.String),
 	placeholder: Schema.optional(Schema.String),
 	required: Schema.optional(Schema.Boolean),
-	default: Schema.optional(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
+	default: Schema.optional(Schema.Union([Schema.String, Schema.Finite, Schema.Boolean])),
 	options: Schema.optional(
 		Schema.Array(
 			Schema.Struct({
@@ -445,7 +445,7 @@ const ProviderFieldBase = {
 			Schema.Struct({
 				key: Schema.String,
 				op: Schema.Literals(["eq", "neq"]),
-				value: Schema.Union([Schema.String, Schema.Number, Schema.Boolean]),
+				value: Schema.Union([Schema.String, Schema.Finite, Schema.Boolean]),
 			}),
 		),
 	),
@@ -533,7 +533,7 @@ export type OAuthStatus = typeof OAuthStatusSchema.Type;
 export const PendingOAuthSchema = Schema.Struct({
 	integrationID: Schema.String,
 	attemptID: Schema.String,
-	createdAt: Schema.Number,
+	createdAt: Schema.Finite,
 });
 
 export type PendingOAuth = typeof PendingOAuthSchema.Type;
@@ -554,7 +554,7 @@ export const ProviderConnectRequestSchema = guildScoped({
 	action: Schema.optional(Schema.Literals(["start", "status", "complete", "cancel"])),
 	attemptID: Schema.optional(Schema.String),
 	code: Schema.optional(Schema.String),
-	answer: Schema.optional(Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Number, Schema.Boolean]))),
+	answer: Schema.optional(Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Finite, Schema.Boolean]))),
 });
 
 export type ProviderConnectRequest = typeof ProviderConnectRequestSchema.Type;
@@ -618,7 +618,7 @@ export const PromptAttachmentSchema = Schema.Struct({
 	url: Schema.String,
 	name: Schema.optional(Schema.String),
 	contentType: Schema.optional(Schema.String),
-	size: Schema.optional(Schema.Number),
+	size: Schema.optional(Schema.Finite),
 });
 
 export type PromptAttachment = typeof PromptAttachmentSchema.Type;
@@ -734,7 +734,7 @@ export type CompactResponse = typeof CompactResponseSchema.Type;
 
 /** The number of files removed before the defaults were restored. */
 export const ResetResponseSchema = Schema.Struct({
-	files: Schema.Number,
+	files: Schema.Finite,
 });
 
 export type ResetResponse = typeof ResetResponseSchema.Type;
@@ -816,8 +816,8 @@ export const FormCancelRequestSchema = guildScoped({
  */
 export const FormFieldRequestSchema = guildScoped({
 	formId: Schema.String,
-	field: Schema.Number,
-	option: Schema.optional(Schema.Number),
+	field: Schema.Finite,
+	option: Schema.optional(Schema.Finite),
 	values: Schema.optional(Schema.Array(Schema.String)),
 	userId: Schema.optional(Schema.String),
 	manager: Schema.optional(Schema.Boolean),

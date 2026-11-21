@@ -1,4 +1,5 @@
 import { bindings, defineConfig, exports, triggers } from "cf/config";
+// oxlint-disable-next-line import/no-namespace -- Cloudflare requires a namespace import for the worker entrypoint.
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
 /**

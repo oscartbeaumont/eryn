@@ -3,27 +3,14 @@
  * reference for anything the catalogue does not list.
  */
 
-import {
-	actionButton,
-	buttonRow,
-	selectRow,
-	type DiscordSelectOption,
-	type DiscordModal,
-} from "../../discord/components";
-import { type Mutable } from "../../mutable.ts";
+import { actionButton, buttonRow, selectRow } from '../../discord/components';
+import type { DiscordSelectOption, DiscordModal } from '../../discord/components';
+import type { Mutable } from '../../mutable.ts';
 import type { ModelOption } from "../../session/models";
 import { describeError } from "../../errors";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
-import {
-	claim,
-	responder,
-	backRow,
-	retryRow,
-	textInput,
-	textModal,
-	MAX_SELECT_OPTIONS,
-	type InteractionRequest,
-} from "./interaction";
+import { claim, responder, backRow, retryRow, textInput, textModal, MAX_SELECT_OPTIONS } from './interaction';
+import type { InteractionRequest } from './interaction';
 
 /** The setup menu's "Choose model" button, owned here so this module can re-render itself. */
 export const MODEL_SCREEN_ID = `${SETUP_MENU_ID}:model`;

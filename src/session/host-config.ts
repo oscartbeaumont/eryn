@@ -26,10 +26,12 @@ import {
 	workspaceSkillsPlugin,
 } from "../plugins";
 import { fileStore } from "../plugins/workspace/store";
-import { createHost, type HostInterface } from "./host";
+import { createHost } from './host';
+import type { HostInterface } from './host';
 import type { DiscordContext, McpLink, ProviderConnection } from "./models";
 import { seedWorkspace } from "./seed";
-import { readWorkspaceConfig, type WorkspaceConfig } from "./workspace-config";
+import { readWorkspaceConfig } from './workspace-config';
+import type { WorkspaceConfig } from './workspace-config';
 
 /** Everything the host needs to be built, and to decide whether to rebuild. */
 export interface HostConfig {

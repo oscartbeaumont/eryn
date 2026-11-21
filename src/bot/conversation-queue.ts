@@ -83,7 +83,7 @@ export class ConversationQueues {
 		});
 
 		const entries = this.queues.get(key);
-		const previous = entries?.[entries.length - 1];
+		const previous = entries?.at(-1);
 		const entry: Entry = { key, settled: false, finish, checked, resolveChecked };
 
 		if (entries) entries.push(entry);

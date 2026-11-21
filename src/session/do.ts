@@ -16,16 +16,19 @@ import { DurableObject } from "cloudflare:workers";
 
 import { log } from "../config";
 import { deployRestart } from "../deploy";
-import { discordRest, type DiscordRest } from "../discord/api";
+import { discordRest } from '../discord/api';
+import type { DiscordRest } from '../discord/api';
 import { describeError } from "../errors";
 import { isNumber } from "../json.ts";
 import { json } from "../http";
 import { refreshLinks } from "../mcp/links";
-import { createGuildAgent, type GuildAgent } from "./agent";
+import { createGuildAgent } from './agent';
+import type { GuildAgent } from './agent';
 import type { HostConfig } from "./host-config";
 import { buildRoutes } from "./routes";
 import { seedWorkspace } from "./seed";
-import { guildStore, type GuildStore } from "./store";
+import { guildStore } from './store';
+import type { GuildStore } from './store';
 import { workspaceSignature } from "./workspace-config";
 
 /** Keep a warm host briefly after the last request, then let the object hibernate. */
@@ -92,7 +95,7 @@ export class BotSession extends DurableObject<Env> {
 		} finally {
 			this.inFlight -= 1;
 			this.lastActivityAt = Date.now();
-			await this.armAlarm().catch((error) =>
+			await this.armAlarm().catch((error: unknown) =>
 				log("session", `could not arm the alarm: ${describeError(error)}`),
 			);
 		}
@@ -135,7 +138,7 @@ export class BotSession extends DurableObject<Env> {
 			// admitted has time to start. If the tick itself fails there is no
 			// follow-up, and this alarm has already been consumed, so a schedule
 			// that is due would never be tried again without a human request.
-			await this.runScheduleTick().catch(async (error) => {
+			await this.runScheduleTick().catch(async (error: unknown) => {
 				log("session", `schedule tick failed: ${describeError(error)}`);
 				await this.ctx.storage.setAlarm(Date.now() + BUSY_POLL_MS).catch(() => undefined);
 			});
@@ -195,7 +198,7 @@ export class BotSession extends DurableObject<Env> {
 		await this.agent.ensureHost(config);
 		await this.ctx.storage.setAlarm(Date.now() + 30_000);
 		// Give the admitted turn time to start before deciding when to wake next.
-		await new Promise((resolve) => setTimeout(resolve, 8_000));
+		await new Promise((resolve) => { setTimeout(resolve, 8_000); });
 	}
 
 	/**

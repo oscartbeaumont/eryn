@@ -11,33 +11,24 @@
 import { Agent } from "@opencode/plugin";
 import type { Schema } from "effect";
 
-import { analytics as productAnalytics, type Analytics } from "../analytics";
+import { analytics as productAnalytics } from '../analytics';
+import type { Analytics } from '../analytics';
 import { KEYS, log } from "../config";
-import {
-	actionButton,
-	buttonRow,
-	linkButton,
-	selectRow,
-	type DiscordActionRow,
-	type DiscordButton,
-	type DiscordSelectOption,
-} from "../discord/components";
+import { actionButton, buttonRow, linkButton, selectRow } from '../discord/components';
+import type { DiscordActionRow, DiscordButton, DiscordSelectOption } from '../discord/components';
 import { classifyError, describeError } from "../errors";
 import { isJsonObject, isString, jsonField, numberField, stringField, toJsonObject } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
-import {
-	DEFAULT_THREAD_NAME,
-	DiscordError,
-	type DiscordChannelRef,
-	type DiscordRest,
-} from "../discord/api";
+import type { Mutable } from '../mutable.ts';
+import { DEFAULT_THREAD_NAME, DiscordError } from '../discord/api';
+import type { DiscordChannelRef, DiscordRest } from '../discord/api';
 import { DiscordAuthority } from "../discord/authority";
 import { renderConversation, renderFailure, renderUserMessage } from "../discord/render";
 import { DISCORD_METADATA_KEY, readDiscordContext } from "../plugins";
 import { fetchAttachmentFiles } from "./attachments";
 import type { HostInterface } from "./host";
 import { channelProjectDirectory, LOCATION } from "./locations";
-import { buildHost, connectionSignature, linkSignature, type HostConfig } from "./host-config";
+import { buildHost, connectionSignature, linkSignature } from './host-config';
+import type { HostConfig } from './host-config';
 import type {
 	CommandInfo,
 	CommandRequest,
@@ -59,7 +50,8 @@ import type {
 	ProfilesState,
 	PromptRequest,
 } from "./models";
-import { addScheduleToScope, scopeCoveredBy, type ChannelCapabilities } from "./schedule-scope";
+import { addScheduleToScope, scopeCoveredBy } from './schedule-scope';
+import type { ChannelCapabilities } from './schedule-scope';
 import {
 	completeMcp,
 	completeTools,
@@ -76,7 +68,8 @@ import {
 import { describeMethods, needsLocalCallback, parseModelRef, resolveModelChoice } from "./providers";
 import { resetWorkspace, seedWorkspace } from "./seed";
 import type { GuildStore } from "./store";
-import { applyTurnEvent, createTurn, type Turn } from "./turn";
+import { applyTurnEvent, createTurn } from './turn';
+import type { Turn } from './turn';
 import { readWorkspaceConfig, workspaceSignature } from "./workspace-config";
 
 export type { HostConfig };
@@ -94,6 +87,9 @@ const FEED_RETRY_MS = 1_000;
 
 /** A run can outlive a host that will never come back; keep the retries slow. */
 const MAX_FEED_RETRY_MS = 30_000;
+
+/** A placeholder callback for the typing indicator before it starts. */
+const noop = () => undefined;
 
 /** The live state of one conversation inside this guild's object. */
 interface ThreadRun {
@@ -730,8 +726,9 @@ class GuildAgentImpl implements GuildAgent {
 			// A rejected build must not stay cached until the idle close: the next
 			// request should retry (a missing origin or a transient storage error
 			// is recoverable).
-			let retry: Promise<HostInterface>;
-			retry = promise.catch((error) => {
+			// oxlint-disable-next-line eslint/prefer-const -- The catch callback assigns it while reading it.
+		let retry: Promise<HostInterface>;
+			retry = promise.catch((error: unknown) => {
 				if (this.host?.promise === retry) this.host = undefined;
 				throw error;
 			});
@@ -741,7 +738,7 @@ class GuildAgentImpl implements GuildAgent {
 			this.modelCache = undefined;
 			void promise
 				.then((host) => this.startConsuming(host))
-				.catch((error) => log("session", `could not start the event stream: ${describeError(error)}`));
+				.catch((error: unknown) => log("session", `could not start the event stream: ${describeError(error)}`));
 			void previous?.then((host) => host.close()).catch(() => undefined);
 		}
 
@@ -751,7 +748,7 @@ class GuildAgentImpl implements GuildAgent {
 		// A host is only rebuilt for a changed config; a schedule can appear
 		// during a turn, so check the live host rather than rebuilding it.
 		if (this.host === current && schedulesOverride !== false && !current.schedules) {
-			const started = await host.ensureSchedules().catch((error) => {
+			const started = await host.ensureSchedules().catch((error: unknown) => {
 				log("session", `could not start the schedule runner: ${describeError(error)}`);
 
 				return false;
@@ -834,7 +831,7 @@ class GuildAgentImpl implements GuildAgent {
 		if (!host) return;
 		await host.promise
 			.then((running) => running.close())
-			.catch((error) => log("session", `could not close the host: ${describeError(error)}`));
+			.catch((error: unknown) => log("session", `could not close the host: ${describeError(error)}`));
 	}
 
 	/** Drop the cards and forms that were waiting on the host that is going away. */
@@ -1340,7 +1337,7 @@ class GuildAgentImpl implements GuildAgent {
 			this.appliedModels.delete(request.threadId);
 			await host.sessions
 				.switchAgent({ sessionID, agent: Agent.ID.make(defaultAgent) })
-				.catch((error) => log("session", `could not restore the session agent: ${describeError(error)}`));
+				.catch((error: unknown) => log("session", `could not restore the session agent: ${describeError(error)}`));
 		}
 	}
 
@@ -1368,7 +1365,7 @@ class GuildAgentImpl implements GuildAgent {
 			// `command.list` does not wait for a cold Location's plugins, but
 			// `agent.list` does. Using it as the activation barrier makes the
 			// built-in commands present on the first call, with no sleep or retry.
-			await host.agent.list({ location: { directory } }).catch((error) => {
+			await host.agent.list({ location: { directory } }).catch((error: unknown) => {
 				log("session", `could not warm the command list: ${describeError(error)}`);
 			});
 			const listed = await host.command.list({ location: { directory } });
@@ -1421,7 +1418,7 @@ class GuildAgentImpl implements GuildAgent {
 				});
 				// Queue it behind any turn in progress: compacting halfway through
 				// a step would rewrite the context the running turn is using.
-				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error) => {
+				host.sessions.compact({ sessionID, delivery: "queue" }).catch((error: unknown) => {
 					log("session", `could not compact ${threadId}: ${describeError(error)}`);
 
 					if (this.compactions.get(sessionID)?.timer !== timer) return;
@@ -1558,7 +1555,7 @@ class GuildAgentImpl implements GuildAgent {
 		let failure: string | undefined;
 		let timedOut = false;
 
-		let stopTyping: () => void = () => undefined;
+		let stopTyping: () => void = noop;
 
 		try {
 			stopTyping = this.startTyping(threadId);
@@ -1642,7 +1639,7 @@ class GuildAgentImpl implements GuildAgent {
 
 	/** Send a turn failure to the conversation that triggered it. */
 	private async postFailure(threadId: string, error: string): Promise<void> {
-		await this.rest.sendMessage(threadId, renderFailure(error)).catch((sendError) => {
+		await this.rest.sendMessage(threadId, renderFailure(error)).catch((sendError: unknown) => {
 			log("session", `could not post the failure for ${threadId}: ${describeError(sendError)}`);
 		});
 	}
@@ -1937,7 +1934,7 @@ class GuildAgentImpl implements GuildAgent {
 			if (input.scope === "channel" && context.channel.id !== input.channelId) continue;
 
 			if (input.scope === "thread" && threadId !== input.threadId) continue;
-			await this.applyPolicy({ host, threadId, sessionID: value, discord: context, config }).catch((error) =>
+			await this.applyPolicy({ host, threadId, sessionID: value, discord: context, config }).catch((error: unknown) =>
 				log("session", `could not update ${threadId}: ${describeError(error)}`),
 			);
 
@@ -1987,7 +1984,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		const sent = await this.rest
 			.sendMessage(id, content, { components })
-			.catch((error) => {
+			.catch((error: unknown) => {
 				log("session", `could not post the policy card for ${id}: ${describeError(error)}`);
 
 				return undefined;
@@ -2235,7 +2232,7 @@ class GuildAgentImpl implements GuildAgent {
 					]),
 				],
 			})
-			.catch((error) => {
+			.catch((error: unknown) => {
 				log("session", `could not post an approval card: ${describeError(error)}`);
 
 				return undefined;
@@ -2661,7 +2658,7 @@ class GuildAgentImpl implements GuildAgent {
 			await this.saveDiscordContext(host, sessionID, fresh.metadata, {
 				...freshContext,
 				scheduleScope: pruned,
-			}).catch((error) =>
+			}).catch((error: unknown) =>
 				log("session", `could not prune deleted scope channels for ${threadId}: ${describeError(error)}`),
 			);
 			this.appliedContext.delete(threadId);
@@ -2767,9 +2764,9 @@ class GuildAgentImpl implements GuildAgent {
 				return { ok: false, message: "That option is not part of this question." };
 			}
 
-			const values = [...new Set(indices.map((index) => options[index]!.value))];
+			const values = [...new Set(indices.map((index) => options[index].value))];
 			pending.answers[input.field] =
-				field.type === "multiselect" ? values : values[0]!;
+				field.type === "multiselect" ? values : values[0];
 		} else {
 			return { ok: false, message: "That question needs a typed answer." };
 		}
@@ -2802,7 +2799,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		if (!text) return { consumed: false };
 
-		const field = pending.fields[index]!;
+		const field = pending.fields[index];
 
 		if (
 			(field.type === "number" || field.type === "integer") &&
@@ -2892,7 +2889,7 @@ class GuildAgentImpl implements GuildAgent {
 		if (!pending.messageId) return;
 		await this.rest
 			.editMessage(pending.threadId, pending.messageId, content, { components: this.formComponents(pending) })
-			.catch((error) => log("session", `could not update an MCP form: ${describeError(error)}`));
+			.catch((error: unknown) => log("session", `could not update an MCP form: ${describeError(error)}`));
 	}
 
 	/** Auto-submit only when nothing is left, otherwise let the user click Send. */
@@ -3091,7 +3088,7 @@ class GuildAgentImpl implements GuildAgent {
 		const links = this.currentConfig?.links ?? (await this.store.links());
 		const mode = isMcp ? (links.find((link) => link.name === server)?.elicitation ?? "discord") : "discord";
 		const rawFields = form === undefined ? undefined : jsonField(form, "fields");
-		const fields = Array.isArray(rawFields) ? rawFields.flatMap((field) => formField(field) ?? []) : [];
+		const fields = Array.isArray(rawFields) ? rawFields.flatMap((field: Schema.Json) => formField(field) ?? []) : [];
 		const title = stringField(form, "title")?.trim() || `${server} needs some information`;
 		const request: Mutable<FormRequest> = { formId, sessionID, server, mode, title, fields };
 		const message = stringField(metadata, "message");
@@ -3157,7 +3154,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		const pending = this.formDraft(request, found);
 
-		const sent = await this.rest.sendMessage(found.threadId, content, { components }).catch((error) => {
+		const sent = await this.rest.sendMessage(found.threadId, content, { components }).catch((error: unknown) => {
 			log("session", `could not post an MCP form card: ${describeError(error)}`);
 
 			return undefined;
@@ -3183,7 +3180,7 @@ class GuildAgentImpl implements GuildAgent {
 
 		const sent = await this.rest
 			.sendMessage(found.threadId, pending.content, { components: this.formComponents(pending) })
-			.catch((error) => {
+			.catch((error: unknown) => {
 				log("session", `could not post an MCP form: ${describeError(error)}`);
 
 				return undefined;
@@ -3240,7 +3237,7 @@ class GuildAgentImpl implements GuildAgent {
 		if (!sessionID) return;
 		const host = await this.hostFor(config);
 
-		const session = await host.sessions.get({ sessionID }).catch((error) => {
+		const session = await host.sessions.get({ sessionID }).catch((error: unknown) => {
 			log("session", `could not read ${sessionID} to record a rename: ${describeError(error)}`);
 
 			return undefined;
@@ -3391,7 +3388,7 @@ class GuildAgentImpl implements GuildAgent {
 			const schedules = await host.experimental.schedule.list({ sessionID });
 			await Promise.all(
 				schedules.map((schedule) =>
-					host.experimental.schedule.delete({ scheduleID: schedule.id }).catch((error) =>
+					host.experimental.schedule.delete({ scheduleID: schedule.id }).catch((error: unknown) =>
 						log("session", `could not delete schedule ${schedule.id}: ${describeError(error)}`),
 					),
 				),
@@ -3570,7 +3567,7 @@ class GuildAgentImpl implements GuildAgent {
 		})();
 
 		const settled = loop
-			.catch((error) => log("session", `event stream stopped: ${describeError(error)}`))
+			.catch((error: unknown) => log("session", `event stream stopped: ${describeError(error)}`))
 			.then(() => {
 				if (this.consuming !== settled) return;
 				this.consuming = undefined;
@@ -3615,7 +3612,7 @@ class GuildAgentImpl implements GuildAgent {
 	/** The form and permission events that settle a card this object posted. */
 	private async handleFormEvent(type: string, data: Schema.JsonObject): Promise<boolean> {
 		if (type === "form.created") {
-			void this.onFormCreated(data).catch((error) =>
+			void this.onFormCreated(data).catch((error: unknown) =>
 				log("session", `could not show an MCP form: ${describeError(error)}`),
 			);
 
@@ -3646,7 +3643,7 @@ class GuildAgentImpl implements GuildAgent {
 		}
 
 		if (type === "permission.asked") {
-			void this.onPermissionAsked(data).catch((error) =>
+			void this.onPermissionAsked(data).catch((error: unknown) =>
 				log("session", `could not show an approval: ${describeError(error)}`),
 			);
 
@@ -3819,7 +3816,7 @@ class GuildAgentImpl implements GuildAgent {
 				async () => {
 					await host.sessions.interrupt({ sessionID }).catch(() => undefined);
 				},
-			).catch((error) => log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`));
+			).catch((error: unknown) => log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`));
 		} catch (error) {
 			log("session", `scheduled turn for ${sessionID} failed: ${describeError(error)}`);
 		} finally {

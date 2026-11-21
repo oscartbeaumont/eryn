@@ -10,56 +10,10 @@ import { Option, Schema } from "effect";
 import { botError } from "../errors";
 import { stringField } from "../json.ts";
 import { withDeploy } from "../deploy";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import { ROUTES } from "../session/paths";
-import {
-	ApprovalReplyResponseSchema,
-	CommandListResponseSchema,
-	CompactResponseSchema,
-	GuildStatusSchema,
-	IntegrationOptionSchema,
-	McpAuthCompleteResponseSchema,
-	McpAuthStartResponseSchema,
-	McpAuthStatusSchema,
-	McpAuthUrlResponseSchema,
-	McpProbeResponseSchema,
-	ModelOptionSchema,
-	ProviderConnectResponseSchema,
-	PublicLinkSchema,
-	FormViewSchema,
-	FormTextResponseSchema,
-	InteractResponseSchema,
-	CommandResponseSchema,
-	PolicyStateSchema,
-	ProfilesStateSchema,
-	ResetResponseSchema,
-	type CommandInfo,
-	type CommandRequest,
-	type CommandResponse,
-	type CompactResponse,
-	type DiscordContext,
-	type ElicitationMode,
-	type FormView,
-	type FormTextResponse,
-	type GuildStatus,
-	type IntegrationOption,
-	type InteractResponse,
-	type McpAuthCompleteResponse,
-	type McpAuthStartResponse,
-	type McpAuthStatus,
-	type McpLink,
-	type McpProbeResponse,
-	type ModelOption,
-	type Policy,
-	type PolicyEffect,
-	type PolicyState,
-	type ProfilesState,
-	type PromptRequest,
-	type ProviderConnectRequest,
-	type ProviderConnectResponse,
-	type PublicLink,
-	type ResetResponse,
-} from "../session/models";
+import { ApprovalReplyResponseSchema, CommandListResponseSchema, CompactResponseSchema, GuildStatusSchema, IntegrationOptionSchema, McpAuthCompleteResponseSchema, McpAuthStartResponseSchema, McpAuthStatusSchema, McpAuthUrlResponseSchema, McpProbeResponseSchema, ModelOptionSchema, ProviderConnectResponseSchema, PublicLinkSchema, FormViewSchema, FormTextResponseSchema, InteractResponseSchema, CommandResponseSchema, PolicyStateSchema, ProfilesStateSchema, ResetResponseSchema } from '../session/models';
+import type { CommandInfo, CommandRequest, CommandResponse, CompactResponse, DiscordContext, ElicitationMode, FormView, FormTextResponse, GuildStatus, IntegrationOption, InteractResponse, McpAuthCompleteResponse, McpAuthStartResponse, McpAuthStatus, McpLink, McpProbeResponse, ModelOption, Policy, PolicyEffect, PolicyState, ProfilesState, PromptRequest, ProviderConnectRequest, ProviderConnectResponse, PublicLink, ResetResponse } from '../session/models';
 
 const LinkListSchema = Schema.Struct({ links: Schema.Array(PublicLinkSchema) });
 
@@ -72,7 +26,7 @@ const ProfilesResponseSchema = Schema.Struct({ ok: Schema.Boolean, ...ProfilesSt
 const PolicyStateResponseSchema = Schema.Struct({ ok: Schema.Boolean, state: PolicyStateSchema });
 
 function decode<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: Schema.Json | undefined): S["Type"] {
-	return Option.getOrThrowWith(Schema.decodeUnknownOption(schema)(input), () =>
+	return Option.getOrThrowWith(Schema.decodeOption(schema)(input), () =>
 		botError("the guild session returned an unexpected shape"),
 	);
 }

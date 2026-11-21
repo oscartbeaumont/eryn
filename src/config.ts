@@ -110,5 +110,6 @@ export function isValidModel(value: string): boolean {
 
 /** A namespaced log line: `[eryn:bot:gateway] …`. */
 export function log(scope: string, message: string): void {
+	// oxlint-disable-next-line eslint/no-console -- This function is the logger.
 	console.log(`[${LOG_PREFIX}:${scope}] ${message}`);
 }

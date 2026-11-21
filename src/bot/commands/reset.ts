@@ -9,7 +9,8 @@
 import { actionButton, buttonRow } from "../../discord/components";
 import { describeError } from "../../errors";
 import { SETUP_CLOSE_ID } from "../ids";
-import { claim, responder, type InteractionRequest } from "./interaction";
+import { claim, responder } from './interaction';
+import type { InteractionRequest } from './interaction';
 
 const RESET_CONFIRM_ID = "reset:confirm";
 

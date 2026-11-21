@@ -13,7 +13,7 @@ function stubFetch(response: () => Response): () => void {
 	const original = globalThis.fetch;
 
 	// SAFETY: the stub answers like `fetch` for the single URL each test reads.
-	globalThis.fetch = (async () => response()) as typeof fetch;
+	globalThis.fetch = (async () => response());
 
 	return () => {
 		globalThis.fetch = original;

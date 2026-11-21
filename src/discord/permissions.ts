@@ -107,6 +107,7 @@ export function guildPermissions(input: GuildPermissionInput): bigint {
 		// `@everyone` is always present and already counted.
 		if (roleId === input.guildId) continue;
 		const role = input.roles.find((candidate) => candidate.id === roleId);
+		// oxlint-disable-next-line oxc/bad-bitwise-operator -- Permission flags are bigint bitmasks.
 		permissions |= parsePermissions(role?.permissions);
 	}
 
@@ -171,8 +172,10 @@ function applyOverwrites(
 		if (overwrite.type !== 0 || overwrite.id === input.guildId) continue;
 
 		if (!input.memberRoleIds.includes(overwrite.id)) continue;
-		allow |= parsePermissions(overwrite.allow);
-		deny |= parsePermissions(overwrite.deny);
+		// oxlint-disable-next-line oxc/bad-bitwise-operator -- Permission flags are bigint bitmasks.
+	allow |= parsePermissions(overwrite.allow);
+		// oxlint-disable-next-line oxc/bad-bitwise-operator -- Permission flags are bigint bitmasks.
+	deny |= parsePermissions(overwrite.deny);
 	}
 
 	permissions = (permissions & ~deny) | (allow & ~deny);

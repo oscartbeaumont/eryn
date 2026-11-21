@@ -26,7 +26,8 @@ import { appendToSystemPrompt } from "../hooks";
 import type { FileStore } from "../workspace/store";
 import { DISCORD_MARKER, describeDiscordContext, readDiscordContext } from "./context";
 import { registerScheduleScope } from "./schedule";
-import { discordTools, type SetMessageSubscription } from "./tools";
+import { discordTools } from './tools';
+import type { SetMessageSubscription } from './tools';
 
 /** Everything the Discord plugin needs from the host that builds it. */
 export interface DiscordPluginInput {
@@ -67,7 +68,7 @@ export function discordPlugin(input: DiscordPluginInput) {
 				// context only costs the agent some awareness, while a thrown error
 				// would fail the whole turn.
 				appendToSystemPrompt(ctx, DISCORD_MARKER, async (sessionID) => {
-					const session = await ctx.session.get({ sessionID }).catch((error) => {
+					const session = await ctx.session.get({ sessionID }).catch((error: unknown) => {
 						log("discord-plugin", `could not read the session, so no Discord context was added: ${describeError(error)}`);
 
 						return undefined;

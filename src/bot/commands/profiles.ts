@@ -7,16 +7,9 @@
  */
 
 import { describeError } from "../../errors";
-import {
-	actionButton,
-	buttonRow,
-	selectRow,
-	type DiscordActionRow,
-	type DiscordButton,
-	type DiscordModal,
-	type DiscordSelectOption,
-} from "../../discord/components";
-import type { Policy, PolicyEffect, ProfilesState } from "../../session/models";
+import { actionButton, buttonRow, selectRow } from '../../discord/components';
+import type { DiscordActionRow, DiscordButton, DiscordModal, DiscordSelectOption } from '../../discord/components';
+import type { PolicyEffect, ProfilesState } from "../../session/models";
 import {
 	DEFAULT_PROFILE,
 	GROUP_LABELS,
@@ -29,16 +22,8 @@ import {
 	summaryLines,
 } from "../../session/policy";
 import { SETUP_CLOSE_ID, SETUP_MENU_ID } from "../ids";
-import {
-	MAX_SELECT_OPTIONS,
-	claim,
-	closeRow,
-	removeRow,
-	responder,
-	textInput,
-	textModal,
-	type InteractionRequest,
-} from "./interaction";
+import { MAX_SELECT_OPTIONS, claim, closeRow, removeRow, responder, textInput, textModal } from './interaction';
+import type { InteractionRequest } from './interaction';
 
 /** The setup menu's permissions button, owned here so this screen can re-render itself. */
 export const PROFILES_SCREEN_ID = `${SETUP_MENU_ID}:profiles`;
@@ -214,7 +199,7 @@ async function detail(request: InteractionRequest, id: string): Promise<void> {
 		"",
 		// SAFETY: a profile carries effect tables for tools and MCP servers, which is
 		// the whole of a policy the summary below reads.
-		...summaryLines({ tools: profile.tools, mcp: profile.mcp } as Policy, []),
+		...summaryLines({ tools: profile.tools, mcp: profile.mcp }, []),
 	];
 
 	const text = lines.join("\n");
@@ -351,8 +336,8 @@ function slug(name: string): string {
 	const base =
 		name
 			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "")
+			.replaceAll(/[^a-z0-9]+/g, "-")
+			.replaceAll(/^-+|-+$/g, "")
 			.slice(0, 24) || "profile";
 
 	return `${base}-${Date.now().toString(36)}`;

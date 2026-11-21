@@ -10,7 +10,7 @@ export type XmlAttributes = readonly (readonly [string, string])[];
 
 /** Escape a value for an XML attribute, so a name containing `&` cannot break the block. */
 export function escapeXml(value: string): string {
-	return value.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
+	return value.replaceAll(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
 }
 
 function attributes(entries: XmlAttributes): string {

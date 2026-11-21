@@ -13,18 +13,12 @@ import { Option, Schema } from "effect";
 
 import { log } from "../../config";
 import type { DiscordRest } from "../../discord/api";
-import { DiscordAuthority } from "../../discord/authority";
+import type { DiscordAuthority } from "../../discord/authority";
 import { describeError } from "../../errors";
 import { jsonField, stringField } from "../../json.ts";
 import type { DiscordContext, ScheduleScope } from "../../session/models";
-import {
-	addChannelToScope,
-	addScheduleToScope,
-	canCreateSchedule,
-	defaultScheduleScope,
-	removeScheduleFromScope,
-	type ScopeChannelCapabilities,
-} from "../../session/schedule-scope";
+import { addChannelToScope, addScheduleToScope, canCreateSchedule, defaultScheduleScope, removeScheduleFromScope } from '../../session/schedule-scope';
+import type { ScopeChannelCapabilities } from '../../session/schedule-scope';
 import { DISCORD_METADATA_KEY, readDiscordContext, withDiscordMetadataLock } from "./context";
 
 type ScheduleTool = "create" | "delete";
@@ -45,7 +39,7 @@ function scheduleId(value: Schema.Json | undefined): string | undefined {
 }
 
 async function readContext(ctx: Plugin.Context, sessionID: string): Promise<DiscordContext | undefined> {
-	const session = await ctx.session.get({ sessionID }).catch((error) => {
+	const session = await ctx.session.get({ sessionID }).catch((error: unknown) => {
 		log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
 
 		return undefined;
@@ -98,7 +92,7 @@ async function writeScope(
 	update: (latest: DiscordContext) => ScopeUpdate,
 ): Promise<void> {
 	await withDiscordMetadataLock(sessionID, async () => {
-		const session = await ctx.session.get({ sessionID }).catch((error) => {
+		const session = await ctx.session.get({ sessionID }).catch((error: unknown) => {
 			log("discord-plugin", `could not read ${sessionID} for a schedule: ${describeError(error)}`);
 
 			return undefined;
@@ -167,7 +161,7 @@ export async function registerScheduleScope(input: ScheduleScopeInput): Promise<
 		if (!context) return;
 
 		if (kind === "create") {
-			const id = scheduleId(event.result.output);
+			const id = scheduleId(event.result.output as Schema.Json | undefined);
 
 			// Without the returned id there is no safe scope to grant. The
 			// schedule still exists, but its turns fail closed as no-speaker
@@ -203,7 +197,7 @@ export async function registerScheduleScope(input: ScheduleScopeInput): Promise<
 						});
 
 				return { scope: addScheduleToScope(existing, id, now) };
-			}).catch((error) => log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`));
+			}).catch((error: unknown) => log("discord-plugin", `could not record a schedule scope: ${describeError(error)}`));
 			onCreated?.(context.thread.id);
 
 			return;
@@ -213,7 +207,7 @@ export async function registerScheduleScope(input: ScheduleScopeInput): Promise<
 
 		const id =
 			scheduleId(Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Json)(event.input))) ??
-			scheduleId(event.result.output);
+			scheduleId(event.result.output as Schema.Json | undefined);
 
 		if (!id) return;
 		await writeScope(ctx, event.sessionID, (latest) => {
@@ -221,6 +215,6 @@ export async function registerScheduleScope(input: ScheduleScopeInput): Promise<
 			const next = removeScheduleFromScope(latest.scheduleScope, id, Date.now());
 
 			return { scope: next.scheduleIds.length ? next : undefined };
-		}).catch((error) => log("discord-plugin", `could not update a schedule scope: ${describeError(error)}`));
+		}).catch((error: unknown) => log("discord-plugin", `could not update a schedule scope: ${describeError(error)}`));
 	});
 }

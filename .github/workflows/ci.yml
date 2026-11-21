@@ -38,7 +38,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Fail on anti-slop diagnostics before spending time on the build.
+      # Fail on lint diagnostics before spending time on the build.
       - run: pnpm lint
 
       # `cf workers types` regenerates the binding types the checks build on.

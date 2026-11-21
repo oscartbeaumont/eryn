@@ -13,7 +13,7 @@
 import { Cause, Duration, Effect, Option, Schedule, Schema } from "effect";
 
 import { booleanField, isJsonObject, jsonBody, jsonField, numberField, stringField } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 import type { DiscordComponent, DiscordModal } from "./components";
 
 const API = "https://discord.com/api/v10";
@@ -161,7 +161,7 @@ export class DiscordError extends Error {
 
 const DiscordAuditEntrySchema = Schema.Struct({
 	id: Schema.String,
-	action_type: Schema.Number,
+	action_type: Schema.Finite,
 	user_id: Schema.optional(Schema.String),
 	target_id: Schema.optional(Schema.String),
 });
@@ -247,7 +247,7 @@ export interface InteractionMessageOptions {
 function permissionOverwrites(value: Schema.Json | undefined): readonly PermissionOverwrite[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 
-	return value.flatMap((entry): PermissionOverwrite[] => {
+	return value.flatMap((entry: Schema.Json): PermissionOverwrite[] => {
 		const id = stringField(entry, "id");
 		const type = numberField(entry, "type");
 
@@ -314,7 +314,7 @@ function threadMetadataOf(value: Schema.Json | undefined): DiscordChannelRef["th
 function channelRefs(value: Schema.Json | undefined): DiscordChannelRef[] {
 	if (!Array.isArray(value)) return [];
 
-	return value.flatMap((entry) => channelRef(entry) ?? []);
+	return value.flatMap((entry: Schema.Json) => channelRef(entry) ?? []);
 }
 
 /** The path of one message, which most message operations extend. */
@@ -662,7 +662,7 @@ function guildMethods(http: DiscordTransport) {
 
 			if (!Array.isArray(result)) return [];
 
-			return result.flatMap((guild): DiscordGuildSummary[] => {
+			return result.flatMap((guild: Schema.Json): DiscordGuildSummary[] => {
 				const id = stringField(guild, "id");
 				const name = stringField(guild, "name");
 

@@ -8,34 +8,14 @@
  */
 
 import { describeError } from "../../errors";
-import {
-	actionButton,
-	buttonRow,
-	selectRow,
-	type DiscordSelectOption,
-} from "../../discord/components";
-import {
-	GROUP_LABELS,
-	LISTED_PROFILES,
-	MCP_ALL,
-	POLICY_GROUPS,
-	PRESET_HINTS,
-	isBuiltinProfile,
-	isPolicyGroup,
-	matchProfile,
-	policyTitle,
-	summaryLines,
-	type EffectTable,
-} from "../../session/policy";
-import { type Mutable } from "../../mutable.ts";
+import { actionButton, buttonRow, selectRow } from '../../discord/components';
+import type { DiscordSelectOption } from '../../discord/components';
+import { GROUP_LABELS, LISTED_PROFILES, MCP_ALL, POLICY_GROUPS, PRESET_HINTS, isBuiltinProfile, isPolicyGroup, matchProfile, policyTitle, summaryLines } from '../../session/policy';
+import type { EffectTable } from '../../session/policy';
+import type { Mutable } from '../../mutable.ts';
 import type { Policy, PolicyEffect, PolicyState } from "../../session/models";
-import {
-	claim,
-	closeRow,
-	responder,
-	MAX_SELECT_OPTIONS,
-	type InteractionRequest,
-} from "./interaction";
+import { claim, closeRow, responder, MAX_SELECT_OPTIONS } from './interaction';
+import type { InteractionRequest } from './interaction';
 
 export const POLICY_MENU_ID = "policy:menu";
 

@@ -34,7 +34,7 @@ function captureFetch(captured: Captured): () => void {
 			status: 200,
 			headers: { "content-type": "application/json" },
 		});
-	}) as typeof fetch;
+	});
 
 	return () => {
 		globalThis.fetch = original;

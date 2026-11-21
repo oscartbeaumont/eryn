@@ -11,7 +11,7 @@ import type { Schema } from "effect";
 
 import { describeError } from "../errors.ts";
 import { toJsonObject } from "../json.ts";
-import { type Mutable } from "../mutable.ts";
+import type { Mutable } from '../mutable.ts';
 
 /** The JSON-schema shape OpenCode's tool editor expects. */
 export function objectSchema(properties: Schema.JsonObject, required: string[] = []) {

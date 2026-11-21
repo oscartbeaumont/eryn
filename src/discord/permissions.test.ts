@@ -8,17 +8,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type Mutable } from "../mutable.ts";
-import {
-	ALL_PERMISSIONS,
-	effectivePermissions,
-	guildPermissions,
-	hasPermission,
-	Permission,
-	type PermissionChannel,
-	type PermissionOverwriteLike,
-	type PermissionRole,
-} from "./permissions.ts";
+import type { Mutable } from '../mutable.ts';
+import { ALL_PERMISSIONS, effectivePermissions, guildPermissions, hasPermission, Permission } from './permissions.ts';
+import type { PermissionChannel, PermissionOverwriteLike, PermissionRole } from './permissions.ts';
 
 const GUILD = "guild-1";
 

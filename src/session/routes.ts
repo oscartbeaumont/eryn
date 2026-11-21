@@ -19,50 +19,14 @@ import { describeTools } from "../mcp/describe";
 import { beginAuthorization, finishAuthorization, refreshLink, testLink } from "../mcp/links";
 import { applyElicitation } from "../mcp/elicitation";
 import { AUTH_TTL_MS } from "../mcp/paths";
-import { probeServer, type ProbeOptions } from "../mcp/probe";
-import { type Mutable } from "../mutable.ts";
+import { probeServer } from '../mcp/probe';
+import type { ProbeOptions } from '../mcp/probe';
+import type { Mutable } from '../mutable.ts';
 import type { GuildAgent } from "./agent";
 import type { HostConfig } from "./host-config";
 import { channelProjectDirectory } from "./locations";
-import {
-	ApprovalReplyRequestSchema,
-	CommandListRequestSchema,
-	CommandRequestSchema,
-	CompactRequestSchema,
-	ContextUpdateRequestSchema,
-	DisconnectRequestSchema,
-	FormCancelRequestSchema,
-	FormFieldRequestSchema,
-	FormGetRequestSchema,
-	FormReplyRequestSchema,
-	FormTextRequestSchema,
-	GuildRefSchema,
-	InterruptRequestSchema,
-	InteractRequestSchema,
-	LinkAddRequestSchema,
-	LinkElicitationRequestSchema,
-	LinkRemoveRequestSchema,
-	McpAuthAttemptRequestSchema,
-	McpAuthCompleteRequestSchema,
-	McpAuthStartRequestSchema,
-	McpProbeRequestSchema,
-	McpTestRequestSchema,
-	ModelRequestSchema,
-	PolicyClearRequestSchema,
-	PolicyGetRequestSchema,
-	PolicySetRequestSchema,
-	ProfileDefaultRequestSchema,
-	ProfileRemoveRequestSchema,
-	ProfileSetRequestSchema,
-	PromptRequestSchema,
-	ProviderConnectRequestSchema,
-	type GuildSettings,
-	type McpAuthCompleteResponse,
-	type McpAuthStatus,
-	type McpLink,
-	type ProviderConnectRequest,
-	type PublicLink,
-} from "./models";
+import { ApprovalReplyRequestSchema, CommandListRequestSchema, CommandRequestSchema, CompactRequestSchema, ContextUpdateRequestSchema, DisconnectRequestSchema, FormCancelRequestSchema, FormFieldRequestSchema, FormGetRequestSchema, FormReplyRequestSchema, FormTextRequestSchema, GuildRefSchema, InterruptRequestSchema, InteractRequestSchema, LinkAddRequestSchema, LinkElicitationRequestSchema, LinkRemoveRequestSchema, McpAuthAttemptRequestSchema, McpAuthCompleteRequestSchema, McpAuthStartRequestSchema, McpProbeRequestSchema, McpTestRequestSchema, ModelRequestSchema, PolicyClearRequestSchema, PolicyGetRequestSchema, PolicySetRequestSchema, ProfileDefaultRequestSchema, ProfileRemoveRequestSchema, ProfileSetRequestSchema, PromptRequestSchema, ProviderConnectRequestSchema } from './models';
+import type { GuildSettings, McpAuthCompleteResponse, McpAuthStatus, McpLink, ProviderConnectRequest, PublicLink } from './models';
 import { ROUTES } from "./paths";
 import type { GuildStore } from "./store";
 
@@ -108,7 +72,7 @@ async function parseBody<S extends Schema.ConstraintDecoder<unknown>>(
 
 		return {
 			document: toJsonObject(body) ?? {},
-			value: Schema.decodeUnknownSync(schema)(body),
+			value: Schema.decodeSync(schema)(body),
 		};
 	} catch (error) {
 		return json({ error: `could not read the request: ${describeError(error)}` }, 400);
@@ -544,7 +508,7 @@ function linkRoutes(deps: RouteDeps): RouteTable {
 					if (attempt.applicationId && attempt.interactionToken) {
 						await deps.rest
 							.interactionEditOriginal(attempt.applicationId, attempt.interactionToken, message, { components: [] })
-							.catch((error) => log("session", `could not update the MCP sign-in message: ${describeError(error)}`));
+							.catch((error: unknown) => log("session", `could not update the MCP sign-in message: ${describeError(error)}`));
 					}
 				}
 

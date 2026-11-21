@@ -50,10 +50,10 @@ export interface WorkspaceStorage {
 
 const KEY_PREFIX = KEYS.fs;
 
+const key = (path: string) => `${KEY_PREFIX}${path}`;
+
 /** Build a filesystem over a Durable Object's storage. */
 export function fileStore(storage: WorkspaceStorage): FileStore {
-	const key = (path: string) => `${KEY_PREFIX}${path}`;
-
 	return {
 		async get(path) {
 			return await storage.get<StoredFile>(key(path));

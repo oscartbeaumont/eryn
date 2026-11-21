@@ -12,16 +12,11 @@
  * denied, never granted.
  */
 
-import { type Mutable } from "../mutable.ts";
-import { THREAD_TYPES, type DiscordChannelRef, type DiscordRest, type DiscordRole } from "./api.ts";
-import {
-	effectivePermissions,
-	type EffectivePermissionInput,
-	guildPermissions,
-	type GuildPermissionInput,
-	hasPermission,
-	Permission,
-} from "./permissions.ts";
+import type { Mutable } from '../mutable.ts';
+import { THREAD_TYPES } from './api.ts';
+import type { DiscordChannelRef, DiscordRest, DiscordRole } from './api.ts';
+import { effectivePermissions, guildPermissions, hasPermission, Permission } from './permissions.ts';
+import type { EffectivePermissionInput, GuildPermissionInput } from './permissions.ts';
 
 /** How long the guild's roles and owner are trusted. These change rarely. */
 const GUILD_TTL_MS = 5 * 60_000;
