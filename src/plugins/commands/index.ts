@@ -10,8 +10,7 @@
 
 import { Plugin } from "@opencode/plugin";
 
-import { shellBlockPattern } from "../../session/command-template.ts";
-import { WORKSPACE_ROOT } from "../../session/locations.ts";
+import { shellBlockPattern } from "../../server/command-template.ts";
 import { runShell } from "../workspace/shell.ts";
 import { fileStore } from '../workspace/store.ts';
 import type { FileStore } from '../workspace/store.ts';
@@ -20,18 +19,18 @@ import type { FileStore } from '../workspace/store.ts';
  * Run each block in order, because a later block may read what an earlier one
  * wrote, and collect what each one printed.
  */
-async function runBlocksInOrder(store: FileStore, blocks: readonly string[]): Promise<string[]> {
+async function runBlocksInOrder(store: FileStore, root: string, blocks: readonly string[]): Promise<string[]> {
 	if (blocks.length === 0) return [];
 
 	const [block, ...rest] = blocks;
-	const result = await runShell(store, block, WORKSPACE_ROOT, WORKSPACE_ROOT);
+	const result = await runShell(store, block, root, root);
 	const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
 
-	return [output, ...(await runBlocksInOrder(store, rest))];
+	return [output, ...(await runBlocksInOrder(store, root, rest))];
 }
 
 /** Replace every protected block with its just-bash output. */
-export async function expandShellBlocks(store: FileStore, text: string): Promise<string> {
+export async function expandShellBlocks(store: FileStore, root: string, text: string): Promise<string> {
 	const pattern = shellBlockPattern();
 	const matches = [...text.matchAll(pattern)];
 
@@ -39,6 +38,7 @@ export async function expandShellBlocks(store: FileStore, text: string): Promise
 
 	const outputs = await runBlocksInOrder(
 		store,
+		root,
 		matches.map((match) => match[1] ?? ""),
 	);
 
@@ -47,7 +47,7 @@ export async function expandShellBlocks(store: FileStore, text: string): Promise
 	return text.replace(shellBlockPattern(), () => outputs[index++] ?? "");
 }
 
-export function commandShellPlugin(storage: DurableObjectStorage) {
+export function commandShellPlugin(storage: DurableObjectStorage, rootForSession: (sessionID: string) => string) {
 	const store = fileStore(storage);
 
 	return Plugin.define({
@@ -55,7 +55,11 @@ export function commandShellPlugin(storage: DurableObjectStorage) {
 		async setup(ctx) {
 			await ctx.session.hook("prompt", async (event) => {
 				if (!event.prompt.text.includes("!\u200b`")) return;
-				event.prompt.text = await expandShellBlocks(store, event.prompt.text);
+				event.prompt.text = await expandShellBlocks(
+					store,
+					rootForSession(event.sessionID),
+					event.prompt.text,
+				);
 			});
 		},
 	});

@@ -6,46 +6,46 @@ import "./styles.css";
 const REPOSITORY = "https://github.com/oscartbeaumont/eryn";
 
 const FACTS = [
-	"Agent always online",
+	"Discord and iMessage",
 	"Connect your own inference",
-	"Integrate your other apps via MCP",
+	"Bring your own MCP servers",
 ];
 
 const FEATURES = [
 	{
-		title: "Threads, not tabs",
-		body: "Each request gets a thread with a persistent session, so follow-ups carry the context instead of starting over. You can ask Eryn to subscribe to a channel if you want.",
+		title: "One agent, many surfaces",
+		body: "Discord and iMessage are providers, not the product. Connect either one, subscribe a channel, and the same agent answers in both.",
 	},
 	{
 		title: "Your models, your bill",
-		body: "Connect your own inference provider and pick the model per server. Use any provider that OpenCode supports.",
+		body: "Connect your own inference provider and pick the model per server. Bring a free key or use one the deployment offers.",
 	},
 	{
-		title: "Tools that do the work",
-		body: "We give the agent a virtual filesystem and a sandboxed shell for basic uses. Connect external services via MCP.",
+		title: "A real workspace",
+		body: "Every channel gets its own OpenCode project inside a server workspace. Files, skills, and MCP servers are shared or scoped as you choose.",
 	},
 ];
 
 const COMMANDS = [
 	{
-		command: "/eryn setup",
-		description: "Connect a provider, choose a model, and link MCP servers.",
-		permission: "Manage Server",
+		command: "Create a server",
+		description: "Sign in with an email code, then create a server in the web app.",
+		permission: "Web",
 	},
 	{
-		command: "@eryn what's the weather",
-		description: "Mention Eryn with a request to start a thread. Reply in the thread to keep going.",
-		permission: "Everyone",
+		command: "Connect a provider",
+		description: "Bind a Discord guild or enter SendBlue keys for iMessage, then subscribe a conversation.",
+		permission: "Web",
 	},
 	{
-		command: "/eryn stop",
-		description: "Stop the run in the current thread. The session stays intact for the next message.",
-		permission: "Everyone",
+		command: "Connect inference",
+		description: "Paste an API key for any inference provider OpenCode supports and pick a model.",
+		permission: "BYOK",
 	},
 	{
-		command: "/eryn help",
-		description: "Show the commands and point to where setup lives.",
-		permission: "Everyone",
+		command: "Extend the agent",
+		description: "Link MCP servers or install a custom plugin that runs in its own Dynamic Worker.",
+		permission: "MCP / plugins",
 	},
 ];
 
@@ -104,23 +104,18 @@ function Hero() {
 			<div aria-hidden="true" class="cover-scrim absolute inset-0" />
 			<div class="relative mx-auto flex min-h-[640px] w-full max-w-[1440px] flex-col px-6 pb-16 pt-6 sm:min-h-[720px] sm:px-10 lg:min-h-[840px] lg:px-16 lg:pb-24 lg:pt-7">
 				<div class="mt-20 flex max-w-[780px] flex-col gap-6 lg:mt-[174px]">
-					<Eyebrow>Your personal agent in Discord</Eyebrow>
+					<Eyebrow>Your personal agent, wherever you are</Eyebrow>
 					<h1 class="text-[clamp(4.5rem,15vw,9.75rem)] font-semibold leading-[0.86] tracking-[-0.055em] text-ink">
 						eryn
 					</h1>
 					<p class="max-w-[620px] text-[17px] leading-[1.6] text-[#c9c9cf] sm:text-[18px]">
-						Mention <strong class="font-semibold text-ink">@eryn</strong> in a server and it
-						opens a thread, works the request through an agent, and streams the answer back.
-						Reply in the thread and it keeps going.
+						Eryn is a hosted OpenCode agent you can reach from Discord or iMessage. Connect
+						your own inference, give it a workspace, and it keeps working between
+						conversations.
 					</p>
 					<div class="flex flex-wrap items-center gap-3">
-						<Action
-							href="/install"
-							primary
-							analytics="install_clicked"
-							location="hero"
-						>
-							Add to Discord
+						<Action href="/app" primary analytics="app_clicked" location="hero">
+							Open the app
 						</Action>
 						<Action href={REPOSITORY} analytics="repository_clicked" location="hero">
 							GitHub
@@ -178,7 +173,7 @@ function Commands() {
 				<Container>
 					<Eyebrow>Commands</Eyebrow>
 					<h2 class="mt-4 text-[clamp(2rem,4vw,2.5rem)] font-semibold leading-[1.1] tracking-[-0.04em] text-ink">
-						Start with a mention.
+						Set it up in the browser.
 					</h2>
 
 					<div class="mt-8 border-t border-line">
@@ -207,20 +202,15 @@ function CallToAction() {
 				<Container>
 					<div class="rounded-lg border border-line bg-panel px-6 py-14 text-center sm:px-16">
 						<h2 class="text-[clamp(1.75rem,3.5vw,2.125rem)] font-semibold tracking-[-0.035em] text-ink">
-							Connect Eryn to your server
+							Bring your own agent
 						</h2>
 						<p class="mx-auto mt-4 max-w-[560px] text-[16px] leading-[1.6] text-muted">
-							Add Eryn, run <code class="font-mono text-[0.9em] text-ink">/eryn setup</code>,
-							connect a provider, and choose a model. Then mention it anywhere.
+							Create a server, connect Discord or iMessage, and point it at your inference.
+							Everything else — files, MCP servers, plugins — is configured in the same place.
 						</p>
 						<div class="mt-7 flex justify-center">
-							<Action
-								href="/install"
-								primary
-								analytics="install_clicked"
-								location="cta"
-							>
-								Add to Discord
+							<Action href="/app" primary analytics="app_clicked" location="cta">
+								Open the app
 							</Action>
 						</div>
 					</div>

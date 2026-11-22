@@ -23,73 +23,65 @@ const DOMAIN =
 const publicOrigin = DOMAIN ? { PUBLIC_ORIGIN: bindings.text(`https://${DOMAIN}`) } : {};
 
 /**
- * One Worker: the Discord bot.
+ * One Worker, four Durable Objects.
  *
- * `src/index.ts` is the entrypoint and the bot's two Durable Objects are the
- * whole deployment; the only static files are the brand images in `assets/`.
+ * The split is deliberate: `Control` owns identity and the server registry,
+ * `Server` owns agent state (OpenCode, models, MCP links, files), `Hub` owns
+ * the messaging data plane, and `Gateway` owns the one long-lived Discord
+ * socket. No object calls back into itself through the Worker, which is what
+ * lets the MCP transport stay a plain HTTP endpoint.
  */
 export default defineConfig({
 	worker: {
 		name: "eryn",
-		compatibilityDate: "2026-10-06",
-		// The embedded OpenCode SDK targets workerd through the `workerd` condition.
+		compatibilityDate: "2026-11-20",
 		compatibilityFlags: ["nodejs_compat"],
 		entrypoint,
-		// A string domain serves production traffic only, and version preview
-		// URLs are off: neither `eryn.<subdomain>.workers.dev` nor a
-		// `<version>-eryn.<subdomain>.workers.dev` URL is published by the hosted
-		// deployment. A self-hosted fork has no domain of its own, so it gets the
-		// workers.dev route.
 		domains: DOMAIN ? [DOMAIN] : [],
 		workersDev: DOMAIN === undefined,
 		previewUrls: false,
-		// `assets/` is the public directory. Only the brand paths are routed to
-		// the Worker; every other matching file is served directly by Cloudflare.
 		assets: {
 			runWorkerFirst: ["/brand/*", "/favicon.ico"],
 		},
 		observability: {
 			enabled: true,
-			// OAuth codes and state live in the query string, so keep them out of
-			// logs and traces.
 			redactQueryString: true,
 			logs: { enabled: true, invocationLogs: true, persist: true },
 			traces: { enabled: true, persist: true },
 			issues: { enabled: true },
 		},
-		// A watchdog for the bot's gateway object, not a keepalive. The object
-		// re-arms its own alarm (every two minutes) and a deploy restart now
-		// retries that alarm, so this only covers the case where the alarm chain
-		// is lost entirely — a slow poke is enough for that.
-		triggers: [triggers.scheduled({ schedule: "*/15 * * * *" })],
+		triggers: [triggers.scheduled({ schedule: "*/5 * * * *" })],
 		env: {
-			// Static files from `assets/`, served through `brandAsset`.
 			ASSETS: bindings.assets(),
 
-			// The bot: the singleton Discord socket, and one session per guild.
-			BOT_GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "BotGateway" }),
-			BOT_SESSION: bindings.durableObject({ worker: "eryn", exportName: "BotSession" }),
+			// Identity, logins, and the server registry.
+			CONTROL: bindings.durableObject({ worker: "eryn", exportName: "Control" }),
+			// One per Eryn server: settings, files, and the embedded OpenCode host.
+			SERVER: bindings.durableObject({ worker: "eryn", exportName: "Server" }),
+			// One per Eryn server: messaging bindings, event log, MCP tools.
+			HUB: bindings.durableObject({ worker: "eryn", exportName: "Hub" }),
+			// The singleton Discord gateway.
+			GATEWAY: bindings.durableObject({ worker: "eryn", exportName: "Gateway" }),
 
-			// Discord: the bot token powers the socket, slash commands, and threads.
-			DISCORD_BOT_TOKEN: bindings.secret(),
+			// Runs custom agent plugins in isolated dynamic isolates.
+			PLUGIN_LOADER: bindings.workerLoader(),
 
-			// base64url 32-byte key protecting every stored credential at rest.
+			// Base64url 32-byte key protecting every stored credential at rest.
 			ENCRYPTION_KEY: bindings.secret(),
 
-			// Public origin used in links and OAuth callbacks. The hosted deploy
-			// knows its own domain; a self-hosted one learns its URL from the first
-			// request it serves, so it leaves this unset.
+			// Transactional email for login codes. Resend is the default adapter;
+			// without a key a development deployment logs the code instead.
+			EMAIL_FROM: bindings.text("Eryn <login@eryn.otbeaumont.me>"),
+
 			...publicOrigin,
 
-			// The deploy this Worker is serving. A deploy does not restart a live
-			// object, and an object's own copy of this binding is pinned to the
-			// deploy it started on, so the Worker sends this to each object on
-			// every call and the object restarts when it changes.
 			CF_VERSION: bindings.versionMetadata(),
 		},
 		exports: {
-			BotGateway: exports.durableObject({ storage: "sqlite" }),
-			BotSession: exports.durableObject({ storage: "sqlite" }),
+			Control: exports.durableObject({ storage: "sqlite" }),
+			Server: exports.durableObject({ storage: "sqlite" }),
+			Hub: exports.durableObject({ storage: "sqlite" }),
+			Gateway: exports.durableObject({ storage: "sqlite" }),
 		},
 	},
 });

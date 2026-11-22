@@ -1,249 +1,50 @@
 /**
- * Eryn's Cloudflare Worker entrypoint.
+ * The Worker entrypoint.
  *
- * The Worker serves the public site and the Discord bot. It renders `/` through
- * Solid's SSR handler, verifies and forwards Discord's HTTP interactions,
- * answers the external MCP sign-in callback and the models.dev catalogue a
- * guild's embedded OpenCode host asks for, exposes the two Durable Objects the
- * bot is made of, and wakes the singleton bot object from `/health` and the
- * cron trigger.
+ * It is the only public surface: the marketing page, the browser app, the
+ * Discord interaction endpoint, the SendBlue webhook, and the MCP endpoint the
+ * embedded agent connects to. Each one verifies its own caller and then
+ * forwards to a Durable Object.
  */
 
-import { env } from "cloudflare:workers";
-import { Result } from 'effect';
-import type { Schema } from 'effect';
+import { Result } from "effect";
+import type { Schema } from "effect";
 import { Hex } from "effect/encoding";
 import solidHandler from "virtual:solid-ssr-handler";
 
-import { SessionClient } from "./bot/client";
-import { BotGateway } from "./bot/do";
-import { brandAsset, BRAND, isBrandAsset } from "./brand";
-import { catalogueResponse, isCatalogueRequest } from "./catalogue";
-import { isPostHogRequest, posthogProxy } from "./landing/analytics";
-import { APPLICATION_PUBLIC_KEY, configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config";
-import { privacyPage, termsPage } from "./legal";
-import { verify } from "./crypto";
-import { withDeploy, withOrigin } from "./deploy";
-import { application, applicationId, ensureEndpoint } from "./discord/application";
-import type { DiscordInteraction } from "./discord/socket";
-import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths";
-import { stringField } from "./json.ts";
-import { installUrl } from "./public";
-import { BotSession } from "./session/do";
+import { brandAsset, isBrandAsset } from "./brand.ts";
+import { catalogueResponse, isCatalogueRequest } from "./catalogue.ts";
+import { configuredOrigin, INTERACTIONS_PATH, log } from "./config.ts";
+import { Control } from "./control/do.ts";
+import { withDeploy, withOrigin } from "./deploy.ts";
+import { application, applicationId, ensureEndpoint } from "./discord/application.ts";
+import type { DiscordInteraction } from "./discord/socket.ts";
+import { Gateway } from "./gateway/do.ts";
+import { Hub } from "./hub/do.ts";
+import { isPostHogRequest, posthogProxy } from "./landing/analytics.ts";
+import { privacyPage, termsPage } from "./legal.ts";
+import { handleMcp } from "./mcp/eryn.ts";
+import { readMcpToken } from "./mcp/token.ts";
+import { installUrl } from "./public.ts";
+import { Server } from "./server/do.ts";
+import { handleWeb } from "./web/routes.ts";
 
-export { BotGateway, BotSession };
+export { Control, Server, Hub, Gateway };
 
-/** Whether a field of a forwarded payload is text. */
-function isText<Value>(value: Value): value is Value & string {
-	return typeof value === "string";
-}
-
-/** What the bot object reports about itself, as `/health` passes it on. */
-interface WakeState {
-	connected?: boolean;
-	/** Gateway shard connections: how many exist, and how many are open. */
-	shards?: { total?: number; open?: number };
-	deploy?: string | null;
-	restart?: boolean;
-}
-
-const isRead = (request: Request): boolean => request.method === "GET" || request.method === "HEAD";
-
-/**
- * Poke the singleton bot object so it connects and arms its alarm.
- *
- * A deploy can make the object reset into its new code, and a reset object has
- * no socket. When the wake says a restart is pending, poke it again once the
- * restart has had a moment: that brings the socket back immediately instead of
- * leaving the bot offline until the next cron tick.
- */
-export async function wake(env: Env, origin?: string): Promise<WakeState | undefined> {
-	const stub = env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"));
-
-	const call = async (): Promise<WakeState | undefined> => {
-		const response = await stub.fetch("https://bot.internal/wake", withOrigin(withDeploy(env), origin));
-
-		if (!response.ok) return undefined;
-
-		// SAFETY: `/wake` is this deployment's own Durable Object, and the fields
-		// read below are the ones it writes.
-		return (await response.json().catch(() => undefined)) as WakeState | undefined;
-	};
-
-	let state = await call().catch(() => undefined);
-
-	// A pending restart means the object resets into the new deploy a second from
-	// now. Keep poking briefly so the replacement is woken, but do not multiply
-	// every anonymous /health request into a ten-second stream of DO calls when
-	// the bot is simply disconnected.
-	for (let attempt = 0; attempt < 3 && (!state || state.restart); attempt++) {
-		await new Promise((resolve) => { setTimeout(resolve, 1_000); });
-		state = (await call().catch(() => undefined)) ?? state;
-	}
-
-	if (!state) return undefined;
-
-	return {
-		connected: state.connected,
-		shards: state.shards,
-		deploy: state.deploy ?? null,
-		restart: state.restart === true,
-	};
-}
-
-/**
- * Handle the Worker's own routes.
- *
- * Each route handler returns `undefined` for a path it does not own, so the
- * Worker can fall through to the health check or a 404.
- */
-export async function handleWorkerRequest(
-	request: Request,
-	ctx: ExecutionContext,
-): Promise<Response | undefined> {
-	const url = new URL(request.url);
-
-	// Discord posts every interaction here once the application's endpoint is
-	// set; the route verifies the signature and hands it to the bot object.
-	if (url.pathname === INTERACTIONS_PATH) return await handleInteractions(request, ctx);
-
-	// Brand images and the favicon are static assets; the Worker owns these
-	// paths so it can add the long-lived cache headers.
-	if (isRead(request) && isBrandAsset(url.pathname)) return await brandAsset(request, env);
-
-	// The landing page's buttons point here so a self-hosted deployment installs
-	// its own application instead of the hosted one.
-	if (isRead(request) && url.pathname === "/install") {
-		return Response.redirect(installUrl(await applicationId(env)), 302);
-	}
-
-	// The landing page's PostHog traffic, proxied so a blocker does not drop it.
-	if (isPostHogRequest(url.pathname)) return await posthogProxy(request, url);
-
-	if (url.pathname === "/" && isRead(request)) {
-		const response = await solidHandler.fetch(request);
-		response.headers.set("cache-control", "public, max-age=300");
-
-		return response;
-	}
-
-	if (url.pathname === "/terms" || url.pathname === "/terms-of-service") return termsPage();
-
-	if (url.pathname === "/privacy" || url.pathname === "/privacy-policy") return privacyPage();
-
-	// The filtered models.dev catalogue an embedded host points at, so it does
-	// not decode the bundled one in a Durable Object.
-	if (isRead(request) && isCatalogueRequest(url.pathname)) return await catalogueResponse(request);
-
-	if (url.pathname.startsWith(`${MCP_START_PATH}/`)) return await handleMcpStart(request, url);
-
-	if (url.pathname !== MCP_CALLBACK_PATH) return undefined;
-
-	return await handleMcpCallback(request, url);
-}
-
-/**
- * Receive one interaction from Discord.
- *
- * Discord signs the timestamp and raw body with the application's Ed25519 key;
- * anything that fails verification is rejected before it is parsed. The
- * interaction itself is handed to the bot object, which owns the REST client
- * and the guild sessions, and Discord is released immediately with a 202. The
- * handlers acknowledge through the interaction callback endpoint, which is the
- * documented pairing for a 202 response — and is what lets a slash command work
- * even while the gateway socket is down.
- */
-async function handleInteractions(request: Request, ctx: ExecutionContext): Promise<Response> {
-	if (request.method !== "POST") return new Response("Not found", { status: 404 });
-
-	const body = await request.text();
-	const signature = request.headers.get("x-signature-ed25519") ?? "";
-	const timestamp = request.headers.get("x-signature-timestamp") ?? "";
-
-	if (!(await signedByDiscord(signature, timestamp, body))) {
-		return new Response("invalid request signature", { status: 401 });
-	}
-
-	let interaction: DiscordInteraction | undefined;
-
-	try {
-		// SAFETY: the body is Discord's signed interaction document; the fields the
-		// bot depends on are checked below before it is forwarded.
-		interaction = JSON.parse(body) as DiscordInteraction;
-	} catch {
-		return new Response("bad request", { status: 400 });
-	}
-
-	// Registering the endpoint sends a signed PING, which only counts as
-	// answered if it gets a PONG back.
-	if (interaction?.type === 1) return Response.json({ type: 1 });
-
-	if (!isText(interaction?.id) || !isText(interaction.token)) {
-		return new Response("bad request", { status: 400 });
-	}
-
-	ctx.waitUntil(
-		env.BOT_GATEWAY.get(env.BOT_GATEWAY.idFromName("bot"))
-			.fetch(
-				"https://bot.internal/interaction",
-				withOrigin(
-					withDeploy(env, {
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body,
-					}),
-					new URL(request.url).origin,
-				),
-			)
-			.then((response) => {
-				if (!response.ok) log("interactions", `the bot object returned HTTP ${response.status}`);
-			})
-			.catch((error: unknown) => log("interactions", `could not deliver the interaction: ${String(error)}`)),
-	);
-
-	return new Response(null, { status: 202 });
-}
-
-/** Ed25519 as WebCrypto names it. */
 const ED25519 = { name: "Ed25519" } as const;
 
-/**
- * How old a signed interaction may be.
- *
- * Discord signs the timestamp with the body, but a valid pair can be replayed:
- * without an age check a captured request would keep working forever. Five
- * minutes is Discord's own guidance and leaves room for clock skew.
- */
 const MAX_SIGNATURE_AGE_MS = 5 * 60_000;
 
-/** Decode a hex string, or undefined when it is not one. */
+function isRead(request: Request): boolean {
+	return request.method === "GET" || request.method === "HEAD";
+}
+
 function hexBytes(value: string): Uint8Array | undefined {
 	if (!value) return undefined;
 
 	return Result.getOrUndefined(Hex.decode(value));
 }
 
-/** Whether Discord signed this timestamp and body for this application. */
-async function signedByDiscord(signature: string, timestamp: string, body: string): Promise<boolean> {
-	const signatureBytes = hexBytes(signature);
-
-	if (!signatureBytes || !timestamp) return false;
-	// The header is seconds since the epoch, as a decimal string.
-	const seconds = Number(timestamp);
-
-	if (!Number.isFinite(seconds) || Math.abs(Date.now() - seconds * 1_000) > MAX_SIGNATURE_AGE_MS) return false;
-	const payload = new TextEncoder().encode(timestamp + body);
-
-	// The hosted application's key is a constant, so a normal interaction never
-	// costs a request. A self-hosted deployment runs its own application, and the
-	// first interaction it sees teaches it the key to check.
-	if (await signedWith(APPLICATION_PUBLIC_KEY, signatureBytes, payload)) return true;
-	const key = (await application(env))?.verifyKey;
-
-	return key ? await signedWith(key, signatureBytes, payload) : false;
-}
-
-/** Whether `signature` is valid for `payload` under a hex-encoded Ed25519 key. */
 async function signedWith(keyHex: string, signature: Uint8Array, payload: Uint8Array): Promise<boolean> {
 	const keyBytes = hexBytes(keyHex);
 
@@ -258,171 +59,185 @@ async function signedWith(keyHex: string, signature: Uint8Array, payload: Uint8A
 	}
 }
 
-/**
- * The short link a Discord button points at: resolve the signed pointer and
- * forward the browser to the authorization URL the attempt recorded.
- */
-async function handleMcpStart(request: Request, url: URL): Promise<Response> {
-	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
+async function signedByDiscord(
+	env: Env,
+	signature: string,
+	timestamp: string,
+	body: string,
+): Promise<boolean> {
+	const signatureBytes = hexBytes(signature);
 
-	const pointer = await readPointer(url.pathname.slice(MCP_START_PATH.length + 1), env);
+	if (!signatureBytes || !timestamp) return false;
+	const seconds = Number(timestamp);
 
-	if (!pointer) return invalidLink();
-
-	try {
-		const target = await new SessionClient(env, pointer.guildId).mcpAuthUrl(pointer.attemptId);
-
-		return Response.redirect(target, 302);
-	} catch {
-		return page(
-			"Sign-in link expired",
-			"This sign-in is no longer available. Start it again from Discord.",
-			400,
-		);
+	if (!Number.isFinite(seconds) || Math.abs(Date.now() - seconds * 1_000) > MAX_SIGNATURE_AGE_MS) {
+		return false;
 	}
+
+	const key = (await application(env))?.verifyKey;
+
+	if (!key) {
+		log("interactions", "the application key is not known yet");
+
+		return false;
+	}
+
+	return await signedWith(key, signatureBytes, new TextEncoder().encode(timestamp + body));
 }
 
-/** Where the authorization server sends the browser back to. */
-async function handleMcpCallback(request: Request, url: URL): Promise<Response> {
-	if (request.method !== "GET") return page("Not allowed", "This link only accepts a browser redirect.", 405);
+/** Discord posts every interaction here once the application endpoint is set. */
+async function handleInteractions(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	if (request.method !== "POST") return new Response("Not found", { status: 404 });
+	const body = await request.text();
+	const signature = request.headers.get("x-signature-ed25519") ?? "";
+	const timestamp = request.headers.get("x-signature-timestamp") ?? "";
 
-	const pointer = await readPointer(url.searchParams.get("state") ?? undefined, env);
+	if (!(await signedByDiscord(env, signature, timestamp, body))) {
+		return new Response("invalid request signature", { status: 401 });
+	}
 
-	if (!pointer) return invalidLink();
-
-	const error = url.searchParams.get("error") ?? undefined;
-	const code = url.searchParams.get("code") ?? undefined;
-
-	if (error) log("callback", `an MCP authorization server returned ${error}`);
+	let interaction: DiscordInteraction | undefined;
 
 	try {
-		const result = await new SessionClient(env, pointer.guildId).mcpAuthComplete(pointer.attemptId, code, error);
+		interaction = JSON.parse(body) as DiscordInteraction;
+	} catch {
+		return new Response("bad request", { status: 400 });
+	}
 
-		if (result.ok && result.link) {
-			return page(
-				"Connected",
-				`<strong>${escapeHtml(result.link.name)}</strong> is connected to your Discord server. You can close this tab and return to Discord.`,
-			);
+	if (interaction?.type === 1) return Response.json({ type: 1 });
+
+	if (typeof interaction?.id !== "string" || typeof interaction.token !== "string") {
+		return new Response("bad request", { status: 400 });
+	}
+
+	ctx.waitUntil(
+		env.GATEWAY.get(env.GATEWAY.idFromName("gateway"))
+			.fetch(
+				"https://gateway.internal/interaction",
+				withOrigin(
+					withDeploy(env, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body,
+					}),
+					new URL(request.url).origin,
+				),
+			)
+			.then((response) => {
+				if (!response.ok) log("interactions", "gateway returned HTTP " + response.status);
+			})
+			.catch((error: unknown) => log("interactions", "delivery failed: " + String(error))),
+	);
+
+	return new Response(null, { status: 202 });
+}
+
+/** A SendBlue message webhook, forwarded to the server that owns the number. */
+async function handleSendBlue(request: Request, env: Env, serverId: string, token: string | null): Promise<Response> {
+	if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+	const body = await request.text();
+
+	const response = await env.SERVER.get(env.SERVER.idFromName(serverId)).fetch(
+		"https://server.internal/webhook/sendblue",
+		withOrigin(
+			withDeploy(env, {
+				method: "POST",
+				headers: { "content-type": "application/json", "x-eryn-token": token ?? "" },
+				body,
+			}),
+			new URL(request.url).origin,
+		),
+	);
+
+	return new Response(null, { status: response.ok ? 200 : response.status });
+}
+
+export async function handleWorkerRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | undefined> {
+	const url = new URL(request.url);
+	const path = url.pathname;
+
+	if (path === INTERACTIONS_PATH) return await handleInteractions(request, env, ctx);
+
+	if (isRead(request) && isBrandAsset(path)) return await brandAsset(request, env);
+
+	if (isRead(request) && path === "/install") {
+		return Response.redirect(installUrl(await applicationId(env)), 302);
+	}
+
+	if (isPostHogRequest(path)) return await posthogProxy(request, url);
+
+	if (path === "/" && isRead(request)) {
+		const response = await solidHandler.fetch(request);
+		response.headers.set("cache-control", "public, max-age=300");
+
+		return response;
+	}
+
+	if (path === "/terms" || path === "/terms-of-service") return termsPage();
+	if (path === "/privacy" || path === "/privacy-policy") return privacyPage();
+
+	if (isRead(request) && isCatalogueRequest(path)) return await catalogueResponse(request);
+
+	if (path.startsWith("/mcp/") && request.method === "POST") {
+		const serverId = await readMcpToken(env, request);
+
+		if (!serverId || path !== "/mcp/" + serverId) {
+			return new Response("Unauthorized", { status: 401 });
 		}
 
-		return page(
-			"Sign-in did not complete",
-			`${escapeHtml(result.message ?? "The server did not accept the sign-in.")} You can close this tab and try again from Discord.`,
-			400,
-		);
-	} catch (error_) {
-		log("callback", `the MCP sign-in callback failed: ${String(error_)}`);
-
-		return page(
-			"Sign-in did not complete",
-			"Eryn could not finish the sign-in. You can close this tab and try again from Discord.",
-			500,
-		);
+		return await handleMcp({ env, serverId }, request);
 	}
-}
 
-/** Verify a signed sign-in pointer and narrow it to the two ids it must carry. */
-async function readPointer(
-	token: string | undefined,
-	env: Env,
-): Promise<{ guildId: string; attemptId: string } | undefined> {
-	const secret = sessionSecret(env);
+	if (path.startsWith("/webhooks/sendblue/")) {
+		const serverId = decodeURIComponent(path.slice("/webhooks/sendblue/".length));
 
-	if (!secret || !token) return undefined;
-	const pointer = await verify<Schema.JsonObject>(token, secret);
-	const guildId = stringField(pointer, "guildId");
-	const attemptId = stringField(pointer, "attemptId");
+		return await handleSendBlue(request, env, serverId, url.searchParams.get("token"));
+	}
 
-	if (guildId === undefined || attemptId === undefined) return undefined;
+	const web = await handleWeb(request, env);
 
-	return { guildId, attemptId };
-}
+	if (web) return web;
 
-/** A sign-in link whose signed pointer is gone or was never valid. */
-function invalidLink(): Response {
-	return page(
-		"Sign-in link not valid",
-		"This link is not valid any more. Start the sign-in again from Discord.",
-		400,
-	);
-}
+	if (path === "/health") {
+		const gateway = await env.GATEWAY.get(env.GATEWAY.idFromName("gateway"))
+			.fetch(
+				"https://gateway.internal/wake",
+				withOrigin(withDeploy(env, { method: "POST" }), url.origin),
+			)
+			.then(async (response) => (await response.json().catch(() => undefined)) as Schema.Json)
+			.catch(() => undefined);
 
-function escapeHtml(value: string): string {
-	return value
-		.replaceAll("&", "&amp;")
-		.replaceAll("<", "&lt;")
-		.replaceAll(">", "&gt;")
-		.replaceAll('"', "&quot;");
-}
+		return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, gateway: gateway ?? null });
+	}
 
-/** A small standalone page: the browser has left Discord and wants an answer. */
-function page(title: string, message: string, status = 200): Response {
-	// `message` may contain markup this module built; every value interpolated
-	// into it is escaped by the caller.
-	return new Response(
-		`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#08080a">
-<link rel="icon" href="${BRAND.favicon}" sizes="any">
-<link rel="icon" type="image/png" href="${BRAND.icon}" sizes="64x64">
-<link rel="apple-touch-icon" href="${BRAND.appleIcon}">
-<title>${escapeHtml(title)} · Eryn</title>
-<style>
-:root { color-scheme: dark; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b0c; color: #ededed;
-       font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 34rem; padding: 2rem 1.5rem; }
-h1 { margin: 0 0 0.75rem; font-size: 1.35rem; letter-spacing: -0.02em; }
-p { margin: 0; color: #a1a1aa; }
-strong { color: #ededed; }
-</style>
-</head>
-<body><main><h1>${escapeHtml(title)}</h1><p>${message}</p></main></body>
-</html>`,
-		{
-			status,
-			headers: {
-				"content-type": "text/html; charset=utf-8",
-				"cache-control": "no-store",
-				"referrer-policy": "no-referrer",
-				"x-content-type-options": "nosniff",
-			},
-		},
-	);
+	return undefined;
 }
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		// A deployment that configures no origin learns its public URL here: this
-		// request's own origin is the only place it is known. Doing it before the
-		// route runs means the first page view is enough to make interactions work.
+		const url = new URL(request.url);
+
 		if (!configuredOrigin(env)) {
-			ctx.waitUntil(ensureEndpoint(env, new URL(request.url).origin).catch(() => undefined));
+			ctx.waitUntil(ensureEndpoint(env, url.origin).catch(() => undefined));
 		}
 
-		const handled = await handleWorkerRequest(request, ctx).catch(() => undefined);
+		const handled = await handleWorkerRequest(request, env, ctx).catch((error: unknown) => {
+			log("worker", "request failed: " + String(error));
 
-		if (handled) return handled;
+			return undefined;
+		});
 
-		if (new URL(request.url).pathname === "/health") {
-			// Wake the bot and report whether its gateway socket is up, so a deploy
-			// that leaves it offline is visible from one request. The deploy id says
-			// which code is actually serving: a Durable Object keeps the code it
-			// started with until it restarts.
-			const botState = await wake(env, new URL(request.url).origin).catch(() => undefined);
-
-			return Response.json({ ok: true, service: "eryn", deploy: env.CF_VERSION.id, bot: botState ?? null });
-		}
-
-		return new Response("Not found", { status: 404 });
+		return handled ?? new Response("Not found", { status: 404 });
 	},
 
 	scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-		ctx.waitUntil(wake(env, configuredOrigin(env)).catch(() => undefined));
+		ctx.waitUntil(
+			env.GATEWAY.get(env.GATEWAY.idFromName("gateway"))
+				.fetch(
+					"https://gateway.internal/wake",
+					withOrigin(withDeploy(env, { method: "POST" }), configuredOrigin(env)),
+				)
+				.catch(() => undefined),
+		);
 	},
 } satisfies ExportedHandler<Env>;

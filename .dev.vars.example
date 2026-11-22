@@ -1,20 +1,22 @@
-# Copy to .dev.vars and fill in. `pnpm dev` reads this file, and Cloudflare's
-# Deploy to Cloudflare button turns every key here into a Worker secret.
-#
-# Discord: create an application at https://discord.com/developers/applications
-# and add a bot to it, then enable the Message Content Intent. The bot token is
-# all Eryn needs: the application id, the key that signs interactions, and the
-# deployment's public URL are read from Discord at runtime.
-DISCORD_BOT_TOKEN=
-
-# Seals stored provider and MCP credentials. Generate with:
-#   echo "ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+# Required. A base64url 32-byte key that seals every stored credential.
+# Generate one with:
+#   openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
 ENCRYPTION_KEY=
 
-# Optional overrides, only needed for development or a deployment that cannot
-# learn these itself. `pnpm dev` reads them from this file when uncommented.
-#   PUBLIC_ORIGIN    the origin used in links and OAuth callbacks
-#   SESSION_SECRET   the key for MCP sign-in state; derived from ENCRYPTION_KEY
-#                    when this is unset
-#   POSTHOG_KEY      the PostHog project token for product analytics; unset
-#                    keeps the bot silent, which is the right default for a fork
+# Optional. The public origin used in links and the MCP endpoint. A deployment
+# that omits it learns its URL from the first request it serves.
+PUBLIC_ORIGIN=http://localhost:5173
+
+# Optional. The Discord bot token. Without one, Discord is simply disabled and
+# iMessage still works.
+DISCORD_BOT_TOKEN=
+
+# Optional. Signs browser sessions. Derived from ENCRYPTION_KEY when unset.
+SESSION_SECRET=
+
+# Optional. Resend API key for email login codes. Without one, a development
+# deployment logs the code to the console instead.
+RESEND_API_KEY=
+
+# Optional. The From address for login emails.
+EMAIL_FROM=Eryn <login@eryn.example>

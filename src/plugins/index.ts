@@ -1,29 +1,16 @@
 /**
  * The OpenCode plugins Eryn's embedded host loads.
  *
- * Each plugin lives in its own directory and owns everything it needs. This
- * file is the barrel the host builder imports from, so adding or removing a
- * plugin is a one-line change here rather than a hunt through the agent.
- *
- * Config, skills, commands, and instructions are read from the guild's durable
- * filesystem. Plugins are bundled TypeScript because Workers cannot load or
- * evaluate plugin code at runtime.
+ * Each plugin lives in its own directory. The host builder imports the ones it
+ * needs directly; this barrel is the short list of everything available.
  */
 
-export { commandShellPlugin } from "./commands";
+export { commandShellPlugin } from "./commands/index.ts";
 
-export { discordPlugin } from "./discord";
+export { dynamicPluginsPlugin, loadPlugin } from "./dynamic/index.ts";
 
-export { DISCORD_METADATA_KEY, readDiscordContext } from "./discord/context";
+export { agentInstructionsPlugin } from "./instructions/index.ts";
 
-export { mcpGuidancePlugin } from "./guidance";
+export { workspaceSkillsPlugin } from "./skills/index.ts";
 
-export { agentInstructionsPlugin } from "./instructions";
-
-export { guildMcpPlugin } from "./mcp";
-
-export { sessionPlugin } from "./session";
-
-export { workspaceSkillsPlugin } from "./skills";
-
-export { workspacePlugin } from "./workspace";
+export { workspacePlugin } from "./workspace/index.ts";

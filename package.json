@@ -15,15 +15,14 @@
     "prelint": "cf workers types",
     "lint": "effect-tsgo oxlint --deny-warnings",
     "lint:fix": "effect-tsgo oxlint --fix",
-    "test": "node --experimental-strip-types --test src/bot/*.test.ts src/discord/*.test.ts src/plugins/*.test.ts src/session/*.test.ts"
+    "test": "node --experimental-strip-types --test src/plugins/*.test.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.4.0",
-    "@opencode/client": "2.3.0",
-    "@opencode/core": "2.3.0",
-    "@opencode/plugin": "2.3.0",
-    "@opencode/sdk": "2.3.0",
-    "@opencode/server": "2.3.0",
+    "@opencode/client": "2.3.2",
+    "@opencode/core": "2.3.2",
+    "@opencode/plugin": "2.3.2",
+    "@opencode/sdk": "2.3.2",
+    "@opencode/server": "2.3.2",
     "effect": "4.1.0",
     "jsonc-parser": "3.3.1",
     "just-bash": "3.6.1"
