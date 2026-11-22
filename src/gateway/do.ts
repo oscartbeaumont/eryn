@@ -14,7 +14,7 @@ import { newId } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
 import { stringField, toJsonObject } from "../json.ts";
 import { InboundMessageSchema } from "../core/schema.ts";
-import { ORIGIN_HEADER, withDeploy, withOrigin } from "../deploy.ts";
+import { ORIGIN_HEADER, deployRestart, withDeploy, withOrigin } from "../deploy.ts";
 import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
 import { DiscordAuthority } from "../discord/authority.ts";
@@ -118,6 +118,7 @@ export class Gateway extends DurableObject<Env> {
 	private origin: string | undefined;
 	private commandsRegistered = false;
 	private active = 0;
+	private restartPending = false;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -150,6 +151,7 @@ export class Gateway extends DurableObject<Env> {
 		const origin = request.headers.get(ORIGIN_HEADER);
 
 		if (origin) this.origin = origin.replace(/\/$/, "");
+		if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
 
 		try {
 			if (path === WAKE_PATH) return await this.wake();
@@ -166,6 +168,18 @@ export class Gateway extends DurableObject<Env> {
 	}
 
 	async alarm(): Promise<void> {
+		if (this.restartPending) {
+			if (this.active > 0) {
+				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+
+				return;
+			}
+
+			this.ctx.abort("deploy changed", { retryAlarm: true });
+
+			return;
+		}
+
 		await this.keepAlive();
 	}
 
@@ -225,6 +239,7 @@ export class Gateway extends DurableObject<Env> {
 	}
 
 	private async keepAlive(): Promise<void> {
+		if (this.restartPending) return;
 		if (!this.token) return;
 
 		if (!this.socket) {
