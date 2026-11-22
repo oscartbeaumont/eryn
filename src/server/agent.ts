@@ -67,6 +67,11 @@ function modelRef(model: string): ModelRef | undefined {
 	return variant ? { providerID, id, variant } : { providerID, id };
 }
 
+interface CommandSummary {
+	name: string;
+	description?: string;
+}
+
 const HOST_VERSION = "7";
 
 function automationName(channelId: string): string {
@@ -576,6 +581,44 @@ export class ServerAgent {
 		for (const sessionID of this.channelSession.values()) {
 			await host.sessions.switchModel({ sessionID, model: ref }).catch(() => undefined);
 		}
+	}
+
+	/** Compact one conversation's history. */
+	async compact(channel: string): Promise<boolean> {
+		const host = await this.ensureHost();
+		const record = (await this.deps.channels()).find((entry) => entry.channelId === channel);
+		const sessionID = record?.sessionID ?? this.channelSession.get(channel);
+
+		if (!sessionID) return false;
+		await host.sessions.compact({ sessionID });
+
+		return true;
+	}
+
+	/** Run one OpenCode command in a conversation. */
+	async command(channel: string, name: string, text: string): Promise<boolean> {
+		const host = await this.ensureHost();
+		const record = (await this.deps.channels()).find((entry) => entry.channelId === channel);
+		const sessionID = record?.sessionID ?? this.channelSession.get(channel);
+
+		if (!sessionID) return false;
+		await host.sessions.command({ sessionID, name, text });
+
+		return true;
+	}
+
+	/** List the commands available in a conversation's project. */
+	async commands(channel: string): Promise<CommandSummary[]> {
+		const host = await this.ensureHost();
+		const listed = await host.command.list({ location: { directory: channelRoot(channel) } });
+
+		return listed.data.map((command) => {
+			const entry: CommandSummary = { name: command.name };
+
+			if (command.description) entry.description = command.description;
+
+			return entry;
+		});
 	}
 
 	/** Stop the run in one channel. */

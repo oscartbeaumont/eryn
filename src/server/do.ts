@@ -9,7 +9,7 @@ import { Schema } from "effect";
 
 import { capture } from "../analytics.ts";
 import type { AnalyticsValue } from "../analytics.ts";
-import { DEFAULT_MODEL, KEYS, log, optional } from "../config.ts";
+import { DEFAULT_MODEL, KEYS, configuredOrigin, log, optional } from "../config.ts";
 import { newId } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
 import {
@@ -18,7 +18,7 @@ import {
 	ProviderConnectionSchema,
 	ServerSettingsSchema,
 } from "../core/schema.ts";
-import type { InboundMessage, McpLink, PluginRecord } from "../core/schema.ts";
+import type { InboundMessage, McpLink, PluginRecord, PublicLink } from "../core/schema.ts";
 import {
 	RoleMappingSchema,
 	RoleProfileSchema,
@@ -33,6 +33,10 @@ import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
 import { SERVER_ROOT } from "../core/paths.ts";
 import { toJsonObject } from "../json.ts";
+import { beginAuthorization, finishAuthorization, refreshLink, refreshLinks, testLink as probeLinkedServer } from "../mcp/links.ts";
+import type { LinkStore } from "../mcp/links.ts";
+import { PendingMcpAuthSchema } from "../mcp/types.ts";
+import { probeServer } from "../mcp/probe.ts";
 import type { Mutable } from "../mutable.ts";
 import { webhookMatches } from "../hub/do.ts";
 import { ServerAgent } from "./agent.ts";
@@ -64,6 +68,28 @@ const LinkAddSchema = Schema.Struct({
 
 const LinkRemoveSchema = Schema.Struct({ id: Schema.String });
 
+const LinkProbeSchema = Schema.Struct({
+	url: Schema.String,
+	token: Schema.optional(Schema.String),
+});
+
+const LinkTestSchema = Schema.Struct({ linkId: Schema.String });
+
+const LinkOauthStartSchema = Schema.Struct({
+	name: Schema.String,
+	url: Schema.String,
+	resourceMetadataUrl: Schema.optional(Schema.String),
+	scope: Schema.optional(Schema.String),
+});
+
+const LinkAttemptSchema = Schema.Struct({ attemptId: Schema.String });
+
+const LinkOauthCompleteSchema = Schema.Struct({
+	attemptId: Schema.String,
+	code: Schema.optional(Schema.String),
+	error: Schema.optional(Schema.String),
+});
+
 const PluginAddSchema = Schema.Struct({
 	name: Schema.String,
 	code: Schema.String,
@@ -84,6 +110,14 @@ const AttachSchema = Schema.Struct({
 const DetachSchema = Schema.Struct({ channelId: Schema.String });
 
 const InterruptSchema = Schema.Struct({ channelId: Schema.String });
+
+const CompactSchema = Schema.Struct({ channelId: Schema.String });
+
+const RunCommandSchema = Schema.Struct({
+	channelId: Schema.String,
+	command: Schema.String,
+	text: Schema.String,
+});
 
 const NudgeSchema = Schema.Struct({ message: Schema.Unknown });
 
@@ -107,6 +141,22 @@ const OAuthStartSchema = Schema.Struct({
 const OAuthAttemptSchema = Schema.Struct({ attemptID: Schema.String });
 
 const OAuthStatusSchema = Schema.Struct({ integrationID: Schema.String, attemptID: Schema.String });
+
+interface LinkOauthStatusBody {
+	status: string;
+	message?: string;
+}
+
+interface LinkCompletion {
+	code?: string;
+	error?: string;
+}
+
+interface LinkOauthCompleteBody {
+	status: string;
+	message?: string;
+	link?: PublicLink;
+}
 
 interface OAuthStatusBody {
 	status: string;
@@ -148,6 +198,12 @@ function serverName(value: string): string {
 	return value.trim().toLowerCase().replaceAll(/[^a-z0-9._-]+/g, "-").replaceAll(/^-+|-+$/g, "").slice(0, 48);
 }
 
+function publicLink(link: McpLink): PublicLink {
+	const { token: _token, oauth: _oauth, ...rest } = link;
+
+	return rest;
+}
+
 async function sha256(value: string): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
 
@@ -178,7 +234,7 @@ export class Server extends DurableObject<Env> {
 			},
 			settings: async () => await this.settings(),
 			connections: async () => await this.store.listSealed(KEYS.provider, ProviderConnectionSchema),
-			links: async () => await this.store.listSealed(KEYS.link, McpLinkSchema),
+			links: async () => await this.linksForHost(),
 			plugins: async () => await this.store.listSealed(KEYS.plugin, PluginRecordSchema),
 		});
 	}
@@ -221,6 +277,12 @@ export class Server extends DurableObject<Env> {
 		if (path === "/links" && request.method === "POST") return await this.links();
 		if (path === "/link/add" && request.method === "POST") return await this.addLink(request);
 		if (path === "/link/remove" && request.method === "POST") return await this.removeLink(request);
+		if (path === "/link/probe" && request.method === "POST") return await this.probeLink(request);
+		if (path === "/link/test" && request.method === "POST") return await this.testLink(request);
+		if (path === "/link/oauth/start" && request.method === "POST") return await this.oauthLinkStart(request);
+		if (path === "/link/oauth/url" && request.method === "POST") return await this.oauthLinkUrl(request);
+		if (path === "/link/oauth/status" && request.method === "POST") return await this.oauthLinkStatus(request);
+		if (path === "/link/oauth/complete" && request.method === "POST") return await this.oauthLinkComplete(request);
 		if (path === "/plugins" && request.method === "POST") return await this.plugins();
 		if (path === "/plugin/add" && request.method === "POST") return await this.addPlugin(request);
 		if (path === "/plugin/remove" && request.method === "POST") return await this.removePlugin(request);
@@ -229,6 +291,9 @@ export class Server extends DurableObject<Env> {
 		if (path === "/channels/attach" && request.method === "POST") return await this.attach(request);
 		if (path === "/channels/detach" && request.method === "POST") return await this.detach(request);
 		if (path === "/interrupt" && request.method === "POST") return await this.interrupt(request);
+		if (path === "/compact" && request.method === "POST") return await this.compact(request);
+		if (path === "/command" && request.method === "POST") return await this.runCommand(request);
+		if (path === "/commands" && request.method === "POST") return await this.commandsRoute(request);
 		if (path === "/approval" && request.method === "POST") return await this.approval(request);
 		if (path === "/consume" && request.method === "POST") return await this.consume(request);
 		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
@@ -271,6 +336,29 @@ export class Server extends DurableObject<Env> {
 				updatedAt: 0,
 			}
 		);
+	}
+
+	private linkStore(): LinkStore {
+		return {
+			links: async () => await this.store.listSealed(KEYS.link, McpLinkSchema),
+			getLink: async (id) => await this.store.sealed(KEYS.link + id, McpLinkSchema),
+			putLink: async (link) => {
+				await this.store.putSealed(KEYS.link + link.id, McpLinkSchema, link);
+			},
+			authAttempts: async () => await this.store.listSealed(KEYS.mcpAuth, PendingMcpAuthSchema),
+			putAuthAttempt: async (attempt) => {
+				await this.store.putSealed(KEYS.mcpAuth + attempt.attemptId, PendingMcpAuthSchema, attempt);
+			},
+			removeAuthAttempt: async (id) => {
+				await this.store.remove(KEYS.mcpAuth + id);
+			},
+		};
+	}
+
+	private async linksForHost(): Promise<McpLink[]> {
+		const links = await this.store.listSealed(KEYS.link, McpLinkSchema);
+
+		return await refreshLinks(this.linkStore(), links);
 	}
 
 	private async channels(): Promise<ChannelRecord[]> {
@@ -398,11 +486,7 @@ export class Server extends DurableObject<Env> {
 				integrationID: entry.integrationID,
 				method: entry.method,
 			})),
-			links: links.map((link) => {
-				const { token: _token, oauth: _oauth, ...rest } = link;
-
-				return rest;
-			}),
+			links: links.map(publicLink),
 			plugins: plugins.map((plugin) => {
 				const { code: _code, ...rest } = plugin;
 
@@ -622,15 +706,9 @@ export class Server extends DurableObject<Env> {
 	// --- MCP links -----------------------------------------------------------
 
 	private async links(): Promise<Response> {
-		const links = await this.store.listSealed(KEYS.link, McpLinkSchema);
+		const links = await this.linksForHost();
 
-		return json({
-			links: links.map((link) => {
-				const { token: _token, oauth: _oauth, ...rest } = link;
-
-				return rest;
-			}),
-		});
+		return json({ links: links.map(publicLink) });
 	}
 
 	private async addLink(request: Request): Promise<Response> {
@@ -649,6 +727,37 @@ export class Server extends DurableObject<Env> {
 			return failure("That URL is not valid.");
 		}
 
+		const probe = await probeServer({ url: input.url, token: input.token });
+
+		if (!probe.ok && probe.needsAuth && !input.token) {
+			const origin = this.origin ?? configuredOrigin(this.env);
+
+			if (!origin) return failure("Eryn does not know its public URL yet. Open the site once.");
+
+			try {
+				const request: Parameters<typeof beginAuthorization>[0] = {
+					store: this.linkStore(),
+					env: this.env,
+					serverId: this.serverId,
+					origin,
+					name,
+					url: input.url,
+				};
+
+				if (probe.resourceMetadataUrl) request.resourceMetadataUrl = probe.resourceMetadataUrl;
+				if (probe.scope) request.scope = probe.scope;
+				const started = await beginAuthorization(request);
+
+				return json({ ok: true, oauth: started });
+			} catch (error) {
+				return failure(describeError(error));
+			}
+		}
+
+		if (!probe.ok) {
+			return failure(probe.error ?? "The MCP server did not answer.");
+		}
+
 		const link: McpLink = {
 			id: newId("mcp"),
 			name,
@@ -660,7 +769,108 @@ export class Server extends DurableObject<Env> {
 		await this.store.putSealed(KEYS.link + link.id, McpLinkSchema, link);
 		this.track("mcp_link_added");
 
-		return json({ ok: true });
+		return json({ ok: true, tools: probe.tools });
+	}
+
+	private async probeLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkProbeSchema);
+
+		if (input instanceof Response) return input;
+
+		return json(await probeServer({ url: input.url, token: input.token }));
+	}
+
+	private async testLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkTestSchema);
+
+		if (input instanceof Response) return input;
+		const link = await this.store.sealed(KEYS.link + input.linkId, McpLinkSchema);
+
+		if (!link) return failure("That link does not exist.", 404);
+		const refreshed = await refreshLink(this.linkStore(), link);
+
+		return json(await probeLinkedServer(refreshed));
+	}
+
+	private async oauthLinkStart(request: Request): Promise<Response> {
+		const input = await body(request, LinkOauthStartSchema);
+
+		if (input instanceof Response) return input;
+		const name = serverName(input.name);
+		const origin = this.origin ?? configuredOrigin(this.env);
+
+		if (!name || name === "eryn") return failure("Choose a name other than \"eryn\".");
+		if (!origin) return failure("Eryn does not know its public URL yet. Open the site once.");
+
+		try {
+			const request: Parameters<typeof beginAuthorization>[0] = {
+				store: this.linkStore(),
+				env: this.env,
+				serverId: this.serverId,
+				origin,
+				name,
+				url: input.url,
+			};
+
+			if (input.resourceMetadataUrl) request.resourceMetadataUrl = input.resourceMetadataUrl;
+			if (input.scope) request.scope = input.scope;
+			const started = await beginAuthorization(request);
+
+			return json(started);
+		} catch (error) {
+			return failure(describeError(error));
+		}
+	}
+
+	private async oauthLinkUrl(request: Request): Promise<Response> {
+		const input = await body(request, LinkAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt?.authorizationUrl || attempt.status !== "pending") {
+			return failure("That sign-in is no longer available.", 404);
+		}
+
+		return json({ url: attempt.authorizationUrl });
+	}
+
+	private async oauthLinkStatus(request: Request): Promise<Response> {
+		const input = await body(request, LinkAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt) return failure("That sign-in is no longer available.", 404);
+
+		const payload: LinkOauthStatusBody = { status: attempt.status };
+
+		if (attempt.message) payload.message = attempt.message;
+
+		return json(payload);
+	}
+
+	private async oauthLinkComplete(request: Request): Promise<Response> {
+		const input = await body(request, LinkOauthCompleteSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt) return failure("That sign-in is no longer available.", 404);
+
+		const completion: LinkCompletion = {};
+
+		if (input.code) completion.code = input.code;
+		if (input.error) completion.error = input.error;
+		const result = await finishAuthorization(this.linkStore(), attempt, completion);
+
+		if (result.link) this.track("mcp_link_added");
+		const payload: LinkOauthCompleteBody = { status: result.status };
+
+		if (result.message) payload.message = result.message;
+		if (result.link) payload.link = publicLink(result.link);
+
+		return json(payload);
 	}
 
 	private async removeLink(request: Request): Promise<Response> {
@@ -787,6 +997,32 @@ export class Server extends DurableObject<Env> {
 		this.track("channel_detached", { provider: record?.provider });
 
 		return json({ ok: true });
+	}
+
+	private async compact(request: Request): Promise<Response> {
+		const input = await body(request, CompactSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ ok: await this.agent.compact(input.channelId) });
+	}
+
+	private async runCommand(request: Request): Promise<Response> {
+		const input = await body(request, RunCommandSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.command(input.channelId, input.command, input.text),
+		});
+	}
+
+	private async commandsRoute(request: Request): Promise<Response> {
+		const input = await body(request, CompactSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ commands: await this.agent.commands(input.channelId) });
 	}
 
 	private async interrupt(request: Request): Promise<Response> {

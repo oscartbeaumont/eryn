@@ -12,7 +12,7 @@ import { Schema } from "effect";
 import { KEYS, configuredOrigin, log, optional } from "../config.ts";
 import { newId } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
-import { toJsonObject } from "../json.ts";
+import { stringField, toJsonObject } from "../json.ts";
 import { InboundMessageSchema } from "../core/schema.ts";
 import { ORIGIN_HEADER, withDeploy, withOrigin } from "../deploy.ts";
 import { describeError } from "../errors.ts";
@@ -46,10 +46,36 @@ const COMMANDS = [
 		options: [
 			{ type: 1, name: "setup", description: "Open this server's settings" },
 			{ type: 1, name: "stop", description: "Stop the current run" },
+			{ type: 1, name: "compact", description: "Compact this conversation" },
+			{
+				type: 1,
+				name: "command",
+				description: "Run an OpenCode command",
+				options: [
+					{ type: 3, name: "name", description: "Command name", required: true },
+					{ type: 3, name: "arguments", description: "Arguments", required: false },
+				],
+			},
+			{ type: 1, name: "commands", description: "List OpenCode commands" },
+			{ type: 1, name: "policy", description: "Open access settings" },
+			{ type: 1, name: "reset", description: "Open file reset settings" },
 			{ type: 1, name: "help", description: "How to use Eryn" },
 		],
 	},
 ] as const;
+
+function subOptions(interaction: DiscordInteraction) {
+	return interaction.data?.options?.[0]?.options ?? [];
+}
+
+function optionValue(
+	options: readonly { readonly name?: string; readonly value?: unknown }[],
+	name: string,
+): string | undefined {
+	const value = options.find((option) => option.name === name)?.value;
+
+	return typeof value === "string" ? value : undefined;
+}
 
 function isBot(message: DiscordMessage): boolean {
 	return message.author?.bot === true || message.webhook_id !== undefined;
@@ -346,6 +372,74 @@ export class Gateway extends DurableObject<Env> {
 				serverId
 					? "Configure this server at " + target
 					: "Connect this Discord server by creating an Eryn server at " + target,
+			);
+
+			return;
+		}
+
+		if (sub === "compact") {
+			if (serverId) await this.toServer(serverId, "/compact", { channelId: interaction.channel_id });
+			await this.rest.interactionReply(interaction.id, interaction.token, "Compacting this conversation.");
+
+			return;
+		}
+
+		if (sub === "command") {
+			const commandName = optionValue(subOptions(interaction), "name");
+			const argumentsText = optionValue(subOptions(interaction), "arguments") ?? "";
+
+			if (!serverId || !commandName) {
+				await this.rest.interactionReply(interaction.id, interaction.token, "Name the command to run.");
+
+				return;
+			}
+
+			const result = await this.toServer(serverId, "/command", {
+				channelId: interaction.channel_id,
+				command: commandName,
+				text: argumentsText,
+			});
+
+			await this.rest.interactionReply(
+				interaction.id,
+				interaction.token,
+				result?.ok === true ? "Running " + commandName + "." : "That command could not be started.",
+			);
+
+			return;
+		}
+
+		if (sub === "commands") {
+			if (!serverId) {
+				await this.rest.interactionReply(interaction.id, interaction.token, "Connect this server first.");
+
+				return;
+			}
+
+			const result = await this.toServer(serverId, "/commands", { channelId: interaction.channel_id });
+			const commands = Array.isArray(result?.commands) ? result.commands : [];
+			const text = commands.length
+				? commands
+						.map((entry) => {
+							const command = toJsonObject(entry as never);
+
+							return "/eryn command " + (stringField(command, "name") ?? "?");
+						})
+						.join("\n")
+				: "No commands in this project.";
+
+			await this.rest.interactionReply(interaction.id, interaction.token, text);
+
+			return;
+		}
+
+		if (sub === "policy" || sub === "reset") {
+			const target = serverId && origin ? origin + "/app/servers/" + serverId : "(Open the Eryn site.)";
+
+			await this.rest.interactionReply(
+				interaction.id,
+				interaction.token,
+				"Configure " + sub + " at " + target,
 			);
 
 			return;

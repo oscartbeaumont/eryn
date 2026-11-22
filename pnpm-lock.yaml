@@ -184,6 +184,9 @@ importers:
 
   .:
     dependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.4.0
+        version: 2.4.0
       '@opencode/client':
         specifier: 2.3.2
         version: 2.3.2(effect@4.1.0)(solid-js@2.0.0)

@@ -324,7 +324,12 @@ export function serverPage(data: ServerPageData): Response {
 								base +
 								'/links/remove" class="inline"><input type="hidden" name="id" value="' +
 								escapeHtml(link.id) +
-								'"><button class="ghost" type="submit">Remove</button></form></li>',
+								'"><button class="ghost" type="submit">Remove</button></form>' +
+								'<form method="post" action="' +
+								base +
+								'/links/test" class="inline"><input type="hidden" name="id" value="' +
+								escapeHtml(link.id) +
+								'"><button class="ghost" type="submit">Test</button></form></li>',
 						)
 						.join("") +
 					"</ul>"

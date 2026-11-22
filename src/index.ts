@@ -14,8 +14,10 @@ import solidHandler from "virtual:solid-ssr-handler";
 
 import { brandAsset, isBrandAsset } from "./brand.ts";
 import { catalogueResponse, isCatalogueRequest } from "./catalogue.ts";
-import { configuredOrigin, INTERACTIONS_PATH, log } from "./config.ts";
+import { configuredOrigin, INTERACTIONS_PATH, log, sessionSecret } from "./config.ts";
 import { Control } from "./control/do.ts";
+import { verify } from "./crypto.ts";
+import { toJsonObject } from "./json.ts";
 import { withDeploy, withOrigin } from "./deploy.ts";
 import { application, applicationId, ensureEndpoint } from "./discord/application.ts";
 import type { DiscordInteraction } from "./discord/socket.ts";
@@ -25,6 +27,9 @@ import { isPostHogRequest, posthogProxy } from "./landing/analytics.ts";
 import { privacyPage, termsPage } from "./legal.ts";
 import { handleFileRequest } from "./files/routes.ts";
 import { handleMcp } from "./mcp/eryn.ts";
+import { mcpPage } from "./mcp/pages.ts";
+import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths.ts";
+import { serverCall } from "./platform/clients.ts";
 import { readMcpToken } from "./mcp/token.ts";
 import { installUrl } from "./public.ts";
 import { Server } from "./server/do.ts";
@@ -153,6 +158,100 @@ async function handleSendBlue(request: Request, env: Env, serverId: string, toke
 	return new Response(null, { status: response.ok ? 200 : response.status });
 }
 
+async function readMcpPointer(
+	token: string | undefined,
+	env: Env,
+): Promise<{ serverId: string; attemptId: string } | undefined> {
+	const secret = sessionSecret(env);
+
+	if (!secret || !token) return undefined;
+	const payload = toJsonObject(await verify<Schema.Json>(token, secret));
+	const serverId = payload?.serverId;
+	const attemptId = payload?.attemptId;
+
+	if (typeof serverId !== "string" || typeof attemptId !== "string") return undefined;
+
+	return { serverId, attemptId };
+}
+
+async function handleMcpStart(request: Request, env: Env, state: string): Promise<Response> {
+	const pointer = await readMcpPointer(decodeURIComponent(state), env);
+
+	if (!pointer) {
+		return mcpPage({
+			title: "Sign-in link not valid",
+			message: "This sign-in is no longer available. Start it again from the server settings.",
+			status: 400,
+		});
+	}
+
+	const result = await serverCall(
+		env,
+		pointer.serverId,
+		"/link/oauth/url",
+		{ attemptId: pointer.attemptId },
+		new URL(request.url).origin,
+	);
+	const target = typeof result.data.url === "string" ? result.data.url : undefined;
+
+	if (!result.ok || !target) {
+		return mcpPage({
+			title: "Sign-in link expired",
+			message: "Start the sign-in again from the server settings.",
+			status: 400,
+		});
+	}
+
+	return Response.redirect(target, 302);
+}
+
+interface LinkCompleteBody {
+	attemptId: string;
+	code?: string;
+	error?: string;
+}
+
+async function handleMcpCallback(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	const pointer = await readMcpPointer(url.searchParams.get("state") ?? undefined, env);
+
+	if (!pointer) {
+		return mcpPage({
+			title: "Sign-in link not valid",
+			message: "This sign-in is no longer available. Start it again from the server settings.",
+			status: 400,
+		});
+	}
+
+	const code = url.searchParams.get("code") ?? undefined;
+	const error = url.searchParams.get("error") ?? undefined;
+	const body: LinkCompleteBody = { attemptId: pointer.attemptId };
+
+	if (code) body.code = code;
+	if (error) body.error = error;
+	const result = await serverCall(env, pointer.serverId, "/link/oauth/complete", body, url.origin);
+
+	if (result.ok && result.data.status === "complete") {
+		return mcpPage({
+			title: "Connected",
+			message: "The MCP server is connected. You can close this tab and return to the server settings.",
+			link: url.origin + "/app/servers/" + pointer.serverId,
+			linkLabel: "Back to settings",
+		});
+	}
+
+	const message = typeof result.data.message === "string" ? result.data.message : "The sign-in did not complete.";
+	const link = url.origin + "/app/servers/" + pointer.serverId;
+
+	return mcpPage({
+		title: "Sign-in did not complete",
+		message,
+		link,
+		linkLabel: "Back to settings",
+		status: 400,
+	});
+}
+
 export async function handleWorkerRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | undefined> {
 	const url = new URL(request.url);
 	const path = url.pathname;
@@ -178,6 +277,14 @@ export async function handleWorkerRequest(request: Request, env: Env, ctx: Execu
 	if (path === "/privacy" || path === "/privacy-policy") return privacyPage();
 
 	if (isRead(request) && isCatalogueRequest(path)) return await catalogueResponse(request);
+
+	if (request.method === "GET" && path.startsWith(MCP_START_PATH + "/")) {
+		return await handleMcpStart(request, env, path.slice(MCP_START_PATH.length + 1));
+	}
+
+	if (request.method === "GET" && path === MCP_CALLBACK_PATH) {
+		return await handleMcpCallback(request, env);
+	}
 
 	if (path.startsWith("/mcp/") && request.method === "POST") {
 		const serverId = await readMcpToken(env, request);

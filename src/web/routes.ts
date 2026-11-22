@@ -319,6 +319,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 	let guild: string | undefined;
 	let oauth: string | undefined;
 	let integration: string | undefined;
+	let external: string | undefined;
 
 	switch (action) {
 		case "rename":
@@ -420,9 +421,16 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 
 			if (token) link.token = token;
 			result = await serverCall(env, id, "/link/add", link, origin);
+			const oauth = toJsonObject(result.data.oauth);
+
+			if (result.ok && typeof oauth?.startUrl === "string") external = oauth.startUrl;
 			ok = "MCP server added.";
 			break;
 		}
+		case "links/test":
+			result = await serverCall(env, id, "/link/test", { linkId: field(fields, "id") }, origin);
+			ok = "The MCP server answered.";
+			break;
 		case "links/remove":
 			result = await serverCall(env, id, "/link/remove", { id: field(fields, "id") }, origin);
 			ok = "MCP server removed.";
@@ -554,6 +562,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 
 	const query: ServerQuery = {};
 
+	if (external) return redirect(external);
 	if (result?.ok) {
 		query.ok = ok;
 		if (guild) query.guild = guild;
