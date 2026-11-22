@@ -190,7 +190,7 @@ export const McpLinkSchema = Schema.Struct({
 	id: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
-	elicitation: Schema.optional(Schema.Literals(["off", "browser", "agent"])),
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
 	token: Schema.optional(Schema.String),
 	oauth: Schema.optional(
 		Schema.Struct({
@@ -213,7 +213,7 @@ export const PublicLinkSchema = Schema.Struct({
 	id: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
-	elicitation: Schema.optional(Schema.Literals(["off", "browser", "agent"])),
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
 	createdAt: Schema.Finite,
 });
 

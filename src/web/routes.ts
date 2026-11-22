@@ -52,6 +52,7 @@ interface LinkBody {
 	name: string;
 	url: string;
 	token?: string;
+	elicitation?: "off" | "chat" | "browser" | "agent";
 }
 
 interface AttachBody {
@@ -223,6 +224,7 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 	const channels = await serverCall(env, id, "/channels", {}, origin);
 	const links = await serverCall(env, id, "/links", {}, origin);
 	const plugins = await serverCall(env, id, "/plugins", {}, origin);
+	const automationsResult = await serverCall(env, id, "/automations", {}, origin);
 	const mcp = Array.isArray(status.data.mcp) ? status.data.mcp : [];
 	const policy = Schema.decodeUnknownOption(ServerPolicySchema)(status.data.policy);
 	const currentPolicy = policy._tag === "Some" ? policy.value : defaultPolicy();
@@ -267,6 +269,16 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 
 			return [connection];
 		}),
+		automations: Array.isArray(automationsResult.data.automations)
+			? (automationsResult.data.automations as Array<{
+					channelId: string;
+					channelName?: string;
+					id: string;
+					name: string;
+					status: string;
+					runCount: number;
+				}>)
+			: [],
 		plugins: Array.isArray(plugins.data.plugins)
 			? (plugins.data.plugins as Array<{ id: string; name: string; version: string; enabled: boolean }>)
 			: [],
@@ -418,8 +430,12 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 				url: field(fields, "url"),
 			};
 			const token = field(fields, "token");
+			const elicitation = field(fields, "elicitation");
 
 			if (token) link.token = token;
+			if (elicitation === "off" || elicitation === "chat" || elicitation === "browser" || elicitation === "agent") {
+				link.elicitation = elicitation;
+			}
 			result = await serverCall(env, id, "/link/add", link, origin);
 			const oauth = toJsonObject(result.data.oauth);
 
@@ -486,6 +502,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 			const decoded = Schema.decodeUnknownOption(ServerPolicySchema)(policyResult.data.policy);
 			const current = decoded._tag === "Some" ? decoded.value : defaultPolicy();
 			const roles: RoleMapping[] = [];
+			const channelOverrides: Record<string, PermissionOverrides> = {};
 			let invalid: string | undefined;
 
 			for (const [key, value] of Object.entries(fields)) {
@@ -521,13 +538,40 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 				roles.push(role);
 			}
 
+			for (const [key, value] of Object.entries(fields)) {
+				if (!key.startsWith("channel:")) continue;
+				const channelId = key.slice("channel:".length);
+				const raw = value.trim();
+
+				if (!raw) continue;
+
+				try {
+					const parsed = JSON.parse(raw) as unknown;
+					const decodedOverrides = Schema.decodeUnknownOption(PermissionOverridesSchema)(parsed);
+
+					if (decodedOverrides._tag !== "Some") {
+						invalid = "Channel overrides for " + channelId + " are not valid.";
+						break;
+					}
+
+					channelOverrides[channelId] = decodedOverrides.value;
+				} catch {
+					invalid = "Channel overrides for " + channelId + " are not valid JSON.";
+					break;
+				}
+			}
+
 			result = invalid
 				? { ok: false, status: 400, data: { error: invalid } }
 				: await serverCall(
 						env,
 						id,
 						"/policy/set",
-						{ defaultProfileId: field(fields, "defaultProfile"), roles },
+						{
+							defaultProfileId: field(fields, "defaultProfile"),
+							roles,
+							channelOverrides,
+						},
 						origin,
 					);
 			ok = "Access saved.";
@@ -551,6 +595,26 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 				origin,
 			);
 			ok = "SendBlue keys saved.";
+			break;
+		case "automations/toggle":
+			result = await serverCall(
+				env,
+				id,
+				"/automation/" + (field(fields, "action") === "resume" ? "resume" : "pause"),
+				{ channelId: field(fields, "channelId"), automationID: field(fields, "automationID") },
+				origin,
+			);
+			ok = "Automation updated.";
+			break;
+		case "automations/remove":
+			result = await serverCall(
+				env,
+				id,
+				"/automation/delete",
+				{ channelId: field(fields, "channelId"), automationID: field(fields, "automationID") },
+				origin,
+			);
+			ok = "Automation removed.";
 			break;
 		case "reset":
 			result = await serverCall(env, id, "/reset", {}, origin);

@@ -124,6 +124,13 @@ export class Hub extends DurableObject<Env> {
 			if (path === "/policy" && request.method === "POST") return await this.putPolicy(request);
 			if (path === "/context" && request.method === "POST") return await this.context(request);
 			if (path === "/thread" && request.method === "POST") return await this.startThread(request);
+			if (path === "/threads" && request.method === "POST") return await this.listThreads(request);
+			if (path === "/react" && request.method === "POST") return await this.react(request);
+			if (path === "/edit" && request.method === "POST") return await this.edit(request);
+			if (path === "/delete" && request.method === "POST") return await this.removeMessage(request);
+			if (path === "/pin" && request.method === "POST") return await this.pin(request);
+			if (path === "/join" && request.method === "POST") return await this.join(request);
+			if (path === "/leave" && request.method === "POST") return await this.leave(request);
 			return failure("Not found.", 404);
 		} catch (error) {
 			log("hub", `route ${path} failed: ${describeError(error)}`);
@@ -184,6 +191,186 @@ export class Hub extends DurableObject<Env> {
 		} catch (error) {
 			return json({ ok: false, error: describeError(error) });
 		}
+	}
+
+	private discord() {
+		return discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+	}
+
+	private async listThreads(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ channel: Schema.optional(Schema.String) }));
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord" || !binding.containerId) {
+			return json({ ok: false, error: "Threads are only available on Discord conversations." });
+		}
+
+		try {
+			const threads = await this.discord().activeThreads(binding.containerId);
+
+			return json({
+				ok: true,
+				threads: threads.map((thread) => ({ id: thread.id, name: thread.name })),
+			});
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async reactionTarget(request: Request) {
+		const input = await body(
+			request,
+			Schema.Struct({
+				channel: Schema.optional(Schema.String),
+				messageId: Schema.String,
+				emoji: Schema.String,
+			}),
+		);
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		return { input, binding };
+	}
+
+	private async react(request: Request): Promise<Response> {
+		const target = await this.reactionTarget(request);
+
+		if (target instanceof Response) return target;
+
+		if (!target.binding || target.binding.provider !== "discord") {
+			return json({ ok: false, error: "Reactions are only available on Discord conversations." });
+		}
+
+		try {
+			await this.discord().addReaction(target.binding.externalId, target.input.messageId, target.input.emoji);
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async edit(request: Request): Promise<Response> {
+		const input = await body(
+			request,
+			Schema.Struct({
+				channel: Schema.optional(Schema.String),
+				messageId: Schema.String,
+				text: Schema.String,
+			}),
+		);
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord") {
+			return json({ ok: false, error: "Editing is only available on Discord conversations." });
+		}
+
+		try {
+			await this.discord().editMessage(binding.externalId, input.messageId, input.text);
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async removeMessage(request: Request): Promise<Response> {
+		const input = await body(
+			request,
+			Schema.Struct({ channel: Schema.optional(Schema.String), messageId: Schema.String }),
+		);
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord") {
+			return json({ ok: false, error: "Deleting is only available on Discord conversations." });
+		}
+
+		try {
+			await this.discord().deleteMessage(binding.externalId, input.messageId);
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async pin(request: Request): Promise<Response> {
+		const input = await body(
+			request,
+			Schema.Struct({ channel: Schema.optional(Schema.String), messageId: Schema.String }),
+		);
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord") {
+			return json({ ok: false, error: "Pinning is only available on Discord conversations." });
+		}
+
+		try {
+			await this.discord().pinMessage(binding.externalId, input.messageId);
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async join(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ channel: Schema.String }));
+
+		if (input instanceof Response) return input;
+		const rest = this.discord();
+
+		try {
+			const channel = await rest.channel(input.channel);
+
+			if (!channel) return json({ ok: false, error: "That channel does not exist." });
+			await this.putBinding({
+				id: input.channel,
+				provider: "discord",
+				externalId: input.channel,
+				name: channel.name,
+				containerId: channel.guild_id,
+				source: "manual",
+				enabled: true,
+				createdAt: Date.now(),
+			});
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async leave(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ channel: Schema.String }));
+
+		if (input instanceof Response) return input;
+		await this.unbindChannel(input.channel);
+
+		return json({ ok: true });
+	}
+
+	private async unbindChannel(id: string): Promise<void> {
+		await this.store.remove(this.channelKey(id));
 	}
 
 	private async bind(request: Request): Promise<Response> {
@@ -365,11 +552,15 @@ export class Hub extends DurableObject<Env> {
 		const trusted = message.provider === "imessage" || message.author.id === policy.ownerDiscordId;
 		const permissions = trusted
 			? ownerPermissions()
-			: permissionsFor(policy, {
-					id: message.author.id,
-					name: message.author.name,
-					roles: message.author.roles ?? [],
-				});
+			: permissionsFor(
+					policy,
+					{
+						id: message.author.id,
+						name: message.author.name,
+						roles: message.author.roles ?? [],
+					},
+					message.channel,
+				);
 
 		if (!trusted && (!permissions.invoke || !canUseChannel(permissions, message.channel))) {
 			return json({ ok: true, ignored: true, denied: true });

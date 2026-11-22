@@ -20,6 +20,7 @@ import {
 } from "../core/schema.ts";
 import type { InboundMessage, McpLink, PluginRecord, PublicLink } from "../core/schema.ts";
 import {
+	PermissionOverridesSchema,
 	RoleMappingSchema,
 	RoleProfileSchema,
 	ServerPolicySchema,
@@ -64,6 +65,7 @@ const LinkAddSchema = Schema.Struct({
 	name: Schema.String,
 	url: Schema.String,
 	token: Schema.optional(Schema.String),
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
 });
 
 const LinkRemoveSchema = Schema.Struct({ id: Schema.String });
@@ -78,6 +80,7 @@ const LinkTestSchema = Schema.Struct({ linkId: Schema.String });
 const LinkOauthStartSchema = Schema.Struct({
 	name: Schema.String,
 	url: Schema.String,
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
 	resourceMetadataUrl: Schema.optional(Schema.String),
 	scope: Schema.optional(Schema.String),
 });
@@ -112,6 +115,11 @@ const DetachSchema = Schema.Struct({ channelId: Schema.String });
 const InterruptSchema = Schema.Struct({ channelId: Schema.String });
 
 const CompactSchema = Schema.Struct({ channelId: Schema.String });
+
+const AutomationSchema = Schema.Struct({
+	channelId: Schema.String,
+	automationID: Schema.String,
+});
 
 const RunCommandSchema = Schema.Struct({
 	channelId: Schema.String,
@@ -191,6 +199,7 @@ const PolicySetSchema = Schema.Struct({
 	defaultProfileId: Schema.optional(Schema.String),
 	roles: Schema.optional(Schema.Array(RoleMappingSchema)),
 	profiles: Schema.optional(Schema.Array(RoleProfileSchema)),
+	channelOverrides: Schema.optional(Schema.Record(Schema.String, PermissionOverridesSchema)),
 });
 
 /** Whether a link name is safe as an MCP server name. */
@@ -294,6 +303,10 @@ export class Server extends DurableObject<Env> {
 		if (path === "/compact" && request.method === "POST") return await this.compact(request);
 		if (path === "/command" && request.method === "POST") return await this.runCommand(request);
 		if (path === "/commands" && request.method === "POST") return await this.commandsRoute(request);
+		if (path === "/automations" && request.method === "POST") return await this.automationsRoute();
+		if (path === "/automation/pause" && request.method === "POST") return await this.automationAction(request, "pause");
+		if (path === "/automation/resume" && request.method === "POST") return await this.automationAction(request, "resume");
+		if (path === "/automation/delete" && request.method === "POST") return await this.automationAction(request, "delete");
 		if (path === "/approval" && request.method === "POST") return await this.approval(request);
 		if (path === "/consume" && request.method === "POST") return await this.consume(request);
 		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
@@ -744,6 +757,7 @@ export class Server extends DurableObject<Env> {
 					url: input.url,
 				};
 
+				if (input.elicitation) request.elicitation = input.elicitation;
 				if (probe.resourceMetadataUrl) request.resourceMetadataUrl = probe.resourceMetadataUrl;
 				if (probe.scope) request.scope = probe.scope;
 				const started = await beginAuthorization(request);
@@ -763,6 +777,7 @@ export class Server extends DurableObject<Env> {
 			name,
 			url: input.url,
 			token: input.token,
+			elicitation: input.elicitation,
 			createdAt: Date.now(),
 		};
 
@@ -812,6 +827,7 @@ export class Server extends DurableObject<Env> {
 				url: input.url,
 			};
 
+			if (input.elicitation) request.elicitation = input.elicitation;
 			if (input.resourceMetadataUrl) request.resourceMetadataUrl = input.resourceMetadataUrl;
 			if (input.scope) request.scope = input.scope;
 			const started = await beginAuthorization(request);
@@ -1023,6 +1039,67 @@ export class Server extends DurableObject<Env> {
 		if (input instanceof Response) return input;
 
 		return json({ commands: await this.agent.commands(input.channelId) });
+	}
+
+	private async automationsRoute(): Promise<Response> {
+		const host = await this.agent.ensureHost();
+		const channels = await this.channels();
+		const automations: Array<{
+			channelId: string;
+			channelName?: string;
+			id: string;
+			name: string;
+			status: string;
+			nextDueAt?: number;
+			runCount: number;
+		}> = [];
+
+		for (const channel of channels) {
+			if (!channel.sessionID) continue;
+			const listed = await host.experimental.automation
+				.list({ sessionID: channel.sessionID })
+				.catch(() => []);
+
+			for (const automation of listed) {
+				const entry: (typeof automations)[number] = {
+					channelId: channel.channelId,
+					id: automation.id,
+					name: automation.name,
+					status: automation.status,
+					runCount: automation.runCount,
+				};
+
+				if (channel.name) entry.channelName = channel.name;
+				if (automation.nextDueAt !== undefined) entry.nextDueAt = automation.nextDueAt;
+				automations.push(entry);
+			}
+		}
+
+		return json({ automations });
+	}
+
+	private async automationAction(request: Request, action: "pause" | "resume" | "delete"): Promise<Response> {
+		const input = await body(request, AutomationSchema);
+
+		if (input instanceof Response) return input;
+		const channel = await this.store.plain(KEYS.channel + input.channelId, ChannelRecordSchema);
+
+		if (!channel?.sessionID) return failure("That conversation has no session.", 404);
+		const host = await this.agent.ensureHost();
+
+		try {
+			if (action === "pause") {
+				await host.experimental.automation.pause({ automationID: input.automationID });
+			} else if (action === "resume") {
+				await host.experimental.automation.resume({ automationID: input.automationID });
+			} else {
+				await host.experimental.automation.delete({ automationID: input.automationID });
+			}
+
+			return json({ ok: true });
+		} catch (error) {
+			return failure(describeError(error));
+		}
 	}
 
 	private async interrupt(request: Request): Promise<Response> {
@@ -1240,6 +1317,7 @@ export class Server extends DurableObject<Env> {
 			defaultProfileId,
 			profiles,
 			roles,
+			channelOverrides: input.channelOverrides ?? current.channelOverrides,
 			updatedAt: Date.now(),
 		};
 

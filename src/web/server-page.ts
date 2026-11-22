@@ -25,6 +25,14 @@ export interface ServerPageData {
 	readonly mcp: ReadonlyArray<{ name: string; status: string; error?: string }>;
 	readonly policy: ServerPolicy;
 	readonly discordRoles: ReadonlyArray<{ id: string; name: string }>;
+	readonly automations: ReadonlyArray<{
+		channelId: string;
+		channelName?: string;
+		id: string;
+		name: string;
+		status: string;
+		runCount: number;
+	}>;
 	readonly oauth?: {
 		readonly integrationID: string;
 		readonly attemptID: string;
@@ -205,6 +213,30 @@ export function serverPage(data: ServerPageData): Response {
 			.filter((role) => !data.discordRoles.some((discord) => discord.id === role.roleId))
 			.map((role) => ({ id: role.roleId, name: role.roleName })),
 	];
+	const channelOverrideRows = data.channels
+		.map((channel) => {
+			const override = data.policy.channelOverrides?.[channel.id];
+			const value = override ? JSON.stringify(override, null, 2) : "";
+
+			return (
+				'<div class="card"><strong>' +
+				escapeHtml(channel.name ?? channel.id) +
+				'</strong> <span class="faint">' +
+				escapeHtml(channel.provider) +
+				"</span>" +
+				'<label for="channel-' +
+				escapeHtml(channel.id) +
+				'">Channel overrides (JSON, optional)</label><textarea id="channel-' +
+				escapeHtml(channel.id) +
+				'" name="channel:' +
+				escapeHtml(channel.id) +
+				'">' +
+				escapeHtml(value) +
+				"</textarea></div>"
+			);
+		})
+		.join("");
+
 	const access = section(
 		"Access",
 		[
@@ -260,10 +292,48 @@ export function serverPage(data: ServerPageData): Response {
 						.join("") +
 					"</div>"
 				: '<p class="faint">Connect Discord and install the bot to see its roles.</p>',
+			channelOverrideRows,
 			'<button type="submit">Save access</button>',
 			"</form>",
 		].join(""),
 	);
+
+	const automationRows = data.automations.length
+		? '<ul class="items">' +
+			data.automations
+				.map(
+					(automation) =>
+						"<li><div><code>" +
+						escapeHtml(automation.name) +
+						"</code> " +
+						'<span class="faint">' +
+						escapeHtml(automation.channelName ?? automation.channelId) +
+						" · " +
+						escapeHtml(automation.status) +
+						"</span></div><div>" +
+						'<form method="post" action="' +
+						base +
+						'/automations/toggle" class="inline"><input type="hidden" name="channelId" value="' +
+						escapeHtml(automation.channelId) +
+						'"><input type="hidden" name="automationID" value="' +
+						escapeHtml(automation.id) +
+						'"><input type="hidden" name="action" value="' +
+						(automation.status === "paused" ? "resume" : "pause") +
+						'"><button class="ghost" type="submit">' +
+						(automation.status === "paused" ? "Resume" : "Pause") +
+						"</button></form> " +
+						'<form method="post" action="' +
+						base +
+						'/automations/remove" class="inline"><input type="hidden" name="channelId" value="' +
+						escapeHtml(automation.channelId) +
+						'"><input type="hidden" name="automationID" value="' +
+						escapeHtml(automation.id) +
+						'"><button class="ghost" type="submit">Delete</button></form>' +
+						"</div></li>",
+				)
+				.join("") +
+			"</ul>"
+		: '<p class="muted">No automations. Ask Eryn to schedule something in a conversation.</p>';
 
 	const oauthCard = data.oauth
 		? section(
@@ -339,6 +409,8 @@ export function serverPage(data: ServerPageData): Response {
 			'<input id="linkName" name="name" placeholder="github" required>',
 			'<label for="linkUrl">URL</label>',
 			'<input id="linkUrl" name="url" type="url" placeholder="https://example.com/mcp" required>',
+			'<label for="linkElicitation">Approvals</label>',
+			'<select id="linkElicitation" name="elicitation"><option value="chat">In this chat</option><option value="browser">Browser</option><option value="agent">Agent</option><option value="off">Off</option></select>',
 			'<label for="linkToken">Bearer token (optional)</label>',
 			'<input id="linkToken" name="token" type="password" autocomplete="off">',
 			'<button type="submit">Add server</button>',
@@ -411,6 +483,7 @@ export function serverPage(data: ServerPageData): Response {
 		"</div>",
 		access,
 		section("Conversations", channelRows),
+		section("Automations", automationRows),
 		discordChannels ? section("Add a Discord channel", discordChannels) : "",
 		'<div class="grid" style="margin-top:1rem">',
 		oauthCard,

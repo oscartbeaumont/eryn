@@ -14,7 +14,7 @@ export const PendingMcpAuthSchema = Schema.Struct({
 	attemptId: Schema.String,
 	name: Schema.String,
 	url: Schema.String,
-	elicitation: Schema.optional(Schema.Literals(["off", "browser", "agent"])),
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
 	state: Schema.String,
 	authorizationUrl: Schema.optional(Schema.String),
 	clientId: Schema.String,

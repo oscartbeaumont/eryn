@@ -12,6 +12,7 @@ import { configuredOrigin, log } from "../config.ts";
 import { SERVER_ROOT } from "../core/paths.ts";
 import type { McpLink, PluginRecord, ProviderConnection } from "../core/schema.ts";
 import { describeError } from "../errors.ts";
+import { applyElicitation } from "../mcp/elicitation.ts";
 import { mintMcpToken } from "../mcp/token.ts";
 import { commandShellPlugin } from "../plugins/commands/index.ts";
 import { dynamicPluginsPlugin } from "../plugins/dynamic/index.ts";
@@ -161,7 +162,11 @@ export async function buildHost(config: HostConfig, options: HostOptions): Promi
 	const mcp = new Map<string, McpConfigEntry>();
 
 	for (const link of [...config.links, internal]) {
-		const entry: McpConfigEntry = { type: "remote", url: link.url, oauth: false };
+		const entry: McpConfigEntry = {
+			type: "remote",
+			url: link.name === "eryn" ? link.url : applyElicitation(link.url, link.elicitation),
+			oauth: false,
+		};
 
 		if (link.token) entry.headers = { Authorization: "Bearer " + link.token };
 		if (link.name === "eryn") entry.codemode = false;

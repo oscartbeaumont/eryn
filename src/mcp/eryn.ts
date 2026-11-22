@@ -110,6 +110,90 @@ const TOOLS = [
 		},
 	},
 	{
+		name: "list_threads",
+		title: "List threads",
+		description: "List active threads in the current Discord server.",
+		inputSchema: { type: "object", properties: { channel: { type: "string" } } },
+	},
+	{
+		name: "react",
+		title: "React to a message",
+		description: "Add a reaction to a message in the current conversation.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				messageId: { type: "string" },
+				emoji: { type: "string" },
+				channel: { type: "string" },
+			},
+			required: ["messageId", "emoji"],
+		},
+	},
+	{
+		name: "edit_message",
+		title: "Edit a message",
+		description: "Edit a message the bot posted.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				messageId: { type: "string" },
+				text: { type: "string" },
+				channel: { type: "string" },
+			},
+			required: ["messageId", "text"],
+		},
+	},
+	{
+		name: "delete_message",
+		title: "Delete a message",
+		description: "Delete a message in the current conversation.",
+		inputSchema: {
+			type: "object",
+			properties: { messageId: { type: "string" }, channel: { type: "string" } },
+			required: ["messageId"],
+		},
+	},
+	{
+		name: "pin_message",
+		title: "Pin a message",
+		description: "Pin a message in the current conversation.",
+		inputSchema: {
+			type: "object",
+			properties: { messageId: { type: "string" }, channel: { type: "string" } },
+			required: ["messageId"],
+		},
+	},
+	{
+		name: "join_channel",
+		title: "Join a channel",
+		description: "Start following another Discord channel.",
+		inputSchema: {
+			type: "object",
+			properties: { channel: { type: "string" } },
+			required: ["channel"],
+		},
+	},
+	{
+		name: "leave_channel",
+		title: "Leave a channel",
+		description: "Stop following a Discord channel.",
+		inputSchema: {
+			type: "object",
+			properties: { channel: { type: "string" } },
+			required: ["channel"],
+		},
+	},
+	{
+		name: "ask_user",
+		title: "Ask the user",
+		description: "Send a question and end the turn; the answer arrives as the next message.",
+		inputSchema: {
+			type: "object",
+			properties: { question: { type: "string" } },
+			required: ["question"],
+		},
+	},
+	{
 		name: "read_history",
 		title: "Read conversation history",
 		description: "Read recent messages from a conversation, oldest first.",
@@ -279,6 +363,110 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 				id +
 				"\" to work there. The first message in the thread starts its own session; do not create a watch for it in this conversation.",
 		);
+	}
+
+	if (name === "list_threads") {
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			"/threads",
+			{ channel: stringField(args, "channel") ?? "" },
+			headers,
+		);
+		const threads = Array.isArray(response.threads) ? response.threads : [];
+
+		if (response.ok !== true) return text(stringField(response, "error") ?? "Threads could not be listed.", true);
+
+		return text(
+			threads.length
+				? threads
+						.map((thread) => {
+							const object = toJsonObject(thread as never) ?? {};
+
+							return (stringField(object, "id") ?? "?") + "\t" + (stringField(object, "name") ?? "");
+						})
+						.join("\n")
+				: "(no active threads)",
+		);
+	}
+
+	if (name === "react") {
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			"/react",
+			{
+				messageId: stringField(args, "messageId") ?? "",
+				emoji: stringField(args, "emoji") ?? "",
+				channel: stringField(args, "channel") ?? "",
+			},
+			headers,
+		);
+
+		return response.ok === true
+			? text("Reacted.")
+			: text(stringField(response, "error") ?? "The reaction failed.", true);
+	}
+
+	if (name === "edit_message") {
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			"/edit",
+			{
+				messageId: stringField(args, "messageId") ?? "",
+				text: stringField(args, "text") ?? "",
+				channel: stringField(args, "channel") ?? "",
+			},
+			headers,
+		);
+
+		return response.ok === true
+			? text("Edited.")
+			: text(stringField(response, "error") ?? "The edit failed.", true);
+	}
+
+	if (name === "delete_message" || name === "pin_message") {
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			name === "delete_message" ? "/delete" : "/pin",
+			{
+				messageId: stringField(args, "messageId") ?? "",
+				channel: stringField(args, "channel") ?? "",
+			},
+			headers,
+		);
+
+		return response.ok === true
+			? text(name === "delete_message" ? "Deleted." : "Pinned.")
+			: text(stringField(response, "error") ?? "That action failed.", true);
+	}
+
+	if (name === "join_channel" || name === "leave_channel") {
+		const channel = stringField(args, "channel") ?? "";
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			name === "join_channel" ? "/join" : "/leave",
+			{ channel },
+			headers,
+		);
+
+		return response.ok === true
+			? text(name === "join_channel" ? "Following " + channel + "." : "Stopped following " + channel + ".")
+			: text(stringField(response, "error") ?? "That channel could not be changed.", true);
+	}
+
+	if (name === "ask_user") {
+		const question = stringField(args, "question") ?? "";
+
+		if (!question.trim()) return text("Ask a non-empty question.", true);
+		const response = await hubJson(options.env, options.serverId, "/send", { channel: "", text: question }, headers);
+
+		return response.ok === true
+			? text("Question sent. End the turn and wait for the reply.")
+			: text(stringField(response, "error") ?? "The question could not be sent.", true);
 	}
 
 	if (name === "read_history") {

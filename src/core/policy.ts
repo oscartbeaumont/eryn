@@ -70,6 +70,8 @@ export const ServerPolicySchema = Schema.Struct({
 	defaultProfileId: Schema.String,
 	profiles: Schema.Array(RoleProfileSchema),
 	roles: Schema.Array(RoleMappingSchema),
+	/** Sparse overrides for one conversation, applied after the role merge. */
+	channelOverrides: Schema.optional(Schema.Record(Schema.String, PermissionOverridesSchema)),
 	updatedAt: Schema.Finite,
 });
 
@@ -243,12 +245,19 @@ function mergeMaps(
  * Grants are additive, but a block anywhere wins. A member with no mapped role
  * gets the server's default profile, which starts as blocked.
  */
-export function permissionsFor(policy: ServerPolicy, principal: PolicyPrincipal): PermissionSet {
+export function permissionsFor(
+	policy: ServerPolicy,
+	principal: PolicyPrincipal,
+	channel?: string,
+): PermissionSet {
 	if (policy.ownerDiscordId && principal.id === policy.ownerDiscordId) return ownerPermissions();
 	const roles = principal.roles ?? [];
 	const mappings = policy.roles.filter((mapping) => roles.includes(mapping.roleId));
+	const channelOverride = channel ? policy.channelOverrides?.[channel] : undefined;
 
-	if (mappings.length === 0) return profileFor(policy, policy.defaultProfileId).permissions;
+	if (mappings.length === 0) {
+		return applyOverrides(profileFor(policy, policy.defaultProfileId).permissions, channelOverride);
+	}
 	const sets = mappings.map((mapping) =>
 		applyOverrides(profileFor(policy, mapping.profileId).permissions, mapping.overrides),
 	);
@@ -257,7 +266,7 @@ export function permissionsFor(policy: ServerPolicy, principal: PolicyPrincipal)
 
 	if (!first) return profileFor(policy, "blocked").permissions;
 
-	return sets.slice(1).reduce<PermissionSet>(
+	const combined = sets.slice(1).reduce<PermissionSet>(
 		(acc, set) => ({
 			invoke: acc.invoke || set.invoke,
 			channels: mergeChannels(acc.channels, set.channels),
@@ -268,6 +277,8 @@ export function permissionsFor(policy: ServerPolicy, principal: PolicyPrincipal)
 		}),
 		first,
 	);
+
+	return applyOverrides(combined, channelOverride);
 }
 
 function mergeChannels(left: PolicyChannels, right: PolicyChannels): PolicyChannels {
@@ -278,7 +289,7 @@ function mergeChannels(left: PolicyChannels, right: PolicyChannels): PolicyChann
 
 /** Whether a principal may invoke the agent in this conversation. */
 export function canInvoke(policy: ServerPolicy, principal: PolicyPrincipal, channel: string): boolean {
-	const permissions = permissionsFor(policy, principal);
+	const permissions = permissionsFor(policy, principal, channel);
 
 	return permissions.invoke && canUseChannel(permissions, channel);
 }
