@@ -437,6 +437,16 @@ export class ServerAgent {
 		return await this.approvals.consumeText(channel, text);
 	}
 
+	/** The fields of a pending form, for a Discord modal. */
+	formDefinition(id: string): { title: string; fields: readonly unknown[] } | undefined {
+		return this.approvals.formDefinition(id);
+	}
+
+	/** Submit a Discord modal as one form answer. */
+	async submitForm(id: string, values: Record<string, string>, userId: string | undefined): Promise<boolean> {
+		return await this.approvals.submitForm(id, values, userId);
+	}
+
 	/** Resolve an approval from a Discord button or another caller. */
 	async replyApproval(
 		approvalId: string,

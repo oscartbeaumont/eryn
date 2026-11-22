@@ -189,6 +189,14 @@ const OAuthCancelSchema = Schema.Struct({
 	attemptID: Schema.String,
 });
 
+const FormDefinitionSchema = Schema.Struct({ approvalId: Schema.String });
+
+const FormSubmitSchema = Schema.Struct({
+	approvalId: Schema.String,
+	values: Schema.Record(Schema.String, Schema.String),
+	userId: Schema.optional(Schema.String),
+});
+
 const ApprovalSchema = Schema.Struct({
 	approvalId: Schema.String,
 	decision: Schema.Literals(["once", "always", "block"]),
@@ -308,6 +316,8 @@ export class Server extends DurableObject<Env> {
 		if (path === "/automation/resume" && request.method === "POST") return await this.automationAction(request, "resume");
 		if (path === "/automation/delete" && request.method === "POST") return await this.automationAction(request, "delete");
 		if (path === "/approval" && request.method === "POST") return await this.approval(request);
+		if (path === "/form/definition" && request.method === "POST") return await this.formDefinition(request);
+		if (path === "/form/submit" && request.method === "POST") return await this.formSubmit(request);
 		if (path === "/consume" && request.method === "POST") return await this.consume(request);
 		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
 		if (path === "/messaging" && request.method === "POST") return await this.messaging();
@@ -1115,6 +1125,27 @@ export class Server extends DurableObject<Env> {
 		if (input instanceof Response) return input;
 
 		return json({ ok: await this.agent.interrupt(input.channelId) });
+	}
+
+	private async formDefinition(request: Request): Promise<Response> {
+		const input = await body(request, FormDefinitionSchema);
+
+		if (input instanceof Response) return input;
+		const definition = this.agent.formDefinition(input.approvalId);
+
+		if (!definition) return failure("That form is no longer available.", 404);
+
+		return json(definition);
+	}
+
+	private async formSubmit(request: Request): Promise<Response> {
+		const input = await body(request, FormSubmitSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.submitForm(input.approvalId, input.values, input.userId),
+		});
 	}
 
 	private async consume(request: Request): Promise<Response> {

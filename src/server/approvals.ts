@@ -292,6 +292,63 @@ export class ApprovalBroker {
 		});
 	}
 
+	/** The fields of a pending form, for a Discord modal. */
+	formDefinition(id: string): { title: string; fields: readonly unknown[] } | undefined {
+		const pending = this.pending.get(id);
+
+		if (!pending || pending.kind !== "form") return undefined;
+
+		return { title: pending.title, fields: pending.fields };
+	}
+
+	/** Submit a Discord modal as one form answer. */
+	async submitForm(
+		id: string,
+		values: Record<string, string>,
+		userId: string | undefined,
+	): Promise<boolean> {
+		const pending = this.pending.get(id);
+
+		if (!pending || pending.kind !== "form") return false;
+		if (pending.requesterId && userId && pending.requesterId !== userId) return false;
+
+		return await this.answerForm(pending, values);
+	}
+
+	private async answerForm(pending: PendingForm, values: Record<string, string>): Promise<boolean> {
+		for (const [key, value] of Object.entries(values)) pending.values[key] = value;
+		const missing = pending.fields.filter(
+			(field) => field.required && pending.values[field.key] === undefined,
+		);
+
+		if (missing.length > 0) {
+			await this.options
+				.send({
+					channel: pending.channel,
+					text: "Still needed: " + missing.map((field) => field.key).join(", "),
+				})
+				.catch(() => undefined);
+
+			return true;
+		}
+
+		clearTimeout(pending.timer);
+		this.pending.delete(pending.id);
+		const answer: Record<string, string | number | boolean | ReadonlyArray<string>> = {};
+
+		for (const field of pending.fields) {
+			const value = pending.values[field.key];
+
+			if (value !== undefined) answer[field.key] = coerce(field, value);
+		}
+
+		await this.options
+			.replyForm({ sessionID: pending.sessionID, formID: pending.formID, answer })
+			.catch((error: unknown) => log("approvals", "could not answer the form: " + describeError(error)));
+
+		return true;
+	}
+
 	/** Ask the conversation to fill an OpenCode form. */
 	async form(input: {
 		sessionID: string;
@@ -336,6 +393,33 @@ export class ApprovalBroker {
 
 		if (input.requesterId) pendingForm.requesterId = input.requesterId;
 		this.pending.set(id, pendingForm);
+
+		const modal =
+			input.provider === "discord" &&
+			fields.length <= 5 &&
+			fields.every(
+				(field) =>
+					field.type === "string" ||
+					field.type === "number" ||
+					field.type === "integer" ||
+					field.type === "boolean",
+			);
+
+		if (modal) {
+			await this.options
+				.send({
+					channel: input.channel,
+					text: "**Input needed: " + input.title + "**",
+					components: [buttonRow([actionButton("Fill form", "form:" + id, 1)])],
+				})
+				.catch((error: unknown) => {
+					log("approvals", "could not post a form: " + describeError(error));
+					clearTimeout(timer);
+					this.pending.delete(id);
+				});
+
+			return;
+		}
 
 		await this.options
 			.send({ channel: input.channel, text: formPrompt(input.title, fields) })
@@ -426,39 +510,11 @@ export class ApprovalBroker {
 			return true;
 		}
 
-		for (const [key, value] of parseLines(pending.fields, text)) {
-			pending.values[key] = value;
-		}
-		const missing = pending.fields.filter(
-			(field) => field.required && pending.values[field.key] === undefined,
-		);
+		const values: Record<string, string> = {};
 
-		if (missing.length > 0) {
-			await this.options
-				.send({
-					channel,
-					text: "Still needed: " + missing.map((field) => field.key).join(", "),
-				})
-				.catch(() => undefined);
+		for (const [key, value] of parseLines(pending.fields, text)) values[key] = value;
 
-			return true;
-		}
-
-		clearTimeout(pending.timer);
-		this.pending.delete(pending.id);
-		const answer: Record<string, string | number | boolean | ReadonlyArray<string>> = {};
-
-		for (const field of pending.fields) {
-			const value = pending.values[field.key];
-
-			if (value !== undefined) answer[field.key] = coerce(field, value);
-		}
-
-		await this.options
-			.replyForm({ sessionID: pending.sessionID, formID: pending.formID, answer })
-			.catch((error: unknown) => log("approvals", "could not answer the form: " + describeError(error)));
-
-		return true;
+		return await this.answerForm(pending, values);
 	}
 
 	/** Drop every wait for a session that is going away. */

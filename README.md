@@ -107,8 +107,10 @@ iMessage numbers bound to a server are trusted and bypass the checks.
 
 When a tool needs approval, the question goes to the conversation: Discord
 buttons for once/always/block, numbered replies on iMessage. `always` applies
-only to the current session. Forms from MCP servers use the same chat surface:
-one `key: value` line per field.
+only to the current session. Forms from MCP servers use the same chat surface. On Discord a form with up to
+five text, number, or boolean fields opens a modal behind a **Fill form**
+button; selects and larger forms fall back to one `key: value` line per field.
+On iMessage every form uses the text fallback.
 
 ## Automations
 

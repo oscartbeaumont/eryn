@@ -19,6 +19,7 @@ import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
 import { DiscordAuthority } from "../discord/authority.ts";
 import { DiscordSocket } from "../discord/socket.ts";
+import type { DiscordModal } from "../discord/components.ts";
 import type {
 	DiscordChannel,
 	DiscordGuildCreate,
@@ -37,6 +38,12 @@ const KEEPALIVE_MS = 120_000;
 const RegisterSchema = Schema.Struct({ guildId: Schema.String, serverId: Schema.String });
 
 const UnregisterSchema = Schema.Struct({ guildId: Schema.String });
+
+interface FormSubmitBody {
+	approvalId: string;
+	values: Record<string, string>;
+	userId?: string;
+}
 
 const AuthoritySchema = Schema.Struct({
 	guildId: Schema.String,
@@ -377,6 +384,7 @@ export class Gateway extends DurableObject<Env> {
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
 		if (interaction.type === 3) return await this.onComponent(interaction);
+		if (interaction.type === 5) return await this.onModal(interaction);
 		if (interaction.type !== 2) return;
 		const guildId = interaction.guild_id;
 		const name = interaction.data?.name;
@@ -489,6 +497,11 @@ export class Gateway extends DurableObject<Env> {
 	/** A button on an approval message. */
 	private async onComponent(interaction: DiscordInteraction): Promise<void> {
 		const customId = interaction.data?.custom_id ?? "";
+
+		if (customId.startsWith("form:")) {
+			return await this.onFormButton(interaction, customId.slice("form:".length));
+		}
+
 		const prefix = "approval:";
 
 		if (!customId.startsWith(prefix)) return;
@@ -509,6 +522,91 @@ export class Gateway extends DurableObject<Env> {
 		}
 
 		await this.toServer(serverId, "/approval", { approvalId: id, decision, userId });
+		await this.rest.interactionDeferUpdate(interaction.id, interaction.token);
+	}
+
+	/** The "Fill form" button opens a Discord modal. */
+	private async onFormButton(interaction: DiscordInteraction, approvalId: string): Promise<void> {
+		const guildId = interaction.guild_id;
+		const serverId = guildId
+			? await this.ctx.storage.get<string>(KEYS.guildIndex + guildId)
+			: undefined;
+
+		if (!serverId) {
+			await this.rest.interactionReply(interaction.id, interaction.token, "This form is no longer connected.");
+
+			return;
+		}
+
+		const definition = await this.toServer(serverId, "/form/definition", { approvalId });
+		const fields = Array.isArray(definition?.fields) ? definition.fields : [];
+
+		if (!definition || fields.length === 0 || fields.length > 5) {
+			await this.rest.interactionReply(interaction.id, interaction.token, "This form is no longer available.");
+
+			return;
+		}
+
+		const inputs = fields.flatMap((raw) => {
+			const field = toJsonObject(raw as never);
+
+			if (!field || typeof field.key !== "string") return [];
+			const title = (typeof field.title === "string" ? field.title : field.key).slice(0, 45);
+			const type = typeof field.type === "string" ? field.type : "string";
+
+			return [
+				{
+					type: 4 as const,
+					custom_id: field.key,
+					label: title || "Answer",
+					style: type === "string" ? (2 as const) : (1 as const),
+					required: field.required !== false,
+					max_length: type === "string" ? 4_000 : 100,
+				},
+			];
+		});
+
+		if (inputs.length === 0) return;
+		const modal: DiscordModal = {
+			custom_id: "form:" + approvalId,
+			title: (typeof definition.title === "string" ? definition.title : "Input needed").slice(0, 45),
+			components: inputs.map((input) => ({ type: 1, components: [input] })),
+		};
+
+		await this.rest.interactionModal(interaction.id, interaction.token, modal);
+	}
+
+	/** A submitted form modal. */
+	private async onModal(interaction: DiscordInteraction): Promise<void> {
+		const customId = interaction.data?.custom_id ?? "";
+
+		if (!customId.startsWith("form:")) return;
+		const approvalId = customId.slice("form:".length);
+		const guildId = interaction.guild_id;
+		const serverId = guildId
+			? await this.ctx.storage.get<string>(KEYS.guildIndex + guildId)
+			: undefined;
+
+		if (!serverId) return;
+		const values: Record<string, string> = {};
+
+		for (const row of interaction.data?.components ?? []) {
+			for (const component of row.components ?? []) {
+				if (typeof component.custom_id === "string" && typeof component.value === "string") {
+					values[component.custom_id] = component.value;
+				}
+			}
+		}
+
+		const userId = interaction.member?.user?.id ?? interaction.user?.id;
+
+		const body: FormSubmitBody = {
+			approvalId,
+			values,
+		};
+
+		if (userId) body.userId = userId;
+		await this.toServer(serverId, "/form/submit", body);
 		await this.rest.interactionDeferUpdate(interaction.id, interaction.token);
 	}
 
