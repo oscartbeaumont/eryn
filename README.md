@@ -90,7 +90,9 @@ create the watch. That is the bootstrap path, not the steady state.
 The Discord guild owner has every permission. Everyone else starts blocked —
 not even `invoke`. The web app's **Access** section maps Discord roles to
 profiles (`Owner`, `Member`, `Guest`, `Blocked`) and lets a role override
-individual permissions. A member's roles are combined, and a block wins.
+individual permissions. A member's roles are combined, and a block wins. A conversation can also carry
+a sparse JSON override, applied after the role merge. Discord cross-channel
+actions are checked against the speaker's own Discord permissions as well.
 
 The permission groups are:
 
@@ -107,6 +109,14 @@ When a tool needs approval, the question goes to the conversation: Discord
 buttons for once/always/block, numbered replies on iMessage. `always` applies
 only to the current session. Forms from MCP servers use the same chat surface:
 one `key: value` line per field.
+
+## Automations
+
+The server settings page lists every OpenCode automation in the server, grouped
+by conversation, with pause, resume, and delete. Creation stays with the agent:
+ask it to do something later or on a recurring basis. A conversation's
+automation runs as that conversation's latest principal, so the permission
+policy still applies.
 
 ## Files and threads
 
@@ -173,8 +183,10 @@ to the server through the same form; nothing in the agent differs.
 ## MCP servers
 
 External tools are ordinary remote MCP servers. Add a name, URL, and optional
-bearer token in the server settings. Eryn adds them to the host config and the
-agent sees their tools like any other.
+bearer token in the server settings. Eryn probes the server first; a Bearer
+challenge starts OAuth discovery, dynamic client registration, PKCE, a browser
+callback, and token refresh. A linked server can be tested or removed from the
+same page. The agent sees its tools like any other.
 
 ## Custom plugins
 

@@ -17,6 +17,7 @@ import { InboundMessageSchema } from "../core/schema.ts";
 import { ORIGIN_HEADER, withDeploy, withOrigin } from "../deploy.ts";
 import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
+import { DiscordAuthority } from "../discord/authority.ts";
 import { DiscordSocket } from "../discord/socket.ts";
 import type {
 	DiscordChannel,
@@ -36,6 +37,12 @@ const KEEPALIVE_MS = 120_000;
 const RegisterSchema = Schema.Struct({ guildId: Schema.String, serverId: Schema.String });
 
 const UnregisterSchema = Schema.Struct({ guildId: Schema.String });
+
+const AuthoritySchema = Schema.Struct({
+	guildId: Schema.String,
+	userId: Schema.String,
+	channelId: Schema.String,
+});
 
 /** The commands this build registers. */
 const COMMANDS = [
@@ -141,6 +148,7 @@ export class Gateway extends DurableObject<Env> {
 			if (path === WAKE_PATH) return await this.wake();
 			if (path === INTERACTION_PATH && request.method === "POST") return await this.interactionRequest(request);
 			if (path === REGISTER_PATH && request.method === "POST") return await this.register(request);
+			if (path === "/authority" && request.method === "POST") return await this.authority(request);
 			if (path === UNREGISTER_PATH && request.method === "POST") return await this.unregister(request);
 			return failure("Not found.", 404);
 		} catch (error) {
@@ -189,6 +197,24 @@ export class Gateway extends DurableObject<Env> {
 		await this.ctx.storage.delete(KEYS.guildIndex + input.guildId);
 
 		return json({ ok: true });
+	}
+
+	private async authority(request: Request): Promise<Response> {
+		const input = await body(request, AuthoritySchema);
+
+		if (input instanceof Response) return input;
+		const channel = await this.rest.channel(input.channelId).catch(() => undefined);
+
+		if (!channel) return json({ ok: false, error: "That channel does not exist." });
+
+		let authority = this.authorities.get(input.guildId);
+
+		if (!authority) {
+			authority = new DiscordAuthority(this.rest, input.guildId);
+			this.authorities.set(input.guildId, authority);
+		}
+
+		return json({ ok: true, capabilities: await authority.scopeCapabilities(input.userId, channel) });
 	}
 
 	private async keepAlive(): Promise<void> {
@@ -293,6 +319,7 @@ export class Gateway extends DurableObject<Env> {
 	private channelNames = new Map<string, string>();
 
 	private readonly roleCache = new Map<string, { expires: number; roles: string[] }>();
+	private readonly authorities = new Map<string, DiscordAuthority>();
 
 	/** The member's role ids, cached briefly so a conversation does not cost a REST call per message. */
 	private async rolesFor(guildId: string, userId: string): Promise<string[]> {

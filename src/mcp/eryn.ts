@@ -110,6 +110,42 @@ const TOOLS = [
 		},
 	},
 	{
+		name: "list_guild_channels",
+		title: "List channels",
+		description: "List the Discord channels the bot can see in this server.",
+		inputSchema: { type: "object", properties: { channel: { type: "string" } } },
+	},
+	{
+		name: "archive_thread",
+		title: "Archive a thread",
+		description: "Archive one Discord thread.",
+		inputSchema: {
+			type: "object",
+			properties: { threadId: { type: "string" } },
+			required: ["threadId"],
+		},
+	},
+	{
+		name: "join_thread",
+		title: "Join a thread",
+		description: "Follow one Discord thread.",
+		inputSchema: {
+			type: "object",
+			properties: { threadId: { type: "string" } },
+			required: ["threadId"],
+		},
+	},
+	{
+		name: "leave_thread",
+		title: "Leave a thread",
+		description: "Stop following one Discord thread.",
+		inputSchema: {
+			type: "object",
+			properties: { threadId: { type: "string" } },
+			required: ["threadId"],
+		},
+	},
+	{
 		name: "list_threads",
 		title: "List threads",
 		description: "List active threads in the current Discord server.",
@@ -363,6 +399,46 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 				id +
 				"\" to work there. The first message in the thread starts its own session; do not create a watch for it in this conversation.",
 		);
+	}
+
+	if (name === "list_guild_channels") {
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			"/guild/channels",
+			{ channel: stringField(args, "channel") ?? "" },
+			headers,
+		);
+		const channels = Array.isArray(response.channels) ? response.channels : [];
+
+		if (response.ok !== true) return text(stringField(response, "error") ?? "Channels could not be listed.", true);
+
+		return text(
+			channels.length
+				? channels
+						.map((channel) => {
+							const object = toJsonObject(channel as never) ?? {};
+
+							return (stringField(object, "id") ?? "?") + "\t#" + (stringField(object, "name") ?? "");
+						})
+						.join("\n")
+				: "(no channels)",
+		);
+	}
+
+	if (name === "archive_thread" || name === "join_thread" || name === "leave_thread") {
+		const action = name === "archive_thread" ? "archive" : name === "join_thread" ? "join" : "leave";
+		const response = await hubJson(
+			options.env,
+			options.serverId,
+			"/thread/" + action,
+			{ threadId: stringField(args, "threadId") ?? "" },
+			headers,
+		);
+
+		return response.ok === true
+			? text(action === "archive" ? "Archived." : action === "join" ? "Following." : "Left.")
+			: text(stringField(response, "error") ?? "That thread action failed.", true);
 	}
 
 	if (name === "list_threads") {

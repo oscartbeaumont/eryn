@@ -62,6 +62,15 @@ interface RecordedEvent {
 	readonly data: unknown;
 }
 
+interface DiscordCapabilities {
+	read: boolean;
+	send: boolean;
+	react: boolean;
+	manage: boolean;
+	createThread: boolean;
+	sendInThreads: boolean;
+}
+
 interface ChannelListBody {
 	channels: ChannelBinding[];
 	sessionChannel?: string;
@@ -130,6 +139,10 @@ export class Hub extends DurableObject<Env> {
 			if (path === "/delete" && request.method === "POST") return await this.removeMessage(request);
 			if (path === "/pin" && request.method === "POST") return await this.pin(request);
 			if (path === "/join" && request.method === "POST") return await this.join(request);
+			if (path === "/guild/channels" && request.method === "POST") return await this.guildChannels(request);
+			if (path === "/thread/archive" && request.method === "POST") return await this.threadAction(request, "archive");
+			if (path === "/thread/join" && request.method === "POST") return await this.threadAction(request, "join");
+			if (path === "/thread/leave" && request.method === "POST") return await this.threadAction(request, "leave");
 			if (path === "/leave" && request.method === "POST") return await this.leave(request);
 			return failure("Not found.", 404);
 		} catch (error) {
@@ -333,16 +346,70 @@ export class Hub extends DurableObject<Env> {
 		}
 	}
 
+	private async guildChannels(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ channel: Schema.optional(Schema.String) }));
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord" || !binding.containerId) {
+			return json({ ok: false, error: "Channels are only available on Discord conversations." });
+		}
+
+		try {
+			const channels = await this.discord().guildChannels(binding.containerId);
+
+			return json({
+				ok: true,
+				channels: channels
+					.filter((entry) => (entry.type ?? 0) === 0 || (entry.type ?? 0) === 5)
+					.map((entry) => ({ id: entry.id, name: entry.name, type: entry.type })),
+			});
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
+	private async threadAction(request: Request, action: "archive" | "join" | "leave"): Promise<Response> {
+		const input = await body(request, Schema.Struct({ threadId: Schema.String }));
+
+		if (input instanceof Response) return input;
+
+		try {
+			if (action === "archive") await this.discord().setThreadArchived(input.threadId, true);
+			else if (action === "join") await this.discord().joinThread(input.threadId);
+			else await this.discord().leaveThread(input.threadId);
+
+			return json({ ok: true });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
 	private async join(request: Request): Promise<Response> {
 		const input = await body(request, Schema.Struct({ channel: Schema.String }));
 
 		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const speaker = sessionChannel ? await this.principal(sessionChannel) : undefined;
 		const rest = this.discord();
 
 		try {
 			const channel = await rest.channel(input.channel);
 
 			if (!channel) return json({ ok: false, error: "That channel does not exist." });
+
+			if (!speaker || !channel.guild_id) {
+				return json({ ok: false, error: "Eryn could not verify your access to that channel." });
+			}
+
+			const capabilities = await this.capabilities(channel.guild_id, speaker.authorId, input.channel);
+
+			if (!capabilities?.read) {
+				return json({ ok: false, error: "Your Discord permissions do not allow reading that channel." });
+			}
 			await this.putBinding({
 				id: input.channel,
 				provider: "discord",
@@ -461,6 +528,35 @@ export class Hub extends DurableObject<Env> {
 		const principal = await this.store.plain(KEYS.principal + channel, PrincipalRecordSchema);
 
 		return json({ context: principal ?? null });
+	}
+
+	private async capabilities(guildId: string, userId: string, channelId: string): Promise<DiscordCapabilities | undefined> {
+		try {
+			const response = await this.env.GATEWAY.get(this.env.GATEWAY.idFromName("gateway")).fetch(
+				"https://gateway.internal/authority",
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ guildId, userId, channelId }),
+				},
+			);
+			const raw = (await response.json().catch(() => undefined)) as Schema.Json | undefined;
+			const payload = toJsonObject(raw);
+			const capabilities = toJsonObject(payload?.capabilities);
+
+			if (!capabilities) return undefined;
+
+			return {
+				read: capabilities.read === true,
+				send: capabilities.send === true,
+				react: capabilities.react === true,
+				manage: capabilities.manage === true,
+				createThread: capabilities.createThread === true,
+				sendInThreads: capabilities.sendInThreads === true,
+			};
+		} catch {
+			return undefined;
+		}
 	}
 
 	private async principal(channel: string): Promise<PrincipalRecord | undefined> {
@@ -636,6 +732,8 @@ export class Hub extends DurableObject<Env> {
 
 		if (!channel) return json(Schema.encodeSync(SendMessageResponseSchema)({ ok: false, error: "No channel to send to." }));
 
+		const targetBinding = await this.binding(channel);
+
 		if (sessionChannel && channel !== sessionChannel) {
 			const speaker = await this.principal(sessionChannel);
 
@@ -647,9 +745,26 @@ export class Hub extends DurableObject<Env> {
 					}),
 				);
 			}
+
+			if (speaker && targetBinding?.containerId) {
+				const capabilities = await this.capabilities(
+					targetBinding.containerId,
+					speaker.authorId,
+					targetBinding.externalId,
+				);
+
+				if (!capabilities?.send) {
+					return json(
+						Schema.encodeSync(SendMessageResponseSchema)({
+							ok: false,
+							error: "Your Discord permissions do not allow sending in that channel.",
+						}),
+					);
+				}
+			}
 		}
 
-		const binding = await this.binding(channel);
+		const binding = targetBinding;
 
 		if (!binding) return json(Schema.encodeSync(SendMessageResponseSchema)({ ok: false, error: `No messaging channel is bound to ${channel}.` }));
 
@@ -702,6 +817,22 @@ export class Hub extends DurableObject<Env> {
 			input.channel || (await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined)) || "";
 
 		if (!channel) return json(Schema.encodeSync(HistoryResponseSchema)({ messages: [] }));
+		const historySession = request.headers.get("x-eryn-session");
+		const current = historySession ? await this.sessionChannel(historySession) : undefined;
+
+		if (current && channel !== current) {
+			const speaker = await this.principal(current);
+			const target = await this.binding(channel);
+			const capabilities =
+				speaker && target?.containerId
+					? await this.capabilities(target.containerId, speaker.authorId, target.externalId)
+					: undefined;
+
+			if (!capabilities?.read) {
+				return json(Schema.encodeSync(HistoryResponseSchema)({ messages: [] }));
+			}
+		}
+
 		const limit = Math.min(Math.max(input.limit ?? 30, 1), 200);
 		const rows = this.ctx.storage.sql
 			.exec<{ payload: string }>(
