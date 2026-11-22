@@ -31,7 +31,7 @@ import { mcpPage } from "./mcp/pages.ts";
 import { MCP_CALLBACK_PATH, MCP_START_PATH } from "./mcp/paths.ts";
 import { serverCall } from "./platform/clients.ts";
 import { readMcpToken } from "./mcp/token.ts";
-import { installUrl } from "./public.ts";
+import { BOT_PERMISSIONS, installUrl } from "./public.ts";
 import { Server } from "./server/do.ts";
 import { handleWeb } from "./web/routes.ts";
 
@@ -261,7 +261,12 @@ export async function handleWorkerRequest(request: Request, env: Env, ctx: Execu
 	if (isRead(request) && isBrandAsset(path)) return await brandAsset(request, env);
 
 	if (isRead(request) && path === "/install") {
-		return Response.redirect(installUrl(await applicationId(env)), 302);
+		const guild = url.searchParams.get("guild") ?? undefined;
+
+		return Response.redirect(
+			installUrl(await applicationId(env), guild ? { guildId: guild, permissions: BOT_PERMISSIONS } : {}),
+			302,
+		);
 	}
 
 	if (isPostHogRequest(path)) return await posthogProxy(request, url);

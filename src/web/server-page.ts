@@ -108,7 +108,9 @@ export function serverPage(data: ServerPageData): Response {
 					discordConfigured
 						? '<p class="faint">Connected to guild <code>' +
 							escapeHtml(data.messaging.discord?.guildId ?? "") +
-							'</code>. <a href="/install">Add to another guild</a></p>'
+							'</code>. <a href="/install?guild=' +
+							encodeURIComponent(data.messaging.discord?.guildId ?? "") +
+							'">Grant permissions</a></p>'
 						: '<p class="faint">Install the bot in a guild, then choose it here. <a href="/install">Add to Discord</a></p>',
 				].join(""),
 			)
