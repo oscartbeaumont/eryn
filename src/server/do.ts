@@ -36,7 +36,7 @@ import { toJsonObject } from "../json.ts";
 import type { Mutable } from "../mutable.ts";
 import { webhookMatches } from "../hub/do.ts";
 import { ServerAgent } from "./agent.ts";
-import { ChannelRecordSchema } from "./models.ts";
+import { ChannelRecordSchema, PendingOAuthSchema } from "./models.ts";
 import type { ChannelRecord } from "./models.ts";
 import { seedServer } from "./seed.ts";
 
@@ -98,6 +98,38 @@ const ImessageSchema = Schema.Struct({
 const GuildSchema = Schema.Struct({ guildId: Schema.String });
 
 const ConsumeSchema = Schema.Struct({ channel: Schema.String, text: Schema.String });
+
+const OAuthStartSchema = Schema.Struct({
+	integrationID: Schema.String,
+	methodID: Schema.optional(Schema.String),
+});
+
+const OAuthAttemptSchema = Schema.Struct({ attemptID: Schema.String });
+
+const OAuthStatusSchema = Schema.Struct({ integrationID: Schema.String, attemptID: Schema.String });
+
+interface OAuthStatusBody {
+	status: string;
+	message?: string;
+}
+
+interface OAuthCompleteRequest {
+	integrationID: string;
+	attemptID: string;
+	code?: string;
+	location: { directory: string };
+}
+
+const OAuthCompleteSchema = Schema.Struct({
+	integrationID: Schema.String,
+	attemptID: Schema.String,
+	code: Schema.optional(Schema.String),
+});
+
+const OAuthCancelSchema = Schema.Struct({
+	integrationID: Schema.String,
+	attemptID: Schema.String,
+});
 
 const ApprovalSchema = Schema.Struct({
 	approvalId: Schema.String,
@@ -180,6 +212,11 @@ export class Server extends DurableObject<Env> {
 		if (path === "/integrations" && request.method === "POST") return await this.integrations();
 		if (path === "/models" && request.method === "POST") return await this.models();
 		if (path === "/connect" && request.method === "POST") return await this.connectProvider(request);
+		if (path === "/inference/oauth/start" && request.method === "POST") return await this.oauthStart(request);
+		if (path === "/inference/oauth/status" && request.method === "POST") return await this.oauthStatus(request);
+		if (path === "/inference/oauth/complete" && request.method === "POST") return await this.oauthComplete(request);
+		if (path === "/inference/oauth/cancel" && request.method === "POST") return await this.oauthCancel(request);
+		if (path === "/inference/oauth" && request.method === "POST") return await this.oauthAttempt(request);
 		if (path === "/disconnect" && request.method === "POST") return await this.disconnect(request);
 		if (path === "/links" && request.method === "POST") return await this.links();
 		if (path === "/link/add" && request.method === "POST") return await this.addLink(request);
@@ -465,6 +502,123 @@ export class Server extends DurableObject<Env> {
 		return json({ ok: true });
 	}
 
+	// --- Inference OAuth ------------------------------------------------------
+
+	private async oauthAttempt(request: Request): Promise<Response> {
+		const input = await body(request, OAuthAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const pending = await this.store.plain(KEYS.pendingOAuth, PendingOAuthSchema);
+
+		if (!pending || pending.attemptID !== input.attemptID) return failure("That sign-in is no longer available.", 404);
+
+		return json({ attempt: pending });
+	}
+
+	private async oauthStart(request: Request): Promise<Response> {
+		const input = await body(request, OAuthStartSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const attempt = await host.integration.oauth.connect({
+				integrationID: input.integrationID,
+				methodID: input.methodID ?? "oauth",
+				location: { directory: SERVER_ROOT },
+			});
+			const pending = {
+				integrationID: input.integrationID,
+				attemptID: attempt.data.attemptID,
+				url: attempt.data.url,
+				instructions: attempt.data.instructions,
+				mode: attempt.data.mode,
+				createdAt: Date.now(),
+			};
+
+			await this.store.putPlain(KEYS.pendingOAuth, PendingOAuthSchema, pending);
+
+			return json({ attempt: pending });
+		} catch (error) {
+			return failure("That sign-in could not be started: " + describeError(error));
+		}
+	}
+
+	private async oauthStatus(request: Request): Promise<Response> {
+		const input = await body(request, OAuthStatusSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const status = await host.integration.oauth.status({
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			});
+
+			if (status.data.status === "complete") await this.finishOAuth(input.integrationID);
+			const body: OAuthStatusBody = { status: status.data.status };
+
+			if (status.data.status === "failed") body.message = status.data.message;
+
+			return json(body);
+		} catch (error) {
+			return failure("That sign-in status could not be read: " + describeError(error));
+		}
+	}
+
+	private async oauthComplete(request: Request): Promise<Response> {
+		const input = await body(request, OAuthCompleteSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const request: OAuthCompleteRequest = {
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			};
+
+			if (input.code) request.code = input.code;
+			await host.integration.oauth.complete(request);
+			await this.finishOAuth(input.integrationID);
+
+			return json({ ok: true });
+		} catch (error) {
+			return failure("That sign-in could not be completed: " + describeError(error));
+		}
+	}
+
+	private async oauthCancel(request: Request): Promise<Response> {
+		const input = await body(request, OAuthCancelSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		await host.integration.oauth
+			.cancel({
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			})
+			.catch(() => undefined);
+		await this.store.remove(KEYS.pendingOAuth);
+
+		return json({ ok: true });
+	}
+
+	private async finishOAuth(integrationID: string): Promise<void> {
+		await this.store.putSealed(KEYS.provider + integrationID, ProviderConnectionSchema, {
+			integrationID,
+			method: "oauth",
+			key: "",
+		});
+		await this.store.remove(KEYS.pendingOAuth);
+		this.track("inference_connected", { provider: integrationID, method: "oauth" });
+	}
+
 	// --- MCP links -----------------------------------------------------------
 
 	private async links(): Promise<Response> {
@@ -604,6 +758,7 @@ export class Server extends DurableObject<Env> {
 			externalId: input.channelId,
 			name: input.name,
 			containerId: input.containerId,
+			source: "manual",
 		});
 		const record = await this.agent.attachChannel({
 			channelId: input.channelId,

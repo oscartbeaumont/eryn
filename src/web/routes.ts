@@ -44,6 +44,8 @@ interface ServerQuery {
 	ok?: string;
 	error?: string;
 	guild?: string;
+	oauth?: string;
+	integration?: string;
 }
 
 interface LinkBody {
@@ -69,6 +71,8 @@ function serverUrl(id: string, query: ServerQuery = {}): string {
 	if (query.ok) params.set("ok", query.ok);
 	if (query.error) params.set("error", query.error);
 	if (query.guild) params.set("guild", query.guild);
+	if (query.oauth) params.set("oauth", query.oauth);
+	if (query.integration) params.set("integration", query.integration);
 	const suffix = params.toString() ? "?" + params.toString() : "";
 
 	return "/app/servers/" + encodeURIComponent(id) + suffix;
@@ -211,6 +215,11 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 	const guildChannels = guild
 		? (await serverCall(env, id, "/discord/channels", { guildId: guild }, origin)).data.channels
 		: [];
+	const oauthAttemptId = url.searchParams.get("oauth");
+	const oauthResult = oauthAttemptId
+		? await serverCall(env, id, "/inference/oauth", { attemptID: oauthAttemptId }, origin)
+		: undefined;
+	const oauth = oauthResult ? toJsonObject(oauthResult.data.attempt) : undefined;
 	const channels = await serverCall(env, id, "/channels", {}, origin);
 	const links = await serverCall(env, id, "/links", {}, origin);
 	const plugins = await serverCall(env, id, "/plugins", {}, origin);
@@ -270,6 +279,23 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 	if (guild) data.guild = guild;
 	if (typeof messages.webhookUrl === "string") data.messaging.webhookUrl = messages.webhookUrl;
 
+	if (
+		oauth &&
+		typeof oauth.integrationID === "string" &&
+		typeof oauth.attemptID === "string" &&
+		typeof oauth.url === "string" &&
+		typeof oauth.instructions === "string" &&
+		typeof oauth.mode === "string"
+	) {
+		data.oauth = {
+			integrationID: oauth.integrationID,
+			attemptID: oauth.attemptID,
+			url: oauth.url,
+			instructions: oauth.instructions,
+			mode: oauth.mode,
+		};
+	}
+
 	const error = url.searchParams.get("error");
 	const ok = url.searchParams.get("ok");
 
@@ -291,10 +317,82 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 	let result: CallResult | undefined;
 	let ok = "Saved.";
 	let guild: string | undefined;
+	let oauth: string | undefined;
+	let integration: string | undefined;
 
 	switch (action) {
 		case "rename":
 			result = await serverCall(env, id, "/rename", { name: field(fields, "name") }, origin);
+			break;
+		case "inference/oauth/start": {
+			const integrationID = field(fields, "integrationID");
+			const started = await serverCall(
+				env,
+				id,
+				"/inference/oauth/start",
+				{ integrationID, methodID: field(fields, "methodID") || undefined },
+				origin,
+			);
+			const attempt = toJsonObject(started.data.attempt);
+			const attemptID = typeof attempt?.attemptID === "string" ? attempt.attemptID : undefined;
+
+			if (started.ok && attemptID) {
+				result = { ok: true, status: 200, data: {} };
+				oauth = attemptID;
+				integration = integrationID;
+				ok = "Provider sign-in started.";
+			} else {
+				result = started;
+			}
+
+			break;
+		}
+		case "inference/oauth/complete":
+			result = await serverCall(
+				env,
+				id,
+				"/inference/oauth/complete",
+				{
+					integrationID: field(fields, "integrationID"),
+					attemptID: field(fields, "attemptID"),
+					code: field(fields, "code") || undefined,
+				},
+				origin,
+			);
+			ok = "Provider connected.";
+			break;
+		case "inference/oauth/check": {
+			const integrationID = field(fields, "integrationID");
+			const attemptID = field(fields, "attemptID");
+			const status = await serverCall(
+				env,
+				id,
+				"/inference/oauth/status",
+				{ integrationID, attemptID },
+				origin,
+			);
+
+			if (status.ok && status.data.status === "complete") {
+				result = { ok: true, status: 200, data: {} };
+				ok = "Provider connected.";
+			} else {
+				result = { ok: true, status: 200, data: {} };
+				oauth = attemptID;
+				integration = integrationID;
+				ok = "Still waiting for the provider.";
+			}
+
+			break;
+		}
+		case "inference/oauth/cancel":
+			result = await serverCall(
+				env,
+				id,
+				"/inference/oauth/cancel",
+				{ integrationID: field(fields, "integrationID"), attemptID: field(fields, "attemptID") },
+				origin,
+			);
+			ok = "Provider sign-in cancelled.";
 			break;
 		case "inference/model":
 			result = await serverCall(env, id, "/model", { model: field(fields, "model") }, origin);
@@ -459,6 +557,8 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 	if (result?.ok) {
 		query.ok = ok;
 		if (guild) query.guild = guild;
+		if (oauth) query.oauth = oauth;
+		if (integration) query.integration = integration;
 	} else {
 		query.error =
 			typeof result?.data.error === "string" ? result.data.error : "The change was not saved.";

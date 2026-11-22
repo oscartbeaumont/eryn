@@ -23,6 +23,7 @@ import { Gateway } from "./gateway/do.ts";
 import { Hub } from "./hub/do.ts";
 import { isPostHogRequest, posthogProxy } from "./landing/analytics.ts";
 import { privacyPage, termsPage } from "./legal.ts";
+import { handleFileRequest } from "./files/routes.ts";
 import { handleMcp } from "./mcp/eryn.ts";
 import { readMcpToken } from "./mcp/token.ts";
 import { installUrl } from "./public.ts";
@@ -194,6 +195,9 @@ export async function handleWorkerRequest(request: Request, env: Env, ctx: Execu
 		return await handleSendBlue(request, env, serverId, url.searchParams.get("token"));
 	}
 
+	const file = await handleFileRequest(request, env);
+
+	if (file) return file;
 	const web = await handleWeb(request, env, ctx);
 
 	if (web) return web;

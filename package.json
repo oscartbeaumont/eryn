@@ -15,7 +15,7 @@
     "prelint": "cf workers types",
     "lint": "effect-tsgo oxlint --deny-warnings",
     "lint:fix": "effect-tsgo oxlint --fix",
-    "test": "node --experimental-strip-types --test src/analytics.test.ts src/core/*.test.ts src/plugins/*.test.ts"
+    "test": "node --experimental-strip-types --test src/analytics.test.ts src/core/*.test.ts src/server/*.test.ts src/plugins/*.test.ts"
   },
   "dependencies": {
     "@opencode/client": "2.3.2",

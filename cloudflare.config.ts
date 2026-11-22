@@ -66,6 +66,10 @@ export default defineConfig({
 			// Runs custom agent plugins in isolated dynamic isolates.
 			PLUGIN_LOADER: bindings.workerLoader(),
 
+			// Shared, expiring files the agent sends to a messaging surface.
+			// Configure an R2 lifecycle rule on this bucket to bound retention.
+			ARTIFACTS: bindings.r2({ name: "eryn-artifacts" }),
+
 			// Discord. One application for the whole deployment; each Eryn server
 			// binds to one guild. Required to run the Discord provider; an
 			// iMessage-only deployment can set a placeholder value.

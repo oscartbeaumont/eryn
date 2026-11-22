@@ -43,6 +43,18 @@ function text(value: string, isError = false): Json {
 	return { content: [{ type: "text", text: value }], isError };
 }
 
+function media(data: string, mimeType: string): Json {
+	return { content: [{ type: "media", data, mimeType }], isError: false };
+}
+
+function base64(bytes: Uint8Array): string {
+	let binary = "";
+
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+
+	return btoa(binary);
+}
+
 const TOOLS = [
 	{
 		name: "send_message",
@@ -66,6 +78,35 @@ const TOOLS = [
 				},
 			},
 			required: ["text"],
+		},
+	},
+	{
+		name: "read_attachment",
+		title: "Read an attachment",
+		description: "Fetch an image or file from a message so it can be read or analysed.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				url: { type: "string", description: "The attachment URL from a message." },
+			},
+			required: ["url"],
+		},
+	},
+	{
+		name: "start_thread",
+		title: "Start a thread",
+		description:
+			"Start a Discord thread for a longer piece of work. Not supported on iMessage.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				title: { type: "string", description: "A short thread title." },
+				channel: {
+					type: "string",
+					description: "Parent conversation. Omit to use the current conversation.",
+				},
+			},
+			required: ["title"],
 		},
 	},
 	{
@@ -199,6 +240,47 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 		return response.ok === true
 			? text("Sent" + (id ? " (id " + id + ")" : "") + ".")
 			: text(stringField(response, "error") ?? "The message could not be sent.", true);
+	}
+
+	if (name === "read_attachment") {
+		const url = stringField(args, "url");
+
+		if (!url) return text("An attachment URL is required.", true);
+
+		try {
+			const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+
+			if (!response.ok) return text("The attachment returned HTTP " + response.status, true);
+			const bytes = new Uint8Array(await response.arrayBuffer());
+
+			if (bytes.byteLength > 20 * 1024 * 1024) return text("That attachment is larger than 20 MB.", true);
+			const mime = response.headers.get("content-type") ?? "application/octet-stream";
+
+			return media(base64(bytes), mime);
+		} catch (error) {
+			return text(describeError(error), true);
+		}
+	}
+
+	if (name === "start_thread") {
+		const title = stringField(args, "title") ?? "Eryn";
+		const channel = stringField(args, "channel") ?? "";
+		const response = await hubJson(options.env, options.serverId, "/thread", { channel, title }, headers);
+		const id = stringField(response, "channelId");
+
+		if (response.ok !== true || !id) {
+			return text(stringField(response, "error") ?? "The thread could not be started.", true);
+		}
+
+		return text(
+			"Started thread " +
+				id +
+				'. To follow it, create a watch with watch_mcp_event: server "eryn", event "message", arguments {"channel":"' +
+				id +
+				'"}, named "messages:' +
+				id +
+				'".',
+		);
 	}
 
 	if (name === "read_history") {

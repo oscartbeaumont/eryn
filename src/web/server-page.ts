@@ -25,6 +25,13 @@ export interface ServerPageData {
 	readonly mcp: ReadonlyArray<{ name: string; status: string; error?: string }>;
 	readonly policy: ServerPolicy;
 	readonly discordRoles: ReadonlyArray<{ id: string; name: string }>;
+	readonly oauth?: {
+		readonly integrationID: string;
+		readonly attemptID: string;
+		readonly url: string;
+		readonly instructions: string;
+		readonly mode: string;
+	};
 	readonly plugins: ReadonlyArray<{ id: string; name: string; version: string; enabled: boolean }>;
 	readonly guilds: ReadonlyArray<{ id: string; name: string }>;
 	readonly guild?: string;
@@ -169,6 +176,13 @@ export function serverPage(data: ServerPageData): Response {
 						.join("") +
 					"</ul>"
 				: '<p class="muted">No inference providers connected.</p>',
+			'<form method="post" action="' + base + '/inference/oauth/start">',
+			'<label for="oauthIntegration">Integration id (OAuth)</label>',
+			'<input id="oauthIntegration" name="integrationID" placeholder="opencode" required>',
+			'<label for="oauthMethod">Method id</label>',
+			'<input id="oauthMethod" name="methodID" placeholder="oauth">',
+			'<button type="submit">Connect with OAuth</button>',
+			"</form>",
 			'<form method="post" action="' + base + '/inference/connect">',
 			'<label for="integrationID">Integration id</label>',
 			'<input id="integrationID" name="integrationID" placeholder="opencode" required>',
@@ -250,6 +264,30 @@ export function serverPage(data: ServerPageData): Response {
 			"</form>",
 		].join(""),
 	);
+
+	const oauthCard = data.oauth
+		? section(
+				"Finish provider sign-in",
+				[
+					'<p class="muted">' + escapeHtml(data.oauth.instructions) + "</p>",
+					'<p><a href="' +
+						escapeHtml(data.oauth.url) +
+						'" target="_blank" rel="noreferrer">Open the provider sign-in page</a></p>',
+					'<form method="post" action="' + base + '/inference/oauth/complete">',
+					'<input type="hidden" name="integrationID" value="' + escapeHtml(data.oauth.integrationID) + '">',
+					'<input type="hidden" name="attemptID" value="' + escapeHtml(data.oauth.attemptID) + '">',
+					'<label for="oauthCode">Code (if the provider shows one)</label>',
+					'<input id="oauthCode" name="code" autocomplete="one-time-code">',
+					'<button type="submit">Finish sign-in</button>',
+					"</form>",
+					'<form method="post" action="' + base + '/inference/oauth/check" class="inline">',
+					'<input type="hidden" name="integrationID" value="' + escapeHtml(data.oauth.integrationID) + '">',
+					'<input type="hidden" name="attemptID" value="' + escapeHtml(data.oauth.attemptID) + '">',
+					'<button class="ghost" type="submit">Check status</button>',
+					"</form>",
+				].join(""),
+			)
+		: "";
 
 	const mcpState = data.mcp.length
 		? '<ul class="items">' +
@@ -370,6 +408,7 @@ export function serverPage(data: ServerPageData): Response {
 		section("Conversations", channelRows),
 		discordChannels ? section("Add a Discord channel", discordChannels) : "",
 		'<div class="grid" style="margin-top:1rem">',
+		oauthCard,
 		inference,
 		links,
 		"</div>",

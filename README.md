@@ -108,6 +108,18 @@ buttons for once/always/block, numbered replies on iMessage. `always` applies
 only to the current session. Forms from MCP servers use the same chat surface:
 one `key: value` line per field.
 
+## Files and threads
+
+`share_file` copies a workspace file to R2 and returns a signed, expiring
+link. The agent passes that link to `send_message`. `save_attachment` pulls an
+incoming chat attachment into the workspace, and `read_attachment` returns an
+image or file to the model without storing it. Configure an R2 lifecycle rule
+on the `eryn-artifacts` bucket so shared files expire.
+
+On Discord, the agent can call `start_thread` to move a long request into a
+thread. The thread is bound as another conversation; the agent creates a watch
+for it with `watch_mcp_event`. iMessage reports threads as unsupported.
+
 ## Workspaces
 
 Each server has one virtual filesystem:
@@ -152,7 +164,8 @@ deployment logs the code to the console.
 
 Inference is configured per server, from the browser. The server stores the
 credential sealed with `ENCRYPTION_KEY` and replays it into the embedded
-OpenCode host. Any integration OpenCode supports can be connected with a key.
+OpenCode host. Connect with a key, or start a device-code OAuth flow and paste
+the code the provider shows. Any integration OpenCode supports can be used.
 
 BYOK is the default. A deployment that wants to provide a free key can add one
 to the server through the same form; nothing in the agent differs.
@@ -254,10 +267,9 @@ deleted after the new deployment is verified.
 
 What is intentionally not carried over yet:
 
-- The old per-channel permission profiles and approval cards. The new design
-  exposes MCP tools directly; a policy layer can sit in front of the same
-  schemas.
-- OAuth-based inference connections. Key-based connections and model selection
-  are implemented; OAuth can be added to the same `/connect` route.
-- The old Discord thread/command UI. `/eryn setup` now points at the web app;
-  conversation happens in the channel or thread that was attached.
+- The old per-channel policy patches are replaced by Discord roles mapped to
+  profiles. Approvals are chat-native.
+- MCP server OAuth. Inference device-code OAuth is implemented; linked MCP
+  servers still use a bearer token.
+- The old Discord command UI. `/eryn setup` links to the web app; conversation
+  happens in the channel or thread that was attached.

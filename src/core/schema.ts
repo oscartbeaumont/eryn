@@ -95,6 +95,8 @@ export const ChannelBindingSchema = Schema.Struct({
 	name: Schema.optional(Schema.String),
 	/** The Discord guild, or another provider's container id. */
 	containerId: Schema.optional(Schema.String),
+	/** How the binding was made, so the Server can tell a thread to attach. */
+	source: Schema.optional(Schema.Literals(["manual", "thread", "mention"])),
 	enabled: Schema.Boolean,
 	createdAt: Schema.Finite,
 });
@@ -256,6 +258,7 @@ export const BindChannelRequestSchema = Schema.Struct({
 	externalId: Schema.String,
 	name: Schema.optional(Schema.String),
 	containerId: Schema.optional(Schema.String),
+	source: Schema.optional(Schema.Literals(["manual", "thread", "mention"])),
 });
 
 export const UnbindChannelRequestSchema = Schema.Struct({

@@ -15,6 +15,7 @@ import { describeError } from "../errors.ts";
 import { mintMcpToken } from "../mcp/token.ts";
 import { commandShellPlugin } from "../plugins/commands/index.ts";
 import { dynamicPluginsPlugin } from "../plugins/dynamic/index.ts";
+import { filesPlugin } from "../plugins/files/index.ts";
 import { agentInstructionsPlugin } from "../plugins/instructions/index.ts";
 import { policyPlugin } from "../plugins/policy/index.ts";
 import type { PermissionSet, SessionGrants } from "../core/policy.ts";
@@ -122,6 +123,13 @@ export async function buildHost(config: HostConfig, options: HostOptions): Promi
 	const plugins = [
 		workspacePlugin({ storage, serverRoot: SERVER_ROOT, rootForSession, activeSkills }),
 		commandShellPlugin(storage, rootForSession),
+		filesPlugin({
+			env,
+			storage,
+			serverId,
+			origin,
+			rootForSession,
+		}),
 		policyPlugin({
 			contextFor: options.contextFor,
 			grantFor: options.grantFor,

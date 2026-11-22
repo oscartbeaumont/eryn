@@ -35,6 +35,7 @@
 		}
 	],
 	"worker_loaders": [{ "binding": "PLUGIN_LOADER" }],
+	"r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "eryn-artifacts" }],
 	"observability": {
 		"enabled": true,
 		"issues": {

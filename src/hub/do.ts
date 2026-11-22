@@ -13,7 +13,7 @@ import { Schema } from "effect";
 
 import { capture } from "../analytics.ts";
 import type { AnalyticsValue } from "../analytics.ts";
-import { KEYS, log } from "../config.ts";
+import { KEYS, log, optional } from "../config.ts";
 import { cursor as newCursor } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
 import {
@@ -41,6 +41,7 @@ import {
 } from "../core/policy.ts";
 import type { PrincipalRecord, ServerPolicy } from "../core/policy.ts";
 import type { RecordStore } from "../core/store.ts";
+import { discordRest } from "../discord/api.ts";
 import { discordProvider } from "../providers/discord.ts";
 import { imessageProvider } from "../providers/imessage.ts";
 import type { MessagingProvider } from "../providers/types.ts";
@@ -122,6 +123,7 @@ export class Hub extends DurableObject<Env> {
 			if (path === "/remember-session" && request.method === "POST") return await this.rememberSession(request);
 			if (path === "/policy" && request.method === "POST") return await this.putPolicy(request);
 			if (path === "/context" && request.method === "POST") return await this.context(request);
+			if (path === "/thread" && request.method === "POST") return await this.startThread(request);
 			return failure("Not found.", 404);
 		} catch (error) {
 			log("hub", `route ${path} failed: ${describeError(error)}`);
@@ -149,6 +151,41 @@ export class Hub extends DurableObject<Env> {
 		await this.store.putPlain(this.channelKey(binding.externalId), ChannelBindingSchema, binding);
 	}
 
+	/** Start a Discord thread and bind it as a conversation. */
+	private async startThread(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ channel: Schema.optional(Schema.String), title: Schema.String }));
+
+		if (input instanceof Response) return input;
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
+		const binding = channel ? await this.binding(channel) : undefined;
+
+		if (!binding || binding.provider !== "discord") {
+			return json({ ok: false, error: "Threads are only available on Discord conversations." });
+		}
+
+		try {
+			const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+			const thread = await rest.startThread(binding.externalId, input.title.trim().slice(0, 100) || "Eryn");
+
+			await this.putBinding({
+				id: thread.id,
+				provider: "discord",
+				externalId: thread.id,
+				name: input.title.trim().slice(0, 100) || "Eryn",
+				containerId: binding.containerId,
+				source: "thread",
+				enabled: true,
+				createdAt: Date.now(),
+			});
+			this.track("thread_created", { provider: "discord" });
+
+			return json({ ok: true, channelId: thread.id });
+		} catch (error) {
+			return json({ ok: false, error: describeError(error) });
+		}
+	}
+
 	private async bind(request: Request): Promise<Response> {
 		const input = await body(request, BindChannelRequestSchema);
 
@@ -162,6 +199,7 @@ export class Hub extends DurableObject<Env> {
 						externalId: input.externalId,
 						name: input.name,
 						containerId: input.containerId,
+						source: input.source,
 						enabled: true,
 						createdAt: Date.now(),
 					}
@@ -170,6 +208,7 @@ export class Hub extends DurableObject<Env> {
 						provider: input.provider,
 						name: input.name ?? existing.name,
 						containerId: input.containerId ?? existing.containerId,
+						source: input.source ?? existing.source,
 						enabled: true,
 					};
 
@@ -312,6 +351,7 @@ export class Hub extends DurableObject<Env> {
 				provider: message.provider,
 				externalId: message.channel,
 				name: message.channelName ?? message.author.name,
+				source: "mention",
 				createdAt: Date.now(),
 				enabled: true,
 			};

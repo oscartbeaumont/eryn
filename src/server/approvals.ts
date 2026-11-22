@@ -188,7 +188,11 @@ function parseLines(fields: readonly ApprovalField[], text: string): Map<string,
 export class ApprovalBroker {
 	private readonly pending = new Map<string, Pending>();
 
-	constructor(private readonly options: ApprovalBrokerOptions) {}
+	private readonly options: ApprovalBrokerOptions;
+
+	constructor(options: ApprovalBrokerOptions) {
+		this.options = options;
+	}
 
 	/** Ask the conversation to approve one tool call. */
 	async permission(input: {
@@ -359,6 +363,7 @@ export class ApprovalBroker {
 		if (pending.kind === "form") return false;
 		clearTimeout(pending.timer);
 		this.pending.delete(id);
+		pending.resolve(decision);
 
 		if (decision === "always") await this.options.grant(pending.sessionID, pending.action);
 
@@ -405,6 +410,7 @@ export class ApprovalBroker {
 			if (!decision) return false;
 			clearTimeout(pending.timer);
 			this.pending.delete(pending.id);
+			pending.resolve(decision);
 
 			if (decision === "always") await this.options.grant(pending.sessionID, pending.action);
 			await this.options
