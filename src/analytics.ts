@@ -2,101 +2,86 @@
  * Product analytics for the hosted deployment.
  *
  * Off unless `POSTHOG_KEY` is set. A self-hosted fork should not report to the
- * hosted project, and nothing here is needed to run the bot, so the default is
+ * hosted project, and nothing here is needed to run Eryn, so the default is
  * silence rather than a disabled client that still loads.
  *
- * Every event is keyed by a pseudonymous guild id (an HMAC of the Discord id,
- * not the id itself) and carries coarse properties. Message text, prompts,
- * replies, usernames, channel names, and tool arguments never leave the
- * object; callers pass only the values they would be happy to read in a
- * dashboard.
+ * Every event is addressed by a pseudonymous subject: a server id for anything
+ * about one server, a user id for sign-in. Callers pass coarse values only.
+ * Message text, prompts, replies, attachments, email addresses, phone numbers,
+ * usernames, channel names, URLs, tokens, plugin code, tool arguments, and raw
+ * Discord identifiers never leave the object.
  */
 
-import { log, optional } from "./config";
-import { describeError } from "./errors";
+import { log, optional } from "./config.ts";
+import { describeError } from "./errors.ts";
 
 /** PostHog's US ingestion endpoint, matching the project the website uses. */
 const INGEST = "https://us.i.posthog.com/capture/";
 
-/** A capture must never hold a turn open; PostHog is normally much faster. */
+/** A capture must never hold a request open; PostHog is normally much faster. */
 const TIMEOUT_MS = 3_000;
 
 /** The value a property may carry: primitives only, so nothing can smuggle content out. */
 export type AnalyticsValue = string | number | boolean | undefined;
 
-export interface Analytics {
-	readonly enabled: boolean;
-	/**
-	 * Send one event. Resolves once it is sent, or immediately when a
-	 * `waitUntil` was supplied and the send has been handed to the runtime.
-	 * Never rejects: an analytics failure must not fail a product action.
-	 */
-	capture(event: string, properties?: Record<string, AnalyticsValue>): Promise<void>;
+/** Who an event is about. Server-scoped events should always name the server. */
+export interface CaptureSubject {
+	readonly serverId?: string;
+	/** An Eryn user id, or a keyed pseudonym for a user who has no account yet. */
+	readonly userId?: string;
 }
 
-const DISABLED: Analytics = { enabled: false, capture: async () => undefined };
-
 /**
- * Analytics for one subject, usually a guild.
+ * Send one event, or do nothing when analytics is off or the subject is unknown.
  *
- * `waitUntil` is the Durable Object's `ctx.waitUntil`. With it, a capture is
- * scheduled and the caller is not held open; without it (a route that already
- * awaits real work, or the agent's turn bookkeeping) the capture is awaited.
+ * Never rejects: an analytics failure must not fail a product action. Callers
+ * with an `ExecutionContext` should hand the returned promise to
+ * `ctx.waitUntil` so the send never delays the response.
  */
-export function analytics(
+export async function capture(
 	env: Env,
-	subject: string,
-	waitUntil?: (promise: Promise<unknown>) => void,
-): Analytics {
-	const key = optional(env, "POSTHOG_KEY");
-	const secret = optional(env, "ENCRYPTION_KEY");
+	event: string,
+	properties: Record<string, AnalyticsValue> = {},
+	subject: CaptureSubject = {},
+): Promise<void> {
+	try {
+		const key = optional(env, "POSTHOG_KEY");
+		const distinctId = subject.serverId
+			? `server:${subject.serverId}`
+			: subject.userId
+				? `user:${subject.userId}`
+				: undefined;
 
-	if (!key || !secret || !subject) return DISABLED;
+		if (!key || !distinctId) return;
 
-	let distinctId: Promise<string> | undefined;
+		const eventProperties: Record<string, string | number | boolean | { readonly server: string }> =
+			clean(properties);
 
-	return {
-		enabled: true,
-		capture(event, properties = {}) {
-			distinctId ??= subjectId(subject, secret);
+		eventProperties.$lib = "eryn";
+		// Anonymous by design: the subject is pseudonymous and the events
+		// describe usage, not a person.
+		eventProperties.$process_person_profile = false;
+		eventProperties.$geoip_disable = true;
 
-			const send = async (): Promise<void> => {
-				try {
-					const response = await fetch(INGEST, {
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify({
-							api_key: key,
-							event,
-							distinct_id: await distinctId,
-							properties: {
-								...clean(properties),
-								$lib: "eryn",
-								// Anonymous by design: the guild id is hashed and the
-								// events describe the deployment, not a person.
-								$process_person_profile: false,
-								$geoip_disable: true,
-							},
-							timestamp: new Date().toISOString(),
-						}),
-						signal: AbortSignal.timeout(TIMEOUT_MS),
-					});
+		if (subject.serverId) eventProperties.$groups = { server: subject.serverId };
 
-					if (!response.ok) log("analytics", `PostHog returned HTTP ${response.status} for ${event}`);
-				} catch (error) {
-					log("analytics", `could not send ${event}: ${describeError(error)}`);
-				}
-			};
+		const response = await fetch(INGEST, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				api_key: key,
+				event,
+				distinct_id: distinctId,
+				properties: eventProperties,
+				timestamp: new Date().toISOString(),
+			}),
+			signal: AbortSignal.timeout(TIMEOUT_MS),
+		});
 
-			if (waitUntil) {
-				waitUntil(send());
-
-				return Promise.resolve();
-			}
-
-			return send();
-		},
-	};
+		if (!response.ok) log("analytics", `PostHog returned HTTP ${response.status} for ${event}`);
+	} catch (error) {
+		log("analytics", `could not send ${event}: ${describeError(error)}`);
+	}
 }
 
 function clean(properties: Record<string, AnalyticsValue>): Record<string, string | number | boolean> {
@@ -108,30 +93,38 @@ function clean(properties: Record<string, AnalyticsValue>): Record<string, strin
 }
 
 /**
- * A stable id for a guild that cannot be read back as its Discord id.
+ * A stable pseudonym for a value that must never be sent, such as an email
+ * address.
  *
- * The HMAC key is the deployment's encryption key, so two deployments cannot
- * correlate the same guild, and an id from one project is meaningless in
- * another.
+ * The HMAC key is the deployment's encryption key, so a list of candidate
+ * addresses cannot confirm a match the way a plain hash can, and the same
+ * deployment derives the same id for the same address. Returns undefined when
+ * the deployment has no encryption key, in which case the caller should skip
+ * the event rather than fall back to the raw value.
  */
-async function subjectId(subject: string, secret: string): Promise<string> {
-	const key = await crypto.subtle.importKey(
-		"raw",
-		new TextEncoder().encode(secret),
-		{ name: "HMAC", hash: "SHA-256" },
-		false,
-		["sign"],
-	);
+export async function pseudonym(env: Env, value: string): Promise<string | undefined> {
+	const secret = optional(env, "ENCRYPTION_KEY");
 
-	const signature = await crypto.subtle.sign(
-		"HMAC",
-		key,
-		new TextEncoder().encode(`eryn-analytics:${subject}`),
-	);
+	if (!secret) return undefined;
 
-	const hex = [...new Uint8Array(signature)]
-		.map((byte) => byte.toString(16).padStart(2, "0"))
-		.join("");
+	try {
+		const encoder = new TextEncoder();
+		const key = await crypto.subtle.importKey(
+			"raw",
+			encoder.encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`eryn-analytics:${value}`));
 
-	return `guild_${hex.slice(0, 32)}`;
+		return [...new Uint8Array(signature)]
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join("")
+			.slice(0, 32);
+	} catch (error) {
+		log("analytics", `could not derive a pseudonym: ${describeError(error)}`);
+
+		return undefined;
+	}
 }

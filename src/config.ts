@@ -1,25 +1,22 @@
 /**
- * Bot-wide constants and small helpers.
+ * Deployment-wide constants and small helpers.
  *
- * Nothing here touches the network or storage: it is the handful of values the
- * gateway object and every guild session agree on.
+ * Nothing here touches the network or storage: it is the handful of values
+ * every object and every provider agrees on.
  */
 
-import { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN } from "./public.ts";
+import { DEFAULT_PUBLIC_ORIGIN } from "./public.ts";
 
-/** The default model when a guild does not choose one. */
+/** The default model when a server does not choose one. */
 export const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash";
 
-export { CLIENT_ID, DEFAULT_PUBLIC_ORIGIN };
+export { DEFAULT_PUBLIC_ORIGIN };
 
-/**
- * The application's Ed25519 public key, which signs every interaction Discord
- * posts to the HTTP endpoint.
- *
- * It is public, not a secret. It only changes if the key is reset in the
- * developer portal, in which case this constant has to change with it.
- */
-export const APPLICATION_PUBLIC_KEY = "6655aa1a8380d798d623e3a12216e604b51e3be94f2a21fca6fcba23f87ba980";
+/** Prefix on every log line this package emits. */
+export const LOG_PREFIX = "eryn";
+
+/** Where Discord posts interactions. */
+export const INTERACTIONS_PATH = "/interactions";
 
 /**
  * A value a deployment can set that the hosted build does not bind.
@@ -44,7 +41,7 @@ export function configuredOrigin(env: Env): string | undefined {
 }
 
 /**
- * The key that signs MCP sign-in state and callback links.
+ * The key that signs browser sessions and internal MCP tokens.
  *
  * A deployment may set `SESSION_SECRET`. Without one the key is derived from
  * `ENCRYPTION_KEY`, which every deployment has anyway; the purpose suffix keeps
@@ -56,43 +53,60 @@ export function sessionSecret(env: Env): string | undefined {
 	if (configured) return configured;
 	const encryption = optional(env, "ENCRYPTION_KEY");
 
-	return encryption ? `${encryption}:mcp-state` : undefined;
+	return encryption ? `${encryption}:session` : undefined;
 }
 
-/** Where Discord posts interactions once the application's endpoint is set. */
-export const INTERACTIONS_PATH = "/interactions";
-
-/** Prefix on every log line this package emits. */
-export const LOG_PREFIX = "eryn:bot";
+/** The key that seals stored credentials. */
+export function encryptionKey(env: Env): string | undefined {
+	return optional(env, "ENCRYPTION_KEY");
+}
 
 /** Storage key prefixes. A shipped prefix is stable; new shapes get a new one. */
 export const KEYS = {
-	/** The guild's model and bookkeeping, no secrets. */
-	guild: "config:guild",
-	/** One connected provider credential, sealed. */
+	/** A server's own settings, no secrets. */
+	server: "server:settings",
+	/** One connected inference credential, sealed. */
 	provider: "provider:",
 	/** One linked MCP server, sealed (it carries a bearer or a refresh token). */
 	link: "link:",
-	/** A sign-in with an external MCP server, sealed (it carries a PKCE verifier). */
+	/** A sign-in with an external MCP server, sealed. */
 	mcpAuth: "mcp:auth:",
-	/** A thread's OpenCode session id. */
+	/** An OpenCode session id for one channel project. */
 	session: "session:",
-	/** A sign-in that has started but not finished, so a code can complete it. */
-	pendingOAuth: "config:oauth",
-	/** The guild's virtual filesystem, one key per absolute path. */
+	/** A channel's project configuration and activity bookkeeping. */
+	channel: "channel:",
+	/** One messaging provider connection, sealed. */
+	messaging: "messaging:",
+	/** Which channel an OpenCode session belongs to, so a tool can default. */
+	channelSession: "hub:session:",
+	/** One custom plugin, sealed (code plus metadata). */
+	plugin: "plugin:",
+	/** The server's Discord role policy, plain. */
+	policy: "config:policy",
+	/** The latest speaker and permissions for a conversation. */
+	principal: "hub:principal:",
+	/** The speaker whose turn is running, frozen per session. */
+	sessionPrincipal: "hub:turn:",
+	/** The virtual filesystem, one key per absolute path. */
 	fs: "fs:",
 	/** The default files already written into the virtual filesystem. */
-	workspaceSeed: "config:workspace-seed",
-	/** One custom permission profile the server owns. */
-	policyProfile: "policy:profile:",
-	/** The server-wide policy patch. */
-	policyGuild: "policy:guild",
-	/** One channel's policy patch. */
-	policyChannel: "policy:channel:",
-	/** One thread's policy patch. */
-	policyThread: "policy:thread:",
-	/** The message that announces a scope's non-default policy. */
-	policyCard: "policy:card:",
+	workspaceSeed: "config:workspace-seed:",
+	/** A sign-in that has started but not finished. */
+	pendingOAuth: "config:oauth",
+	/** One user account, keyed by a hash of the email. */
+	user: "user:",
+	/** The same account, keyed by its id, so a session resolves without a scan. */
+	userId: "userid:",
+	/** One browser session. */
+	authSession: "auth:session:",
+	/** One in-flight email login code. */
+	loginCode: "auth:code:",
+	/** One Eryn server in the control plane. */
+	serverRef: "control:server:",
+	/** A server owner's index entry. */
+	ownerIndex: "control:owner:",
+	/** A guild bound to an Eryn server in the gateway. */
+	guildIndex: "gateway:guild:",
 } as const;
 
 /**
@@ -108,7 +122,7 @@ export function isValidModel(value: string): boolean {
 	return MODEL_PATTERN.test(value);
 }
 
-/** A namespaced log line: `[eryn:bot:gateway] …`. */
+/** A namespaced log line: `[eryn:hub] …`. */
 export function log(scope: string, message: string): void {
 	// oxlint-disable-next-line eslint/no-console -- This function is the logger.
 	console.log(`[${LOG_PREFIX}:${scope}] ${message}`);

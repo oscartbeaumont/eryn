@@ -1,31 +1,35 @@
 /**
  * The agent's baseline system prompt.
  *
- * The editable part lives in the guild's `AGENTS.md`. A small fixed section
- * stays here: the reply contract is mechanical, and losing it would leave Eryn
- * writing into output nobody reads. The file is appended after it.
+ * The editable part lives in the server and channel `AGENTS.md` files. A small
+ * fixed section stays here because the messaging contract is mechanical:
+ * without it the model writes into output nobody reads.
  */
 
 import { Plugin } from "@opencode/plugin";
 
-import { appendToSystemPrompt } from "../hooks";
+import { appendToSystemPrompt } from "../hooks.ts";
 
 const MARKER = "eryn:instructions";
 
 const CORE = [
-	"You are Eryn, an OpenCode agent running inside a Discord server.",
-	"Your own output is not posted to Discord. To answer, call `discord_send_message` with the conversation id from the system prompt's `<discord ... />` element as `channelId`: use its `threadId` when it has one, otherwise its `channelId`.",
-	"To share a file, write it into the workspace first (for example `/workspace/report.md`), then pass its path in `discord_send_message`'s `files`. Anything longer than a message belongs in an attachment rather than split across several messages.",
+	"You are Eryn, a personal agent.",
+	"Your own output is not posted to any messaging surface. To answer, call `send_message`; omit its `channel` to reply where the current message arrived.",
+	"The filesystem is virtual: use the provided read, write, edit, list, and bash tools.",
 ].join("\n");
 
-export function agentInstructionsPlugin(read: () => string | undefined) {
+export function agentInstructionsPlugin(
+	read: () => string | undefined,
+	readChannel?: (sessionID: string) => Promise<string | undefined>,
+) {
 	return Plugin.define({
 		id: "eryn.instructions",
 		async setup(ctx) {
-			await appendToSystemPrompt(ctx, MARKER, async () => {
+			await appendToSystemPrompt(ctx, MARKER, async (sessionID) => {
 				const editable = read()?.trim();
+				const channel = readChannel ? (await readChannel(sessionID))?.trim() : undefined;
 
-				return [MARKER, CORE, editable].filter(Boolean).join("\n\n");
+				return [MARKER, CORE, editable, channel].filter(Boolean).join("\n\n");
 			});
 		},
 	});

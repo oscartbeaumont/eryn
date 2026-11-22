@@ -7,7 +7,7 @@
 {
 	"name": "eryn",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-10-06",
+	"compatibility_date": "2026-11-20",
 	"compatibility_flags": ["nodejs_compat"],
 	"assets": {
 		"directory": "./assets",
@@ -15,21 +15,27 @@
 	},
 	"durable_objects": {
 		"bindings": [
-			{ "name": "BOT_GATEWAY", "class_name": "BotGateway" },
-			{ "name": "BOT_SESSION", "class_name": "BotSession" }
+			{ "name": "CONTROL", "class_name": "Control" },
+			{ "name": "SERVER", "class_name": "Server" },
+			{ "name": "HUB", "class_name": "Hub" },
+			{ "name": "GATEWAY", "class_name": "Gateway" }
 		]
 	},
-	// The first migration. Nothing has been deployed from this file yet, so
-	// there is no earlier class name to rename or carry over.
+	// v1 is the original Discord-only bot. v2 is the decoupled redesign; a
+	// fresh deployment applies both, and an existing one keeps its old objects
+	// until they are deleted.
 	"migrations": [
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["BotGateway", "BotSession"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["Control", "Server", "Hub", "Gateway"]
 		}
 	],
-	// Workers Logs plus Cloudflare's error aggregation. `cloudflare.config.ts`
-	// is what `cf deploy` reads and already enables both; this copy exists for
-	// the deploy button and Workers Builds.
+	"worker_loaders": [{ "binding": "PLUGIN_LOADER" }],
+	"r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "eryn-artifacts" }],
 	"observability": {
 		"enabled": true,
 		"issues": {

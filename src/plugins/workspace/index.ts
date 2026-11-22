@@ -1,31 +1,34 @@
 /**
- * The workspace plugin: a real, durable filesystem and a shell for the agent.
+ * The workspace plugin: a durable, layered filesystem and a shell for the agent.
  *
- * The Workerd OpenCode profile has no local filesystem or process plane, so the
- * built-in `read`/`write`/`edit`/`bash` tools are unavailable. This plugin
- * replaces them with implementations backed by the shared {@link FileStore} and
- * just-bash, giving the agent a genuine (if virtual) project to work in.
- *
- * It is deliberately standalone: it knows nothing about Discord, and needs
- * only the guild's Durable Object storage.
+ * The server tree is the shared root. A channel is a directory inside it, and
+ * the agent starts there, so it can read server-wide files while its own edits
+ * stay in the channel project. The shell is sandboxed to the channel root: it
+ * cannot walk into another channel or into Eryn's configuration.
  */
 
 import { Plugin } from "@opencode/plugin";
 import type { Schema } from "effect";
 
-import { WORKSPACE_ROOT } from "../../session/locations";
-import { declaredInput, objectSchema, toolRun } from '../tool';
-import type { ToolCall, ToolSpec } from '../tool';
-import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes";
-import { resolvePath, resolveToolPath } from "./paths.ts";
-import { runShell } from "./shell";
-import { fileStore } from './store';
-import type { FileStore, StoredFile } from './store';
+import { declaredInput, objectSchema, toolRun } from "../tool.ts";
+import type { ToolCall, ToolSpec } from "../tool.ts";
+import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes.ts";
+import { pathDenial, resolvePath, resolveToolPath } from "./paths.ts";
+import type { PathAccess } from "./paths.ts";
+import { runShell } from "./shell.ts";
+import { fileStore } from "./store.ts";
+import type { FileStore, StoredFile } from "./store.ts";
 
-export { WORKSPACE_ROOT };
-
-/** Built-in tools this plugin supersedes (the rest are untouched). */
 const OVERRIDDEN = ["read", "write", "edit", "patch", "bash", "list", "glob", "grep"];
+
+export interface WorkspaceOptions {
+	readonly storage: DurableObjectStorage;
+	/** The server-wide root. */
+	readonly serverRoot: string;
+	/** The channel project root for one session. */
+	readonly rootForSession: (sessionID: string) => string;
+	readonly activeSkills?: ReadonlyMap<string, string>;
+}
 
 async function readText(store: FileStore, path: string): Promise<string | undefined> {
 	const file = await store.get(path);
@@ -38,48 +41,47 @@ async function writeText(store: FileStore, path: string, text: string, mtime = D
 	await store.put(path, file);
 }
 
-/** The arguments a tool takes, matching its schema. */
 type FileInput = { filePath: string };
-
 type ReadInput = FileInput & { offset?: number; limit?: number };
-
 type EditInput = FileInput & { oldString: string; newString: string; replaceAll?: boolean };
 
-/**
- * Resolve a tool's path argument (`filePath` for files, `path` for a listing).
- *
- * A relative path is first tried against the skill the session is currently
- * using, then against the workspace root. That makes a skill's own
- * `references/foo.md` work without the model having to know the absolute
- * `/eryn/...` path.
- */
-function toolPath(store: FileStore, activeSkills: ReadonlyMap<string, string> | undefined) {
-	return (
+/** A confined path, or the message to hand back to the model. */
+type Resolution =
+	| { readonly ok: true; readonly path: string }
+	| { readonly ok: false; readonly error: string };
+
+function toolPath(store: FileStore, options: WorkspaceOptions) {
+	return async (
 		input: { filePath?: string; path?: string },
 		call: ToolCall | undefined,
+		access: PathAccess,
 		kind: "file" | "dir" = "file",
-	): Promise<string> =>
-		resolveToolPath({
+	): Promise<Resolution> => {
+		const root = options.rootForSession(call?.sessionID ?? "");
+		const path = await resolveToolPath({
 			store,
-			root: WORKSPACE_ROOT,
-			skillDirectory: call && activeSkills ? activeSkills.get(call.sessionID) : undefined,
+			root,
+			skillDirectory: call && options.activeSkills ? options.activeSkills.get(call.sessionID) : undefined,
 			input: input.filePath ?? input.path ?? ".",
 			kind,
 		});
+		const denial = pathDenial({ serverRoot: options.serverRoot, root, path, access });
+
+		return denial === undefined ? { ok: true, path } : { ok: false, error: denial };
+	};
 }
 
-export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: ReadonlyMap<string, string>) {
-	const store = fileStore(storage);
-
-	const resolve = toolPath(store, activeSkills);
+export function workspacePlugin(options: WorkspaceOptions) {
+	const store = fileStore(options.storage);
+	const resolve = toolPath(store, options);
 
 	const tools: ToolSpec[] = [
 		{
 			name: "read",
-			description: "Read a file from the workspace, with line numbers.",
+			description: "Read a file. A relative path resolves from the channel project.",
 			input: objectSchema(
 				{
-					filePath: { type: "string", description: "Absolute path, or relative to the workspace" },
+					filePath: { type: "string", description: "Absolute path, or relative to the channel" },
 					offset: { type: "number", description: "First line to read (1-based)" },
 					limit: { type: "number", description: "Maximum number of lines" },
 				},
@@ -87,40 +89,45 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 			),
 			async run(rawInput, call) {
 				const { filePath, offset, limit } = declaredInput<ReadInput>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
-				const text = await readText(store, path);
+				const resolved = await resolve({ filePath }, call, "read");
 
-				if (text === undefined) return `Error: ${path} does not exist`;
-				const lines = text.split("\n");
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
+				const content = await readText(store, path);
+
+				if (content === undefined) return "Error: " + path + " does not exist";
+				const lines = content.split("\n");
 				const start = Math.max(0, (offset ?? 1) - 1);
 				const end = limit === undefined ? lines.length : start + Math.max(0, limit);
 
 				return lines
 					.slice(start, end)
-					.map((line, index) => `${start + index + 1}: ${line}`)
+					.map((line, index) => start + index + 1 + ": " + line)
 					.join("\n");
 			},
 		},
-
 		{
 			name: "write",
-			description: "Create or overwrite a file in the workspace.",
+			description: "Create or overwrite a file. A relative path resolves from the channel project.",
 			input: objectSchema(
 				{
-					filePath: { type: "string", description: "Absolute path, or relative to the workspace" },
+					filePath: { type: "string", description: "Absolute path, or relative to the channel" },
 					content: { type: "string", description: "Full file contents" },
 				},
 				["filePath", "content"],
 			),
 			async run(rawInput, call) {
 				const { filePath, content } = declaredInput<FileInput & { content: string }>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
+				const resolved = await resolve({ filePath }, call, "write");
+
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
+
 				await writeText(store, path, content);
 
-				return `Wrote ${path} (${textToBytes(content).byteLength} bytes)`;
+				return "Wrote " + path + " (" + textToBytes(content).byteLength + " bytes)";
 			},
 		},
-
 		{
 			name: "edit",
 			description: "Replace text in an existing file. Fails if oldString is absent or ambiguous.",
@@ -135,59 +142,71 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 			),
 			async run(rawInput, call) {
 				const { filePath, oldString, newString, replaceAll } = declaredInput<EditInput>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
-				const text = await readText(store, path);
+				const resolved = await resolve({ filePath }, call, "write");
 
-				if (text === undefined) return `Error: ${path} does not exist`;
-				const count = text.split(oldString).length - 1;
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
+				const content = await readText(store, path);
 
-				if (count === 0) return `Error: oldString not found in ${path}`;
+				if (content === undefined) return "Error: " + path + " does not exist";
+				const count = content.split(oldString).length - 1;
+
+				if (count === 0) return "Error: oldString not found in " + path;
 
 				if (count > 1 && !replaceAll) {
-					return `Error: oldString appears ${count} times in ${path}; pass replaceAll`;
+					return "Error: oldString appears " + count + " times in " + path + "; pass replaceAll";
 				}
 
-				const next = replaceAll ? text.replaceAll(oldString, newString) : text.replace(oldString, newString);
+				const next = replaceAll ? content.replaceAll(oldString, newString) : content.replace(oldString, newString);
+
 				await writeText(store, path, next);
 
-				return `Edited ${path}`;
+				return "Edited " + path;
 			},
 		},
-
 		{
 			name: "list",
-			description: "List files in the workspace.",
+			description: "List files under a directory.",
 			input: objectSchema({
-				path: { type: "string", description: "Directory to list (defaults to the workspace root)" },
+				path: { type: "string", description: "Directory to list (defaults to the channel root)" },
 			}),
 			async run(rawInput, call) {
 				const { path: directory } = declaredInput<{ path?: string }>(rawInput);
-				const prefix = await resolve({ path: directory }, call, "dir");
-				const files = (await store.list(prefix)).map((entry) => entry.path);
+				const resolved = await resolve({ path: directory }, call, "read", "dir");
 
-				return files.length ? files.sort().join("\n") : `(empty: ${prefix})`;
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const prefix = resolved.path;
+				const root = options.rootForSession(call.sessionID);
+				const files = (await store.list(prefix))
+					.map((entry) => entry.path)
+					.filter(
+						(entry) =>
+							pathDenial({ serverRoot: options.serverRoot, root, path: entry, access: "read" }) === undefined,
+					);
+
+				return files.length ? files.sort().join("\n") : "(empty: " + prefix + ")";
 			},
 		},
-
 		{
 			name: "bash",
 			description:
-				"Run a shell command in the workspace (a sandboxed bash: ls, cat, grep, sed, find, mkdir, mv, rm, …).",
+				"Run a shell command in the channel project (a sandboxed bash: ls, cat, grep, sed, find, mkdir, mv, rm, …).",
 			input: objectSchema(
 				{
 					command: { type: "string", description: "The command line to run" },
-					cwd: { type: "string", description: "Working directory (defaults to the workspace root)" },
+					cwd: { type: "string", description: "Working directory (defaults to the channel root)" },
 				},
 				["command"],
 			),
-			async run(rawInput) {
+			async run(rawInput, call) {
 				const { command, cwd } = declaredInput<{ command: string; cwd?: string }>(rawInput);
-				const workingDirectory = resolvePath(WORKSPACE_ROOT, cwd ?? ".");
-				const result = await runShell(store, command, workingDirectory, WORKSPACE_ROOT);
-				const body = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
-				const suffix = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
+				const root = options.rootForSession(call.sessionID);
+				const workingDirectory = resolvePath(root, cwd ?? ".");
+				const result = await runShell(store, command, workingDirectory, root);
+				const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
+				const suffix = result.exitCode === 0 ? "" : "\n[exit " + result.exitCode + "]";
 
-				return `${body || "(no output)"}${suffix}`;
+				return (output || "(no output)") + suffix;
 			},
 		},
 	];
@@ -203,8 +222,6 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 						name: spec.name,
 						description: spec.description,
 						input: spec.input,
-						// SAFETY: the editor validates a call against `spec.input` before it
-						// reaches `execute`, so the object matches the declared schema.
 						execute: (input, context) => toolRun(spec, ctx)(input as Schema.JsonObject, context),
 					});
 				});
@@ -212,3 +229,5 @@ export function workspacePlugin(storage: DurableObjectStorage, activeSkills?: Re
 		},
 	});
 }
+
+export { fileStore };

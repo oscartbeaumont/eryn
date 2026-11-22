@@ -9,17 +9,18 @@
  * storage and its routes.
  */
 
-import { log, sessionSecret } from "../config";
-import { randomToken, sign } from "../crypto";
-import { describeError } from "../errors";
-import { resolveOrigin } from "../discord/application";
-import type { Mutable } from '../mutable.ts';
-import type { McpLink, PendingMcpAuth } from "../session/models";
-import { discover, exchangeCode, initiate, refreshTokens } from './oauth';
-import type { InitiateInput, McpDiscovery, McpTokens } from './oauth';
-import { MCP_CALLBACK_PATH, MCP_START_PATH, AUTH_TTL_MS } from "./paths";
-import { probeServer } from './probe';
-import type { ProbeOptions, ProbeResult } from './probe';
+import { log, sessionSecret } from "../config.ts";
+import { newId } from "../core/ids.ts";
+import { randomToken, sign } from "../crypto.ts";
+import { describeError } from "../errors.ts";
+import type { Mutable } from "../mutable.ts";
+import type { McpLink } from "../core/schema.ts";
+import type { PendingMcpAuth } from "./types.ts";
+import { discover, exchangeCode, initiate, refreshTokens } from "./oauth.ts";
+import type { InitiateInput, McpDiscovery, McpTokens } from "./oauth.ts";
+import { AUTH_TTL_MS, MCP_CALLBACK_PATH, MCP_START_PATH } from "./paths.ts";
+import { probeServer } from "./probe.ts";
+import type { ProbeOptions, ProbeResult } from "./probe.ts";
 
 /**
  * The slice of guild storage a link needs.
@@ -54,12 +55,11 @@ export function mcpRedirectUri(origin: string): string {
 export interface BeginAuthorizationInput {
 	store: LinkStore;
 	env: Env;
-	guildId: string;
+	serverId: string;
+	origin: string;
 	name: string;
 	url: string;
 	elicitation?: McpLink["elicitation"];
-	applicationId?: string;
-	interactionToken?: string;
 	resourceMetadataUrl?: string;
 	scope?: string;
 }
@@ -77,19 +77,11 @@ export async function beginAuthorization(
 	const secret = sessionSecret(input.env);
 
 	if (!secret) throw new Error("This deployment has no session secret, so a sign-in cannot be completed.");
-	const origin = await resolveOrigin(input.env);
-
-	if (!origin) {
-		throw new Error(
-			"This deployment does not know its public URL yet. Open its site once, then start the sign-in again.",
-		);
-	}
-
 	const discovery = await discover(input.url, input.resourceMetadataUrl);
-	const redirectUri = mcpRedirectUri(origin);
+	const redirectUri = mcpRedirectUri(input.origin);
 	const scope = input.scope ?? requestedScope(discovery);
 	const attemptId = randomToken(16);
-	const state = await sign({ guildId: input.guildId, attemptId }, secret);
+	const state = await sign({ serverId: input.serverId, attemptId }, secret);
 
 	const initiation: InitiateInput = { discovery, redirectUri, state };
 
@@ -116,17 +108,13 @@ export async function beginAuthorization(
 
 	if (input.elicitation) attempt.elicitation = input.elicitation;
 
-	if (input.applicationId) attempt.applicationId = input.applicationId;
-
-	if (input.interactionToken) attempt.interactionToken = input.interactionToken;
-
 	if (started.clientSecret) attempt.clientSecret = started.clientSecret;
 
 	if (scope) attempt.scope = scope;
 
 	await input.store.putAuthAttempt(attempt);
 
-	return { attemptId, url: started.url, startUrl: `${origin}${MCP_START_PATH}/${state}` };
+	return { attemptId, url: started.url, startUrl: `${input.origin}${MCP_START_PATH}/${state}` };
 }
 
 export interface FinishAuthorizationResult {
@@ -258,7 +246,7 @@ async function storeLink(store: LinkStore, pending: PendingMcpAuth, tokens: McpT
 	if (pending.resource) oauth.resource = pending.resource;
 
 	const link: Mutable<McpLink> = {
-		id: crypto.randomUUID(),
+		id: newId("mcp"),
 		name: pending.name,
 		url: pending.url,
 		token: tokens.accessToken,
@@ -341,7 +329,7 @@ async function refreshLinkOnce(store: LinkStore, link: McpLink): Promise<McpLink
 
 		return next;
 	} catch (error) {
-		log("session", `could not refresh the token for ${link.name}: ${describeError(error)}`);
+		log("mcp", `could not refresh the token for ${link.name}: ${describeError(error)}`);
 
 		return link;
 	}

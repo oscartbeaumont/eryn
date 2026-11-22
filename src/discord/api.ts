@@ -331,6 +331,14 @@ function idOf(result: Schema.Json | undefined, failure: string): string {
 	return id;
 }
 
+/**
+ * Content Discord will accept: an edit or interaction reply has no way to
+ * continue in a second message, so it is truncated rather than rejected.
+ */
+function withinLimit(content: string): string {
+	return content.length <= MAX_CONTENT ? content : content.slice(0, MAX_CONTENT - 1) + "…";
+}
+
 /** The JSON body of a message create or edit. */
 interface MessageBody {
 	content: string;
@@ -536,7 +544,7 @@ function messageMethods(http: DiscordTransport) {
 			content: string,
 			options: { components?: readonly DiscordComponent[]; embeds?: readonly DiscordEmbed[] } = {},
 		): Promise<void> {
-			const body: MessageBody = { content, allowed_mentions: { parse: [] } };
+			const body: MessageBody = { content: withinLimit(content), allowed_mentions: { parse: [] } };
 
 			if (options.components) body.components = options.components;
 
@@ -702,7 +710,7 @@ function interactionMethods(http: DiscordTransport) {
 			options: InteractionMessageOptions = {},
 		): Promise<void> {
 			const data: Mutable<InteractionMessageBody["data"]> = {
-				content,
+				content: withinLimit(content),
 				// Error strings and MCP text are untrusted: never let a mention
 				// token in them ping a user, role, or another bot.
 				allowed_mentions: { parse: [] },

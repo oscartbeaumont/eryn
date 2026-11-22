@@ -12,10 +12,10 @@ export default function Document(props: { children: JSX.Element }) {
 			<head>
 				<meta charset="utf-8" />
 				<meta name="viewport" content="width=device-width, initial-scale=1" />
-				<title>eryn — your personal agent in Discord</title>
+				<title>eryn — your personal agent</title>
 				<meta
 					name="description"
-					content="Mention @eryn in Discord and it opens a thread, runs the request through an agent, and streams the reply."
+					content="A hosted OpenCode agent you can reach from Discord and iMessage, with your own inference, workspace, MCP servers, and plugins."
 				/>
 				<meta name="color-scheme" content="dark" />
 				<meta name="theme-color" content="#08080a" />
@@ -24,10 +24,10 @@ export default function Document(props: { children: JSX.Element }) {
 				<link rel="apple-touch-icon" href={BRAND.appleIcon} />
 				<meta property="og:type" content="website" />
 				<meta property="og:site_name" content="eryn" />
-				<meta property="og:title" content="eryn — your personal agent in Discord" />
+				<meta property="og:title" content="eryn — your personal agent" />
 				<meta
 					property="og:description"
-					content="Mention @eryn in Discord and it opens a thread, runs the request through an agent, and streams the reply."
+					content="A hosted OpenCode agent you can reach from Discord and iMessage, with your own inference, workspace, MCP servers, and plugins."
 				/>
 				<meta property="og:url" content={`${ORIGIN}/`} />
 				<meta property="og:image" content={`${ORIGIN}${BRAND.banner}`} />

@@ -1,0 +1,1538 @@
+/**
+ * One Eryn server: settings, inference credentials, MCP links, plugins, and the
+ * OpenCode host. Messaging lives in Hub; this object only decides what the agent
+ * can do and where its files are.
+ */
+
+import { DurableObject } from "cloudflare:workers";
+import { Schema } from "effect";
+
+import { capture } from "../analytics.ts";
+import type { AnalyticsValue } from "../analytics.ts";
+import { DEFAULT_MODEL, KEYS, configuredOrigin, log, optional } from "../config.ts";
+import { newId } from "../core/ids.ts";
+import { body, failure, json } from "../core/http.ts";
+import {
+	McpLinkSchema,
+	PluginRecordSchema,
+	ProviderConnectionSchema,
+	ServerSettingsSchema,
+} from "../core/schema.ts";
+import type { InboundMessage, McpLink, PluginRecord, PublicLink } from "../core/schema.ts";
+import {
+	PermissionOverridesSchema,
+	RoleMappingSchema,
+	RoleProfileSchema,
+	ServerPolicySchema,
+	defaultPolicy,
+} from "../core/policy.ts";
+import type { ServerPolicy } from "../core/policy.ts";
+import { recordStore } from "../core/store.ts";
+import type { RecordStore } from "../core/store.ts";
+import { ORIGIN_HEADER, deployRestart } from "../deploy.ts";
+import { controlCall } from "../platform/clients.ts";
+import { describeError } from "../errors.ts";
+import { discordRest } from "../discord/api.ts";
+import { SERVER_ROOT } from "../core/paths.ts";
+import { toJsonObject } from "../json.ts";
+import { beginAuthorization, finishAuthorization, refreshLink, refreshLinks, testLink as probeLinkedServer } from "../mcp/links.ts";
+import type { LinkStore } from "../mcp/links.ts";
+import { PendingMcpAuthSchema } from "../mcp/types.ts";
+import { probeServer } from "../mcp/probe.ts";
+import type { Mutable } from "../mutable.ts";
+import { webhookMatches } from "../hub/do.ts";
+import { ServerAgent } from "./agent.ts";
+import { ChannelRecordSchema, PendingOAuthSchema } from "./models.ts";
+import type { ChannelRecord } from "./models.ts";
+import { seedServer } from "./seed.ts";
+
+const AWAKE_MS = 2 * 60_000;
+
+const InitSchema = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	ownerId: Schema.String,
+});
+
+const RenameSchema = Schema.Struct({ name: Schema.String });
+
+const ModelSchema = Schema.Struct({ model: Schema.String });
+
+const ConnectSchema = Schema.Struct({ integrationID: Schema.String, key: Schema.String });
+
+const DisconnectSchema = Schema.Struct({ integrationID: Schema.String });
+
+const LinkAddSchema = Schema.Struct({
+	name: Schema.String,
+	url: Schema.String,
+	token: Schema.optional(Schema.String),
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
+});
+
+const LinkRemoveSchema = Schema.Struct({ id: Schema.String });
+
+const LinkProbeSchema = Schema.Struct({
+	url: Schema.String,
+	token: Schema.optional(Schema.String),
+});
+
+const LinkTestSchema = Schema.Struct({ linkId: Schema.String });
+
+const LinkOauthStartSchema = Schema.Struct({
+	name: Schema.String,
+	url: Schema.String,
+	elicitation: Schema.optional(Schema.Literals(["off", "chat", "browser", "agent"])),
+	resourceMetadataUrl: Schema.optional(Schema.String),
+	scope: Schema.optional(Schema.String),
+});
+
+const LinkAttemptSchema = Schema.Struct({ attemptId: Schema.String });
+
+const LinkOauthCompleteSchema = Schema.Struct({
+	attemptId: Schema.String,
+	code: Schema.optional(Schema.String),
+	error: Schema.optional(Schema.String),
+});
+
+const PluginAddSchema = Schema.Struct({
+	name: Schema.String,
+	code: Schema.String,
+	allowNetwork: Schema.optional(Schema.Boolean),
+});
+
+const PluginRemoveSchema = Schema.Struct({ id: Schema.String });
+
+const PluginToggleSchema = Schema.Struct({ id: Schema.String, enabled: Schema.Boolean });
+
+const AttachSchema = Schema.Struct({
+	channelId: Schema.String,
+	provider: Schema.Literals(["discord", "imessage"]),
+	name: Schema.optional(Schema.String),
+	containerId: Schema.optional(Schema.String),
+});
+
+const DetachSchema = Schema.Struct({ channelId: Schema.String });
+
+const InterruptSchema = Schema.Struct({ channelId: Schema.String });
+
+const CompactSchema = Schema.Struct({ channelId: Schema.String });
+
+const AutomationSchema = Schema.Struct({
+	channelId: Schema.String,
+	automationID: Schema.String,
+});
+
+const RunCommandSchema = Schema.Struct({
+	channelId: Schema.String,
+	command: Schema.String,
+	text: Schema.String,
+});
+
+const NudgeSchema = Schema.Struct({ message: Schema.Unknown });
+
+const DiscordSchema = Schema.Struct({ guildId: Schema.String, guildName: Schema.optional(Schema.String) });
+
+const ImessageSchema = Schema.Struct({
+	apiKeyId: Schema.String,
+	apiSecret: Schema.String,
+	fromNumber: Schema.String,
+	ownerNumber: Schema.String,
+});
+
+const GuildSchema = Schema.Struct({ guildId: Schema.String });
+
+const DiscordConfirmSchema = Schema.Struct({
+	guildId: Schema.String,
+	guildName: Schema.optional(Schema.String),
+	code: Schema.String,
+	ownerDiscordId: Schema.String,
+});
+
+const ConsumeSchema = Schema.Struct({
+	channel: Schema.String,
+	text: Schema.String,
+	userId: Schema.optional(Schema.String),
+});
+
+const OAuthStartSchema = Schema.Struct({
+	integrationID: Schema.String,
+	methodID: Schema.optional(Schema.String),
+});
+
+const OAuthAttemptSchema = Schema.Struct({ attemptID: Schema.String });
+
+const OAuthStatusSchema = Schema.Struct({ integrationID: Schema.String, attemptID: Schema.String });
+
+interface LinkOauthStatusBody {
+	status: string;
+	message?: string;
+}
+
+interface LinkCompletion {
+	code?: string;
+	error?: string;
+}
+
+interface LinkOauthCompleteBody {
+	status: string;
+	message?: string;
+	link?: PublicLink;
+}
+
+interface OAuthStatusBody {
+	status: string;
+	message?: string;
+}
+
+interface OAuthCompleteRequest {
+	integrationID: string;
+	attemptID: string;
+	code?: string;
+	location: { directory: string };
+}
+
+const OAuthCompleteSchema = Schema.Struct({
+	integrationID: Schema.String,
+	attemptID: Schema.String,
+	code: Schema.optional(Schema.String),
+});
+
+const OAuthCancelSchema = Schema.Struct({
+	integrationID: Schema.String,
+	attemptID: Schema.String,
+});
+
+const FormDefinitionSchema = Schema.Struct({ approvalId: Schema.String });
+
+const FormSubmitSchema = Schema.Struct({
+	approvalId: Schema.String,
+	values: Schema.Record(Schema.String, Schema.String),
+	userId: Schema.optional(Schema.String),
+});
+
+const ApprovalSchema = Schema.Struct({
+	approvalId: Schema.String,
+	decision: Schema.Literals(["once", "always", "block"]),
+	userId: Schema.optional(Schema.String),
+});
+
+const PolicySetSchema = Schema.Struct({
+	defaultProfileId: Schema.optional(Schema.String),
+	roles: Schema.optional(Schema.Array(RoleMappingSchema)),
+	profiles: Schema.optional(Schema.Array(RoleProfileSchema)),
+	channelOverrides: Schema.optional(Schema.Record(Schema.String, PermissionOverridesSchema)),
+});
+
+/** Whether a link name is safe as an MCP server name. */
+function serverName(value: string): string {
+	return value.trim().toLowerCase().replaceAll(/[^a-z0-9._-]+/g, "-").replaceAll(/^-+|-+$/g, "").slice(0, 48);
+}
+
+function publicLink(link: McpLink): PublicLink {
+	const { token: _token, oauth: _oauth, ...rest } = link;
+
+	return rest;
+}
+
+async function sha256(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+
+	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export class Server extends DurableObject<Env> {
+	private readonly serverId: string;
+	private readonly store: RecordStore;
+	private readonly agent: ServerAgent;
+	private origin: string | undefined;
+	private restartPending = false;
+	private inFlight = 0;
+	private lastActivityAt = Date.now();
+	private readonly nudged = new Set<string>();
+
+	constructor(state: DurableObjectState, env: Env) {
+		super(state, env);
+		this.serverId = state.id.name ?? "";
+		this.store = recordStore(state.storage, env.ENCRYPTION_KEY);
+		this.agent = new ServerAgent({
+			env,
+			storage: state.storage,
+			serverId: this.serverId,
+			origin: () => this.origin,
+			servers: env.SERVER,
+			hubs: env.HUB,
+			channels: async () => await this.channels(),
+			saveChannel: async (record) => {
+				await this.store.putPlain(KEYS.channel + record.channelId, ChannelRecordSchema, record);
+			},
+			settings: async () => await this.settings(),
+			connections: async () => await this.store.listSealed(KEYS.provider, ProviderConnectionSchema),
+			links: async () => await this.linksForHost(),
+			plugins: async () => await this.store.listSealed(KEYS.plugin, PluginRecordSchema),
+		});
+	}
+
+	async fetch(request: Request): Promise<Response> {
+		const path = new URL(request.url).pathname;
+		const served = request.headers.get(ORIGIN_HEADER);
+
+		if (!this.origin) this.origin = await this.ctx.storage.get<string>("server:origin");
+
+		if (served) {
+			this.origin = served.replace(/\/$/, "");
+			await this.ctx.storage.put("server:origin", this.origin);
+		}
+
+		this.inFlight += 1;
+
+		try {
+			return await this.route(path, request);
+		} catch (error) {
+			log("server", "route " + path + " failed: " + describeError(error));
+
+			return failure("The server could not answer.", 500);
+		} finally {
+			this.inFlight -= 1;
+			this.lastActivityAt = Date.now();
+
+			if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
+		}
+	}
+
+	private async route(path: string, request: Request): Promise<Response> {
+		if (path === "/init" && request.method === "POST") return await this.init(request);
+		if (path === "/wake" && request.method === "POST") return await this.wake();
+		if (path === "/status" && request.method === "POST") return await this.status();
+		if (path === "/rename" && request.method === "POST") return await this.rename(request);
+		if (path === "/model" && request.method === "POST") return await this.setModel(request);
+		if (path === "/integrations" && request.method === "POST") return await this.integrations();
+		if (path === "/models" && request.method === "POST") return await this.models();
+		if (path === "/connect" && request.method === "POST") return await this.connectProvider(request);
+		if (path === "/inference/oauth/start" && request.method === "POST") return await this.oauthStart(request);
+		if (path === "/inference/oauth/status" && request.method === "POST") return await this.oauthStatus(request);
+		if (path === "/inference/oauth/complete" && request.method === "POST") return await this.oauthComplete(request);
+		if (path === "/inference/oauth/cancel" && request.method === "POST") return await this.oauthCancel(request);
+		if (path === "/inference/oauth" && request.method === "POST") return await this.oauthAttempt(request);
+		if (path === "/disconnect" && request.method === "POST") return await this.disconnect(request);
+		if (path === "/links" && request.method === "POST") return await this.links();
+		if (path === "/link/add" && request.method === "POST") return await this.addLink(request);
+		if (path === "/link/remove" && request.method === "POST") return await this.removeLink(request);
+		if (path === "/link/probe" && request.method === "POST") return await this.probeLink(request);
+		if (path === "/link/test" && request.method === "POST") return await this.testLink(request);
+		if (path === "/link/oauth/start" && request.method === "POST") return await this.oauthLinkStart(request);
+		if (path === "/link/oauth/url" && request.method === "POST") return await this.oauthLinkUrl(request);
+		if (path === "/link/oauth/status" && request.method === "POST") return await this.oauthLinkStatus(request);
+		if (path === "/link/oauth/complete" && request.method === "POST") return await this.oauthLinkComplete(request);
+		if (path === "/plugins" && request.method === "POST") return await this.plugins();
+		if (path === "/plugin/add" && request.method === "POST") return await this.addPlugin(request);
+		if (path === "/plugin/remove" && request.method === "POST") return await this.removePlugin(request);
+		if (path === "/plugin/toggle" && request.method === "POST") return await this.togglePlugin(request);
+		if (path === "/channels" && request.method === "POST") return await this.channelsRoute();
+		if (path === "/channels/attach" && request.method === "POST") return await this.attach(request);
+		if (path === "/channels/detach" && request.method === "POST") return await this.detach(request);
+		if (path === "/interrupt" && request.method === "POST") return await this.interrupt(request);
+		if (path === "/compact" && request.method === "POST") return await this.compact(request);
+		if (path === "/command" && request.method === "POST") return await this.runCommand(request);
+		if (path === "/commands" && request.method === "POST") return await this.commandsRoute(request);
+		if (path === "/automations" && request.method === "POST") return await this.automationsRoute();
+		if (path === "/automation/pause" && request.method === "POST") return await this.automationAction(request, "pause");
+		if (path === "/automation/resume" && request.method === "POST") return await this.automationAction(request, "resume");
+		if (path === "/automation/delete" && request.method === "POST") return await this.automationAction(request, "delete");
+		if (path === "/approval" && request.method === "POST") return await this.approval(request);
+		if (path === "/form/definition" && request.method === "POST") return await this.formDefinition(request);
+		if (path === "/form/submit" && request.method === "POST") return await this.formSubmit(request);
+		if (path === "/consume" && request.method === "POST") return await this.consume(request);
+		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
+		if (path === "/messaging" && request.method === "POST") return await this.messaging();
+		if (path === "/messaging/discord" && request.method === "POST") return await this.setDiscord(request);
+		if (path === "/messaging/discord/confirm" && request.method === "POST")
+			return await this.confirmDiscord(request);
+		if (path === "/messaging/imessage" && request.method === "POST") return await this.setImessage(request);
+		if (path === "/policy" && request.method === "POST") return await this.getPolicy();
+		if (path === "/policy/set" && request.method === "POST") return await this.setPolicy(request);
+		if (path === "/discord/roles" && request.method === "POST") return await this.discordRoles(request);
+		if (path === "/webhook/sendblue" && request.method === "POST") return await this.sendblueWebhook(request);
+		if (path === "/discord/guilds" && request.method === "POST") return await this.discordGuilds();
+		if (path === "/discord/channels" && request.method === "POST") return await this.discordChannels(request);
+		if (path === "/reset" && request.method === "POST") return await this.reset();
+
+		return failure("Not found.", 404);
+	}
+
+	async alarm(): Promise<void> {
+		if (!this.origin) this.origin = await this.ctx.storage.get<string>("server:origin");
+
+		if (this.restartPending) {
+			// A turn may still be running inside the host. Wait for the object to
+			// be quiet before resetting into the new deploy.
+			if (this.inFlight > 0 || (this.agent.hasHost() && Date.now() - this.lastActivityAt < 5 * 60_000)) {
+				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+
+				return;
+			}
+
+			await this.agent.close().catch(() => undefined);
+			this.ctx.abort("deploy changed", { retryAlarm: true });
+
+			return;
+		}
+
+		if ((await this.channels()).length > 0) {
+			await this.agent.wake().catch((error: unknown) =>
+				log("server", "could not wake the host: " + describeError(error)),
+			);
+		}
+
+		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
+	}
+
+	// --- State ---------------------------------------------------------------
+
+	private async settings() {
+		return (
+			(await this.store.plain(KEYS.server, ServerSettingsSchema)) ?? {
+				id: this.serverId,
+				name: "Eryn",
+				ownerId: "",
+				model: DEFAULT_MODEL,
+				createdAt: 0,
+				updatedAt: 0,
+			}
+		);
+	}
+
+	private linkStore(): LinkStore {
+		return {
+			links: async () => await this.store.listSealed(KEYS.link, McpLinkSchema),
+			getLink: async (id) => await this.store.sealed(KEYS.link + id, McpLinkSchema),
+			putLink: async (link) => {
+				await this.store.putSealed(KEYS.link + link.id, McpLinkSchema, link);
+			},
+			authAttempts: async () => await this.store.listSealed(KEYS.mcpAuth, PendingMcpAuthSchema),
+			putAuthAttempt: async (attempt) => {
+				await this.store.putSealed(KEYS.mcpAuth + attempt.attemptId, PendingMcpAuthSchema, attempt);
+			},
+			removeAuthAttempt: async (id) => {
+				await this.store.remove(KEYS.mcpAuth + id);
+			},
+		};
+	}
+
+	private async linksForHost(): Promise<McpLink[]> {
+		const links = await this.store.listSealed(KEYS.link, McpLinkSchema);
+
+		return await refreshLinks(this.linkStore(), links);
+	}
+
+	private async channels(): Promise<ChannelRecord[]> {
+		const channels = await this.store.listPlain(KEYS.channel, ChannelRecordSchema);
+
+		return channels.sort((a, b) => a.createdAt - b.createdAt);
+	}
+
+	private async hub(path: string, payload: unknown): Promise<Schema.JsonObject | undefined> {
+		const response = await this.env.HUB.get(this.env.HUB.idFromName(this.serverId)).fetch(
+			"https://hub.internal" + path,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(payload),
+			},
+		);
+
+		return toJsonObject((await response.json().catch(() => undefined)) as never);
+	}
+
+	private async gateway(path: string, payload: unknown): Promise<boolean> {
+		const response = await this.env.GATEWAY.get(this.env.GATEWAY.idFromName("gateway")).fetch(
+			"https://gateway.internal" + path,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(payload),
+			},
+		);
+
+		if (!response.ok) log("server", "gateway returned HTTP " + response.status);
+
+		return response.ok;
+	}
+
+	/** Coarse product analytics for this server; never blocks the request. */
+	private track(event: string, properties: Record<string, AnalyticsValue> = {}): void {
+		this.ctx.waitUntil(capture(this.env, event, properties, { serverId: this.serverId }));
+	}
+
+	private async init(request: Request): Promise<Response> {
+		const input = await body(request, InitSchema);
+
+		if (input instanceof Response) return input;
+		const now = Date.now();
+		const existing = await this.store.plain(KEYS.server, ServerSettingsSchema);
+		const settings = {
+			id: input.id,
+			name: input.name,
+			ownerId: input.ownerId,
+			model: existing?.model ?? DEFAULT_MODEL,
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+		};
+
+		await this.store.putPlain(KEYS.server, ServerSettingsSchema, settings);
+		await seedServer(this.ctx.storage, this.serverId);
+
+		if (!(await this.store.plain(KEYS.policy, ServerPolicySchema))) {
+			await this.store.putPlain(KEYS.policy, ServerPolicySchema, defaultPolicy());
+		}
+
+		await this.pushPolicy();
+		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
+
+		return json({ server: settings });
+	}
+
+	private async wake(): Promise<Response> {
+		await this.pushPolicy().catch((error: unknown) => log("server", "could not push policy: " + describeError(error)));
+		await this.agent.wake().catch((error: unknown) => log("server", describeError(error)));
+		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
+
+		return json({ ok: true, ready: this.agent.ready() });
+	}
+
+	private async status(): Promise<Response> {
+		const settings = await this.settings();
+		const connections = await this.store.listSealed(KEYS.provider, ProviderConnectionSchema);
+		const links = await this.store.listSealed(KEYS.link, McpLinkSchema);
+		const plugins = await this.store.listSealed(KEYS.plugin, PluginRecordSchema);
+		const channels = await this.channels();
+
+		if (channels.length > 0 && !this.agent.hasHost()) {
+			await this.agent
+				.wake()
+				.catch((error: unknown) => log("server", "could not start the host: " + describeError(error)));
+		}
+
+		let mcp: Schema.Json = [];
+
+		if (this.agent.hasHost()) {
+			try {
+				const host = await this.agent.ensureHost();
+				const listed = await host.mcp.list();
+
+				mcp = listed.data;
+			} catch (error) {
+				log("server", "could not list MCP servers: " + describeError(error));
+			}
+		}
+
+		const messaging: Mutable<Schema.JsonObject> = { ...(await this.hub("/messaging/status", {})) };
+		const imessage = await this.ctx.storage.get<{ webhookSecret?: string }>("messaging:imessage");
+
+		if (imessage?.webhookSecret && this.origin) {
+			messaging.webhookUrl =
+				this.origin + "/webhooks/sendblue/" + this.serverId + "?token=" + imessage.webhookSecret;
+		}
+
+		const policy = await this.policy();
+
+		this.ctx.waitUntil(
+			this.pushPolicy(policy).catch((error: unknown) =>
+				log("server", "could not push policy: " + describeError(error)),
+			),
+		);
+
+		return json({
+			server: settings,
+			ready: this.agent.hasHost(),
+			origin: this.origin ?? null,
+			providers: connections.map((entry) => ({
+				integrationID: entry.integrationID,
+				method: entry.method,
+			})),
+			links: links.map(publicLink),
+			plugins: plugins.map((plugin) => {
+				const { code: _code, ...rest } = plugin;
+
+				return rest;
+			}),
+			channels,
+			messaging,
+			mcp,
+			policy,
+		});
+	}
+
+	private async rename(request: Request): Promise<Response> {
+		const input = await body(request, RenameSchema);
+
+		if (input instanceof Response) return input;
+		const settings = await this.settings();
+		const next = { ...settings, name: input.name.trim().slice(0, 80) || settings.name, updatedAt: Date.now() };
+
+		await this.store.putPlain(KEYS.server, ServerSettingsSchema, next);
+		this.track("server_renamed");
+
+		return json({ server: next });
+	}
+
+	private async setModel(request: Request): Promise<Response> {
+		const input = await body(request, ModelSchema);
+
+		if (input instanceof Response) return input;
+		const settings = await this.settings();
+
+		await this.store.putPlain(KEYS.server, ServerSettingsSchema, {
+			...settings,
+			model: input.model,
+			updatedAt: Date.now(),
+		});
+		await this.agent.refreshModels().catch(() => undefined);
+		const slash = input.model.indexOf("/");
+
+		this.track("model_selected", {
+			provider: slash > 0 ? input.model.slice(0, slash) : undefined,
+			model: input.model,
+		});
+
+		return json({ ok: true });
+	}
+
+	// --- Inference -----------------------------------------------------------
+
+	private async integrations(): Promise<Response> {
+		const host = await this.agent.ensureHost();
+		const listed = await host.integration.list({ location: { directory: SERVER_ROOT } });
+
+		return json({ integrations: Array.isArray(listed.data) ? listed.data : [] });
+	}
+
+	private async models(): Promise<Response> {
+		const host = await this.agent.ensureHost();
+		const listed = await host.model.list({ location: { directory: SERVER_ROOT } });
+
+		return json({ models: Array.isArray(listed.data) ? listed.data : [] });
+	}
+
+	private async connectProvider(request: Request): Promise<Response> {
+		const input = await body(request, ConnectSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			await host.integration.connect.key({
+				integrationID: input.integrationID,
+				key: input.key,
+				location: { directory: SERVER_ROOT },
+			});
+		} catch (error) {
+			return failure("That key was not accepted: " + describeError(error));
+		}
+
+		await this.store.putSealed(KEYS.provider + input.integrationID, ProviderConnectionSchema, {
+			integrationID: input.integrationID,
+			method: "key",
+			key: input.key,
+		});
+		this.track("inference_connected", { provider: input.integrationID });
+
+		return json({ ok: true });
+	}
+
+	private async disconnect(request: Request): Promise<Response> {
+		const input = await body(request, DisconnectSchema);
+
+		if (input instanceof Response) return input;
+		await this.store.remove(KEYS.provider + input.integrationID);
+		// Remove the credential from the host too. Disconnecting has to revoke,
+		// not just forget: the sealed key otherwise keeps working.
+		await this.agent.forgetCredential(input.integrationID).catch((error: unknown) => {
+			log("server", "could not forget the credential: " + describeError(error));
+		});
+		this.track("inference_disconnected", { provider: input.integrationID });
+
+		return json({ ok: true });
+	}
+
+	// --- Inference OAuth ------------------------------------------------------
+
+	private async oauthAttempt(request: Request): Promise<Response> {
+		const input = await body(request, OAuthAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const pending = await this.store.plain(KEYS.pendingOAuth, PendingOAuthSchema);
+
+		if (!pending || pending.attemptID !== input.attemptID) return failure("That sign-in is no longer available.", 404);
+
+		return json({ attempt: pending });
+	}
+
+	private async oauthStart(request: Request): Promise<Response> {
+		const input = await body(request, OAuthStartSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const attempt = await host.integration.oauth.connect({
+				integrationID: input.integrationID,
+				methodID: input.methodID ?? "oauth",
+				location: { directory: SERVER_ROOT },
+			});
+			const pending = {
+				integrationID: input.integrationID,
+				attemptID: attempt.data.attemptID,
+				url: attempt.data.url,
+				instructions: attempt.data.instructions,
+				mode: attempt.data.mode,
+				createdAt: Date.now(),
+			};
+
+			await this.store.putPlain(KEYS.pendingOAuth, PendingOAuthSchema, pending);
+
+			return json({ attempt: pending });
+		} catch (error) {
+			return failure("That sign-in could not be started: " + describeError(error));
+		}
+	}
+
+	private async oauthStatus(request: Request): Promise<Response> {
+		const input = await body(request, OAuthStatusSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const status = await host.integration.oauth.status({
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			});
+
+			if (status.data.status === "complete") await this.finishOAuth(input.integrationID);
+			const body: OAuthStatusBody = { status: status.data.status };
+
+			if (status.data.status === "failed") body.message = status.data.message;
+
+			return json(body);
+		} catch (error) {
+			return failure("That sign-in status could not be read: " + describeError(error));
+		}
+	}
+
+	private async oauthComplete(request: Request): Promise<Response> {
+		const input = await body(request, OAuthCompleteSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		try {
+			const request: OAuthCompleteRequest = {
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			};
+
+			if (input.code) request.code = input.code;
+			await host.integration.oauth.complete(request);
+			await this.finishOAuth(input.integrationID);
+
+			return json({ ok: true });
+		} catch (error) {
+			return failure("That sign-in could not be completed: " + describeError(error));
+		}
+	}
+
+	private async oauthCancel(request: Request): Promise<Response> {
+		const input = await body(request, OAuthCancelSchema);
+
+		if (input instanceof Response) return input;
+		const host = await this.agent.ensureHost();
+
+		await host.integration.oauth
+			.cancel({
+				integrationID: input.integrationID,
+				attemptID: input.attemptID,
+				location: { directory: SERVER_ROOT },
+			})
+			.catch(() => undefined);
+		await this.store.remove(KEYS.pendingOAuth);
+
+		return json({ ok: true });
+	}
+
+	private async finishOAuth(integrationID: string): Promise<void> {
+		await this.store.putSealed(KEYS.provider + integrationID, ProviderConnectionSchema, {
+			integrationID,
+			method: "oauth",
+			key: "",
+		});
+		await this.store.remove(KEYS.pendingOAuth);
+		this.track("inference_connected", { provider: integrationID, method: "oauth" });
+	}
+
+	// --- MCP links -----------------------------------------------------------
+
+	private async links(): Promise<Response> {
+		const links = await this.linksForHost();
+
+		return json({ links: links.map(publicLink) });
+	}
+
+	private async addLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkAddSchema);
+
+		if (input instanceof Response) return input;
+		const name = serverName(input.name);
+
+		if (!name || name === "eryn") return failure("Choose a name other than \"eryn\".");
+
+		try {
+			const url = new URL(input.url);
+
+			if (url.protocol !== "https:") return failure("An MCP server must use HTTPS.");
+		} catch {
+			return failure("That URL is not valid.");
+		}
+
+		const probe = await probeServer({ url: input.url, token: input.token });
+
+		if (!probe.ok && probe.needsAuth && !input.token) {
+			const origin = this.origin ?? configuredOrigin(this.env);
+
+			if (!origin) return failure("Eryn does not know its public URL yet. Open the site once.");
+
+			try {
+				const request: Parameters<typeof beginAuthorization>[0] = {
+					store: this.linkStore(),
+					env: this.env,
+					serverId: this.serverId,
+					origin,
+					name,
+					url: input.url,
+				};
+
+				if (input.elicitation) request.elicitation = input.elicitation;
+				if (probe.resourceMetadataUrl) request.resourceMetadataUrl = probe.resourceMetadataUrl;
+				if (probe.scope) request.scope = probe.scope;
+				const started = await beginAuthorization(request);
+
+				this.track("mcp_oauth_started");
+
+				return json({ ok: true, oauth: started });
+			} catch (error) {
+				return failure(describeError(error));
+			}
+		}
+
+		if (!probe.ok) {
+			return failure(probe.error ?? "The MCP server did not answer.");
+		}
+
+		const link: McpLink = {
+			id: newId("mcp"),
+			name,
+			url: input.url,
+			token: input.token,
+			elicitation: input.elicitation,
+			createdAt: Date.now(),
+		};
+
+		await this.store.putSealed(KEYS.link + link.id, McpLinkSchema, link);
+		this.track("mcp_link_added");
+
+		return json({ ok: true, tools: probe.tools });
+	}
+
+	private async probeLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkProbeSchema);
+
+		if (input instanceof Response) return input;
+
+		return json(await probeServer({ url: input.url, token: input.token }));
+	}
+
+	private async testLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkTestSchema);
+
+		if (input instanceof Response) return input;
+		const link = await this.store.sealed(KEYS.link + input.linkId, McpLinkSchema);
+
+		if (!link) return failure("That link does not exist.", 404);
+		const refreshed = await refreshLink(this.linkStore(), link);
+
+		return json(await probeLinkedServer(refreshed));
+	}
+
+	private async oauthLinkStart(request: Request): Promise<Response> {
+		const input = await body(request, LinkOauthStartSchema);
+
+		if (input instanceof Response) return input;
+		const name = serverName(input.name);
+		const origin = this.origin ?? configuredOrigin(this.env);
+
+		if (!name || name === "eryn") return failure("Choose a name other than \"eryn\".");
+		if (!origin) return failure("Eryn does not know its public URL yet. Open the site once.");
+
+		try {
+			const request: Parameters<typeof beginAuthorization>[0] = {
+				store: this.linkStore(),
+				env: this.env,
+				serverId: this.serverId,
+				origin,
+				name,
+				url: input.url,
+			};
+
+			if (input.elicitation) request.elicitation = input.elicitation;
+			if (input.resourceMetadataUrl) request.resourceMetadataUrl = input.resourceMetadataUrl;
+			if (input.scope) request.scope = input.scope;
+			const started = await beginAuthorization(request);
+
+			this.track("mcp_oauth_started");
+
+			return json(started);
+		} catch (error) {
+			return failure(describeError(error));
+		}
+	}
+
+	private async oauthLinkUrl(request: Request): Promise<Response> {
+		const input = await body(request, LinkAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt?.authorizationUrl || attempt.status !== "pending") {
+			return failure("That sign-in is no longer available.", 404);
+		}
+
+		return json({ url: attempt.authorizationUrl });
+	}
+
+	private async oauthLinkStatus(request: Request): Promise<Response> {
+		const input = await body(request, LinkAttemptSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt) return failure("That sign-in is no longer available.", 404);
+
+		const payload: LinkOauthStatusBody = { status: attempt.status };
+
+		if (attempt.message) payload.message = attempt.message;
+
+		return json(payload);
+	}
+
+	private async oauthLinkComplete(request: Request): Promise<Response> {
+		const input = await body(request, LinkOauthCompleteSchema);
+
+		if (input instanceof Response) return input;
+		const attempt = await this.store.sealed(KEYS.mcpAuth + input.attemptId, PendingMcpAuthSchema);
+
+		if (!attempt) return failure("That sign-in is no longer available.", 404);
+
+		const completion: LinkCompletion = {};
+
+		if (input.code) completion.code = input.code;
+		if (input.error) completion.error = input.error;
+		const result = await finishAuthorization(this.linkStore(), attempt, completion);
+
+		if (result.link) {
+			this.track("mcp_link_added");
+			this.track("mcp_oauth_completed");
+		}
+		const payload: LinkOauthCompleteBody = { status: result.status };
+
+		if (result.message) payload.message = result.message;
+		if (result.link) payload.link = publicLink(result.link);
+
+		return json(payload);
+	}
+
+	private async removeLink(request: Request): Promise<Response> {
+		const input = await body(request, LinkRemoveSchema);
+
+		if (input instanceof Response) return input;
+		await this.store.remove(KEYS.link + input.id);
+		this.track("mcp_link_removed");
+
+		return json({ ok: true });
+	}
+
+	// --- Plugins -------------------------------------------------------------
+
+	private async plugins(): Promise<Response> {
+		const plugins = await this.store.listSealed(KEYS.plugin, PluginRecordSchema);
+
+		return json({
+			plugins: plugins.map((plugin) => {
+				const { code: _code, ...rest } = plugin;
+
+				return rest;
+			}),
+		});
+	}
+
+	private async addPlugin(request: Request): Promise<Response> {
+		const input = await body(request, PluginAddSchema);
+
+		if (input instanceof Response) return input;
+		const now = Date.now();
+		const version = (await sha256(input.code + (input.allowNetwork ? ":network" : ""))).slice(0, 16);
+		const plugin: PluginRecord = {
+			id: newId("plg"),
+			name: input.name.trim().slice(0, 60) || "Plugin",
+			version,
+			enabled: true,
+			allowNetwork: input.allowNetwork === true,
+			code: input.code,
+			createdAt: now,
+			updatedAt: now,
+		};
+
+		await this.store.putSealed(KEYS.plugin + plugin.id, PluginRecordSchema, plugin);
+		this.track("plugin_added", { allow_network: plugin.allowNetwork });
+
+		return json({ ok: true, plugin: { ...plugin, code: undefined } });
+	}
+
+	private async removePlugin(request: Request): Promise<Response> {
+		const input = await body(request, PluginRemoveSchema);
+
+		if (input instanceof Response) return input;
+		await this.store.remove(KEYS.plugin + input.id);
+		this.track("plugin_removed");
+
+		return json({ ok: true });
+	}
+
+	private async togglePlugin(request: Request): Promise<Response> {
+		const input = await body(request, PluginToggleSchema);
+
+		if (input instanceof Response) return input;
+		const key = KEYS.plugin + input.id;
+		const plugin = await this.store.sealed(key, PluginRecordSchema);
+
+		if (!plugin) return failure("That plugin does not exist.", 404);
+		await this.store.putSealed(key, PluginRecordSchema, {
+			...plugin,
+			enabled: input.enabled,
+			updatedAt: Date.now(),
+		});
+		this.track("plugin_toggled", { enabled: input.enabled });
+
+		return json({ ok: true });
+	}
+
+	// --- Channels ------------------------------------------------------------
+
+	private async channelsRoute(): Promise<Response> {
+		const messaging = await this.hub("/channels", {});
+
+		return json({
+			channels: Array.isArray(messaging?.channels) ? messaging.channels : [],
+			projects: await this.channels(),
+		});
+	}
+
+	private async attach(request: Request): Promise<Response> {
+		const input = await body(request, AttachSchema);
+
+		if (input instanceof Response) return input;
+		await this.hub("/bind", {
+			provider: input.provider,
+			externalId: input.channelId,
+			name: input.name,
+			containerId: input.containerId,
+			source: "manual",
+		});
+		const record = await this.agent.attachChannel({
+			channelId: input.channelId,
+			provider: input.provider,
+			name: input.name,
+			containerId: input.containerId,
+			createdAt: Date.now(),
+		});
+
+		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
+		this.track("channel_attached", { provider: input.provider });
+
+		return json({ ok: true, channel: record });
+	}
+
+	private async detach(request: Request): Promise<Response> {
+		const input = await body(request, DetachSchema);
+
+		if (input instanceof Response) return input;
+		const record = await this.store.plain(KEYS.channel + input.channelId, ChannelRecordSchema);
+
+		await this.store.remove(KEYS.channel + input.channelId);
+		await this.hub("/unbind", { id: input.channelId });
+
+		if (record) await this.agent.detach(record).catch(() => undefined);
+		this.track("channel_detached", { provider: record?.provider });
+
+		return json({ ok: true });
+	}
+
+	private async compact(request: Request): Promise<Response> {
+		const input = await body(request, CompactSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ ok: await this.agent.compact(input.channelId) });
+	}
+
+	private async runCommand(request: Request): Promise<Response> {
+		const input = await body(request, RunCommandSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.command(input.channelId, input.command, input.text),
+		});
+	}
+
+	private async commandsRoute(request: Request): Promise<Response> {
+		const input = await body(request, CompactSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ commands: await this.agent.commands(input.channelId) });
+	}
+
+	private async automationsRoute(): Promise<Response> {
+		const host = await this.agent.ensureHost();
+		const channels = await this.channels();
+		const automations: Array<{
+			channelId: string;
+			channelName?: string;
+			id: string;
+			name: string;
+			status: string;
+			nextDueAt?: number;
+			runCount: number;
+		}> = [];
+
+		for (const channel of channels) {
+			if (!channel.sessionID) continue;
+			const listed = await host.experimental.automation
+				.list({ sessionID: channel.sessionID })
+				.catch(() => []);
+
+			for (const automation of listed) {
+				const entry: (typeof automations)[number] = {
+					channelId: channel.channelId,
+					id: automation.id,
+					name: automation.name,
+					status: automation.status,
+					runCount: automation.runCount,
+				};
+
+				if (channel.name) entry.channelName = channel.name;
+				if (automation.nextDueAt !== undefined) entry.nextDueAt = automation.nextDueAt;
+				automations.push(entry);
+			}
+		}
+
+		return json({ automations });
+	}
+
+	private async automationAction(request: Request, action: "pause" | "resume" | "delete"): Promise<Response> {
+		const input = await body(request, AutomationSchema);
+
+		if (input instanceof Response) return input;
+		const channel = await this.store.plain(KEYS.channel + input.channelId, ChannelRecordSchema);
+
+		if (!channel?.sessionID) return failure("That conversation has no session.", 404);
+		const host = await this.agent.ensureHost();
+
+		try {
+			if (action === "pause") {
+				await host.experimental.automation.pause({ automationID: input.automationID });
+			} else if (action === "resume") {
+				await host.experimental.automation.resume({ automationID: input.automationID });
+			} else {
+				await host.experimental.automation.delete({ automationID: input.automationID });
+			}
+
+			return json({ ok: true });
+		} catch (error) {
+			return failure(describeError(error));
+		}
+	}
+
+	private async interrupt(request: Request): Promise<Response> {
+		const input = await body(request, InterruptSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ ok: await this.agent.interrupt(input.channelId) });
+	}
+
+	private async formDefinition(request: Request): Promise<Response> {
+		const input = await body(request, FormDefinitionSchema);
+
+		if (input instanceof Response) return input;
+		const definition = this.agent.formDefinition(input.approvalId);
+
+		if (!definition) return failure("That form is no longer available.", 404);
+
+		return json(definition);
+	}
+
+	private async formSubmit(request: Request): Promise<Response> {
+		const input = await body(request, FormSubmitSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.submitForm(input.approvalId, input.values, input.userId),
+		});
+	}
+
+	private async consume(request: Request): Promise<Response> {
+		const input = await body(request, ConsumeSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ consumed: await this.agent.consumeText(input.channel, input.text, input.userId) });
+	}
+
+	private async approval(request: Request): Promise<Response> {
+		const input = await body(request, ApprovalSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.replyApproval(input.approvalId, input.decision, input.userId),
+		});
+	}
+
+	/** A Gateway or webhook nudge, so a cold object can catch the message. */
+	private async nudge(request: Request): Promise<Response> {
+		const input = await body(request, NudgeSchema);
+
+		if (input instanceof Response) return input;
+		// SAFETY: the only caller is this deployment, and an InboundMessage was
+		// validated on the way into Hub before it got here.
+		const message = input.message as InboundMessage;
+
+		if (!message || typeof message.channel !== "string") return failure("Bad message.");
+
+		if (this.nudged.has(message.id)) return json({ ok: true, prompted: false });
+		this.nudged.add(message.id);
+
+		if (this.nudged.size > 500) {
+			const first = this.nudged.values().next().value;
+
+			if (first) this.nudged.delete(first);
+		}
+
+		try {
+			// An approval or form answer is not a new request for the agent.
+			if (message.text && (await this.agent.consumeText(message.channel, message.text, message.author?.id))) {
+				return json({ ok: true, prompted: false, consumed: true });
+			}
+
+			const prompted = await this.agent.prompt(message.channel, message);
+
+			return json({ ok: true, prompted });
+		} catch (error) {
+			log("server", "nudge failed: " + describeError(error));
+
+			return json({ ok: false });
+		}
+	}
+
+	// --- Messaging configuration ---------------------------------------------
+
+	private async messaging(): Promise<Response> {
+		const status = (await this.hub("/messaging/status", {})) ?? {};
+		const config = await this.ctx.storage.get<{ webhookSecret?: string }>("messaging:imessage");
+		const response: Mutable<Schema.JsonObject> = { ...status };
+
+		if (config?.webhookSecret && this.origin) {
+			response.webhookUrl =
+				this.origin + "/webhooks/sendblue/" + this.serverId + "?token=" + config.webhookSecret;
+		}
+
+		return json(response);
+	}
+
+	/**
+	 * Start binding a guild.
+	 *
+	 * The bot token is deployment-wide, so "which guild" is not proof of
+	 * anything. Hand back a code instead; the guild is bound only once someone
+	 * with Manage Server runs `/eryn claim` inside it.
+	 */
+	private async setDiscord(request: Request): Promise<Response> {
+		const input = await body(request, DiscordSchema);
+
+		if (input instanceof Response) return input;
+		const claim = await controlCall(this.env, "/claim/put", {
+			serverId: this.serverId,
+			guildId: input.guildId,
+		});
+
+		if (!claim.ok || typeof claim.data.code !== "string") {
+			return failure("Could not start the Discord claim.", 502);
+		}
+
+		return json({ ok: true, claim: claim.data.code, guildId: input.guildId });
+	}
+
+	private async confirmDiscord(request: Request): Promise<Response> {
+		const input = await body(request, DiscordConfirmSchema);
+
+		if (input instanceof Response) return input;
+		const claim = await controlCall(this.env, "/claim/get", { code: input.code });
+
+		if (!claim.ok || claim.data.guildId !== input.guildId) {
+			return failure("That claim is not valid for this server.", 400);
+		}
+
+		await controlCall(this.env, "/claim/drop", { code: input.code }).catch(() => undefined);
+		await this.hub("/messaging", {
+			config: { kind: "discord", guildId: input.guildId, guildName: input.guildName },
+		});
+		const connected = await this.gateway("/register", { guildId: input.guildId, serverId: this.serverId });
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+		const guild = await rest.guildInfo(input.guildId).catch(() => undefined);
+
+		// The person who ran the claim is the authority, not whoever happens to
+		// own the guild: a manager setting Eryn up is the intended case.
+		const policy = await this.policy();
+
+		if (policy.ownerDiscordId !== input.ownerDiscordId) {
+			await this.store.putPlain(KEYS.policy, ServerPolicySchema, {
+				...policy,
+				ownerDiscordId: input.ownerDiscordId,
+				updatedAt: Date.now(),
+			});
+		}
+		// Keep the guild owner too, so an ownership change is visible.
+		if (guild?.ownerId && guild.ownerId !== input.ownerDiscordId) {
+			log("server", "guild owner is " + guild.ownerId + ", bound by " + input.ownerDiscordId);
+		}
+
+		await this.pushPolicy();
+		if (connected) this.track("discord_connected");
+
+		return json({ ok: true });
+	}
+
+	private async setImessage(request: Request): Promise<Response> {
+		const input = await body(request, ImessageSchema);
+
+		if (input instanceof Response) return input;
+		// Keep the existing secret: rotating it would break the webhook already
+		// registered with SendBlue, and the agent would silently stop receiving.
+		const stored = await this.ctx.storage.get<{ webhookSecret?: string }>("messaging:imessage");
+		const secret = stored?.webhookSecret ?? newId("whk", 24);
+
+		await this.hub("/messaging", {
+			config: {
+				kind: "imessage",
+				apiKeyId: input.apiKeyId,
+				apiSecret: input.apiSecret,
+				fromNumber: input.fromNumber,
+				ownerNumber: input.ownerNumber,
+				webhookSecret: secret,
+			},
+		});
+		await this.ctx.storage.put("messaging:imessage", { webhookSecret: secret });
+		this.track("imessage_connected");
+
+		return json({ ok: true, webhookSecret: secret });
+	}
+
+	/** Receive a SendBlue message webhook for this server. */
+	private async sendblueWebhook(request: Request): Promise<Response> {
+		const stored = await this.ctx.storage.get<{ webhookSecret?: string }>("messaging:imessage");
+		const token = request.headers.get("x-eryn-token") ?? "";
+
+		if (!stored?.webhookSecret || !webhookMatches(stored.webhookSecret, token)) {
+			return failure("Bad webhook token.", 401);
+		}
+
+		const payload = toJsonObject((await request.json().catch(() => undefined)) as never);
+
+		if (!payload || payload.is_outbound === true) return json({ ok: true, ignored: true });
+		const content = typeof payload.content === "string" ? payload.content : "";
+		const from = typeof payload.from_number === "string" ? payload.from_number : "";
+		const group = typeof payload.group_id === "string" ? payload.group_id : "";
+		const media = typeof payload.media_url === "string" ? payload.media_url : "";
+
+		if (!content && !media) return json({ ok: true, ignored: true });
+		const message: InboundMessage = {
+			id: typeof payload.message_handle === "string" ? payload.message_handle : newId("msg"),
+			provider: "imessage",
+			// A group is a different send endpoint, so keep the distinction.
+			channel: group ? "group:" + group : from,
+			author: { id: from || "unknown", name: from || "unknown" },
+			text: content,
+			attachments: media ? [{ url: media }] : [],
+			mentions: [],
+			createdAt: Date.now(),
+			channelName: group || from,
+		};
+
+		if (message.text && (await this.agent.consumeText(message.channel, message.text, message.author.id))) {
+			return json({ ok: true, consumed: true });
+		}
+
+		const ingested = await this.hub("/ingest", { message });
+
+		if (ingested?.ignored === true) return json({ ok: true, ignored: true });
+		this.ctx.waitUntil(
+			this.agent.prompt(message.channel, message).catch((error: unknown) => {
+				log("server", "could not prompt from webhook: " + describeError(error));
+			}),
+		);
+
+		return json({ ok: true });
+	}
+
+	// --- Access policy --------------------------------------------------------
+
+	private async policy(): Promise<ServerPolicy> {
+		const stored = await this.store.plain(KEYS.policy, ServerPolicySchema);
+
+		if (stored) return stored;
+		const initial = defaultPolicy();
+
+		await this.store.putPlain(KEYS.policy, ServerPolicySchema, initial);
+
+		return initial;
+	}
+
+	private async pushPolicy(policy?: ServerPolicy): Promise<void> {
+		const value = policy ?? (await this.policy());
+
+		await this.hub("/policy", { policy: value });
+	}
+
+	private async getPolicy(): Promise<Response> {
+		return json({ policy: await this.policy() });
+	}
+
+	private async setPolicy(request: Request): Promise<Response> {
+		const input = await body(request, PolicySetSchema);
+
+		if (input instanceof Response) return input;
+		const current = await this.policy();
+		const profiles = input.profiles ?? current.profiles;
+		const ids = new Set(profiles.map((profile) => profile.id));
+		const roles = input.roles ?? current.roles;
+		const defaultProfileId = input.defaultProfileId ?? current.defaultProfileId;
+		const missing = roles.find((role) => !ids.has(role.profileId));
+
+		if (missing) return failure(`The profile "${missing.profileId}" does not exist.`);
+
+		if (!ids.has(defaultProfileId)) return failure(`The profile "${defaultProfileId}" does not exist.`);
+		const next: ServerPolicy = {
+			...current,
+			defaultProfileId,
+			profiles,
+			roles,
+			channelOverrides: input.channelOverrides ?? current.channelOverrides,
+			updatedAt: Date.now(),
+		};
+
+		await this.store.putPlain(KEYS.policy, ServerPolicySchema, next);
+		await this.pushPolicy(next);
+		this.track("permission_changed", {
+			roles: roles.length,
+			default_profile: defaultProfileId,
+		});
+
+		return json({ policy: next });
+	}
+
+	private async discordRoles(request: Request): Promise<Response> {
+		const input = await body(request, GuildSchema);
+
+		if (input instanceof Response) return input;
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+
+		try {
+			const roles = await rest.guildRoles(input.guildId);
+
+			return json({
+				roles: roles.map((role) => ({ id: role.id, name: role.name, position: role.position })),
+			});
+		} catch (error) {
+			return failure("Discord could not be reached: " + describeError(error));
+		}
+	}
+
+	private async discordGuilds(): Promise<Response> {
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+
+		try {
+			const guilds = await rest.guilds();
+
+			return json({
+				guilds: guilds.map((guild) => ({ id: guild.id, name: guild.name })),
+			});
+		} catch (error) {
+			return failure("Discord could not be reached: " + describeError(error));
+		}
+	}
+
+	private async discordChannels(request: Request): Promise<Response> {
+		const input = await body(request, GuildSchema);
+
+		if (input instanceof Response) return input;
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+
+		try {
+			const channels = await rest.guildChannels(input.guildId);
+
+			return json({
+				channels: channels
+					.filter((channel) => (channel.type ?? 0) === 0 || (channel.type ?? 0) === 5)
+					.map((channel) => ({ id: channel.id, name: channel.name })),
+			});
+		} catch (error) {
+			return failure("Discord could not be reached: " + describeError(error));
+		}
+	}
+
+	// --- Reset ---------------------------------------------------------------
+
+	private async reset(): Promise<Response> {
+		let removed = 0;
+
+		for (;;) {
+			const entries = await this.ctx.storage.list<unknown>({ prefix: KEYS.fs, limit: 1_000 });
+			const keys = [...entries.keys()];
+
+			if (keys.length === 0) break;
+			for (let index = 0; index < keys.length; index += 128) {
+				await this.ctx.storage.delete(keys.slice(index, index + 128));
+			}
+
+			removed += keys.length;
+
+			if (keys.length < 1_000) break;
+		}
+
+		const markers = await this.ctx.storage.list<unknown>({ prefix: KEYS.workspaceSeed });
+
+		for (const key of markers.keys()) await this.ctx.storage.delete(key);
+		await seedServer(this.ctx.storage, this.serverId);
+		this.track("files_reset", { files_removed: removed });
+
+		return json({ ok: true, files: removed });
+	}
+}
+
+/** The singleton name a Worker uses to address a server. */
+export function serverNameFor(id: string): string {
+	return id;
+}

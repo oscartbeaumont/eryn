@@ -10,7 +10,7 @@
 
 import { Option, Schema } from "effect";
 
-import { configuredOrigin, INTERACTIONS_PATH, log } from "../config";
+import { configuredOrigin, INTERACTIONS_PATH, log, optional } from "../config";
 import { stringField } from "../json.ts";
 import type { Mutable } from '../mutable.ts';
 import { CLIENT_ID } from "../public";
@@ -38,7 +38,7 @@ const applicationCache: ApplicationCache = {};
 
 /** The application the bot token belongs to, or undefined when Discord will not say. */
 export function application(env: Env): Promise<Application | undefined> {
-	const token = env.DISCORD_BOT_TOKEN?.trim();
+	const token = optional(env, "DISCORD_BOT_TOKEN");
 
 	if (!token) return Promise.resolve(undefined);
 
@@ -127,7 +127,7 @@ export async function ensureEndpoint(env: Env, origin: string): Promise<void> {
 	const endpoint = `${origin.replace(/\/$/, "")}${INTERACTIONS_PATH}`;
 
 	if (ensured.has(endpoint)) return;
-	const token = env.DISCORD_BOT_TOKEN?.trim();
+	const token = optional(env, "DISCORD_BOT_TOKEN");
 
 	if (!token) return;
 	const current = await application(env);

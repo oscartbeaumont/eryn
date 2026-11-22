@@ -1,21 +1,18 @@
 /**
- * The bridge between Eryn's three approval surfaces and MCP's URL parameter.
+ * How an MCP server should ask its approval questions.
  *
- * An MCP server that needs an approval can be told where to put the question.
- * Executor names the modes `native`, `browser`, and `model`; Eryn calls the same
- * choices `discord`, `browser`, and `agent`. This file is the only place the two
- * vocabularies meet.
+ * A server that understands the parameter is told `native` (the chat surface),
+ * `browser`, or `model`. An unknown server is left alone, because a strict
+ * OAuth resource URI must not gain a surprise query parameter.
  */
 
-import type { ElicitationMode } from "../session/models";
+export type ElicitationMode = "off" | "chat" | "browser" | "agent";
 
-/** The query parameter Executor and other MCP servers understand. */
 export const ELICITATION_PARAM = "elicitation_mode";
 
-/** Eryn's mode as the MCP server's own value. `off` has no server equivalent. */
 export function elicitationParam(mode: ElicitationMode | undefined): string | undefined {
 	switch (mode) {
-		case "discord":
+		case "chat":
 			return "native";
 		case "browser":
 			return "browser";
@@ -26,33 +23,6 @@ export function elicitationParam(mode: ElicitationMode | undefined): string | un
 	}
 }
 
-/** Read a mode out of a URL parameter or a modal field. */
-export function parseElicitation(value: string | null | undefined): ElicitationMode | undefined {
-	switch (value?.trim().toLowerCase()) {
-		case "discord":
-		case "native":
-			return "discord";
-		case "browser":
-			return "browser";
-		case "agent":
-		case "model":
-			return "agent";
-		case "off":
-		case "none":
-			return "off";
-		default:
-			return undefined;
-	}
-}
-
-/**
- * Whether a URL is known to understand the parameter.
- *
- * Executor is the server that documents it. A URL that already carries the
- * parameter is obviously speaking the same language. Anything else is left
- * alone by default, so a server with a strict OAuth resource URI is not handed
- * a surprise query parameter.
- */
 export function supportsElicitationParam(url: string): boolean {
 	try {
 		const parsed = new URL(url);
@@ -65,18 +35,6 @@ export function supportsElicitationParam(url: string): boolean {
 	}
 }
 
-/**
- * Apply a mode to a link's URL, but only for a server that understands it.
- *
- * Writing the parameter into a URL that never asked for it risks breaking a
- * server with a strict OAuth resource URI, so an unknown server keeps the mode
- * in the link record alone.
- */
-export function applyElicitation(url: string, mode: ElicitationMode): string {
-	return supportsElicitationParam(url) ? withElicitation(url, mode) : url;
-}
-
-/** Apply the server-facing mode to a URL; `off` removes an existing one. */
 export function withElicitation(url: string, mode: ElicitationMode | undefined): string {
 	try {
 		const parsed = new URL(url);
@@ -98,11 +56,6 @@ export function withElicitation(url: string, mode: ElicitationMode | undefined):
 	}
 }
 
-/** The mode an existing URL asks for, when it names one. */
-export function elicitationOf(url: string): ElicitationMode | undefined {
-	try {
-		return parseElicitation(new URL(url).searchParams.get(ELICITATION_PARAM));
-	} catch {
-		return undefined;
-	}
+export function applyElicitation(url: string, mode: ElicitationMode | undefined): string {
+	return mode && supportsElicitationParam(url) ? withElicitation(url, mode) : url;
 }

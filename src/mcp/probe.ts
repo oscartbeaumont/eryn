@@ -15,7 +15,7 @@ import type { AuthProvider } from '@modelcontextprotocol/client';
 import { describeError } from "../errors";
 import { externalFetch, isSecureUrl } from "../http";
 import type { Mutable } from '../mutable.ts';
-import type { McpProbeResponse, McpToolSummary } from "../session/models";
+import type { McpProbeResponse, McpToolSummary } from "./types";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
