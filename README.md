@@ -112,6 +112,14 @@ five text, number, or boolean fields opens a modal behind a **Fill form**
 button; selects and larger forms fall back to one `key: value` line per field.
 On iMessage every form uses the text fallback.
 
+## Discord tools
+
+Beyond messaging, the agent can list channels and threads, react, edit, delete,
+pin, start/archive/join/leave threads, join/leave channels, read history and
+attachments, and ask a question. Cross-channel reads, sends, joins, reactions,
+edits, deletes, pins, and thread creation are checked against the speaker's own
+Discord permissions as well as the server policy.
+
 ## Automations
 
 The server settings page lists every OpenCode automation in the server, grouped
@@ -177,7 +185,8 @@ deployment logs the code to the console.
 Inference is configured per server, from the browser. The server stores the
 credential sealed with `ENCRYPTION_KEY` and replays it into the embedded
 OpenCode host. Connect with a key, or start a device-code OAuth flow and paste
-the code the provider shows. Any integration OpenCode supports can be used.
+the code the provider shows. The model field is populated from the host's
+catalogue once a provider is connected.
 
 BYOK is the default. A deployment that wants to provide a free key can add one
 to the server through the same form; nothing in the agent differs.
