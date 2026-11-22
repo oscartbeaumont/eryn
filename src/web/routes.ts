@@ -4,8 +4,10 @@ import { capture } from "../analytics.ts";
 import { log } from "../config.ts";
 import { describeError } from "../errors.ts";
 import { toJsonObject } from "../json.ts";
+import { PermissionOverridesSchema, ServerPolicySchema, defaultPolicy } from "../core/policy.ts";
+import type { PermissionOverrides, RoleMapping } from "../core/policy.ts";
 import type { Mutable } from "../mutable.ts";
-import type { Schema } from "effect";
+import { Schema } from "effect";
 
 import type { CallResult } from "../platform/clients.ts";
 import {
@@ -24,6 +26,13 @@ import {
 import { dashboardPage, loginPage } from "./pages.ts";
 import { serverPage } from "./server-page.ts";
 import type { ServerPageData } from "./server-page.ts";
+
+interface RoleDraft {
+	roleId: string;
+	roleName: string;
+	profileId: string;
+	overrides?: PermissionOverrides;
+}
 
 interface McpConnection {
 	name: string;
@@ -206,6 +215,14 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 	const links = await serverCall(env, id, "/links", {}, origin);
 	const plugins = await serverCall(env, id, "/plugins", {}, origin);
 	const mcp = Array.isArray(status.data.mcp) ? status.data.mcp : [];
+	const policy = Schema.decodeUnknownOption(ServerPolicySchema)(status.data.policy);
+	const currentPolicy = policy._tag === "Some" ? policy.value : defaultPolicy();
+	const discordRolesResult = guild
+		? await serverCall(env, id, "/discord/roles", { guildId: guild }, origin)
+		: { ok: true, status: 200, data: {} };
+	const discordRoles = Array.isArray(discordRolesResult.data.roles)
+		? (discordRolesResult.data.roles as Array<{ id: string; name: string }>)
+		: [];
 	const data: Mutable<ServerPageData> = {
 		email: user.email,
 		id,
@@ -225,6 +242,8 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 		links: Array.isArray(links.data.links)
 			? (links.data.links as Array<{ id: string; name: string; url: string }>)
 			: [],
+		policy: currentPolicy,
+		discordRoles,
 		mcp: mcp.flatMap((entry) => {
 			const server = toJsonObject(entry as Schema.Json);
 			const state = toJsonObject(server?.status);
@@ -356,6 +375,58 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 			result = await serverCall(env, id, "/channels/detach", { channelId: field(fields, "channelId") }, origin);
 			ok = "Conversation disconnected.";
 			break;
+		case "access/save": {
+			const policyResult = await serverCall(env, id, "/policy", {}, origin);
+			const decoded = Schema.decodeUnknownOption(ServerPolicySchema)(policyResult.data.policy);
+			const current = decoded._tag === "Some" ? decoded.value : defaultPolicy();
+			const roles: RoleMapping[] = [];
+			let invalid: string | undefined;
+
+			for (const [key, value] of Object.entries(fields)) {
+				if (!key.startsWith("role:") || !value) continue;
+				const roleId = key.slice("role:".length);
+				const roleName =
+					field(fields, "rolename:" + roleId) ||
+					current.roles.find((role) => role.roleId === roleId)?.roleName ||
+					roleId;
+				const raw = field(fields, "overrides:" + roleId).trim();
+				let overrides: RoleMapping["overrides"];
+
+				if (raw) {
+					try {
+						const parsed = JSON.parse(raw) as unknown;
+						const decodedOverrides = Schema.decodeUnknownOption(PermissionOverridesSchema)(parsed);
+
+						if (decodedOverrides._tag !== "Some") {
+							invalid = "Overrides for " + roleName + " are not valid.";
+							break;
+						}
+
+						overrides = decodedOverrides.value;
+					} catch {
+						invalid = "Overrides for " + roleName + " are not valid JSON.";
+						break;
+					}
+				}
+
+				const role: RoleDraft = { roleId, roleName, profileId: value };
+
+				if (overrides) role.overrides = overrides;
+				roles.push(role);
+			}
+
+			result = invalid
+				? { ok: false, status: 400, data: { error: invalid } }
+				: await serverCall(
+						env,
+						id,
+						"/policy/set",
+						{ defaultProfileId: field(fields, "defaultProfile"), roles },
+						origin,
+					);
+			ok = "Access saved.";
+			break;
+		}
 		case "messaging/discord":
 			guild = field(fields, "guildId");
 			result = await serverCall(env, id, "/messaging/discord", { guildId: guild }, origin);

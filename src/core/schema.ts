@@ -75,6 +75,8 @@ export const AuthorSchema = Schema.Struct({
 	name: Schema.String,
 	handle: Schema.optional(Schema.String),
 	bot: Schema.optional(Schema.Boolean),
+	/** Discord role ids, used to resolve the speaker's policy. */
+	roles: Schema.optional(Schema.Array(Schema.String)),
 });
 
 export type Author = typeof AuthorSchema.Type;
@@ -274,6 +276,8 @@ export const SendMessageRequestSchema = Schema.Struct({
 	text: Schema.String,
 	attachments: Schema.optional(Schema.Array(AttachmentSchema)),
 	replyTo: Schema.optional(Schema.String),
+	/** Discord components, or undefined on a provider that has none. */
+	components: Schema.optional(Schema.Json),
 });
 
 export const SendMessageResponseSchema = Schema.Struct({

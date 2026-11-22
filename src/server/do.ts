@@ -19,6 +19,13 @@ import {
 	ServerSettingsSchema,
 } from "../core/schema.ts";
 import type { InboundMessage, McpLink, PluginRecord } from "../core/schema.ts";
+import {
+	RoleMappingSchema,
+	RoleProfileSchema,
+	ServerPolicySchema,
+	defaultPolicy,
+} from "../core/policy.ts";
+import type { ServerPolicy } from "../core/policy.ts";
 import { recordStore } from "../core/store.ts";
 import type { RecordStore } from "../core/store.ts";
 import { ORIGIN_HEADER } from "../deploy.ts";
@@ -89,6 +96,20 @@ const ImessageSchema = Schema.Struct({
 });
 
 const GuildSchema = Schema.Struct({ guildId: Schema.String });
+
+const ConsumeSchema = Schema.Struct({ channel: Schema.String, text: Schema.String });
+
+const ApprovalSchema = Schema.Struct({
+	approvalId: Schema.String,
+	decision: Schema.Literals(["once", "always", "block"]),
+	userId: Schema.optional(Schema.String),
+});
+
+const PolicySetSchema = Schema.Struct({
+	defaultProfileId: Schema.optional(Schema.String),
+	roles: Schema.optional(Schema.Array(RoleMappingSchema)),
+	profiles: Schema.optional(Schema.Array(RoleProfileSchema)),
+});
 
 /** Whether a link name is safe as an MCP server name. */
 function serverName(value: string): string {
@@ -171,10 +192,15 @@ export class Server extends DurableObject<Env> {
 		if (path === "/channels/attach" && request.method === "POST") return await this.attach(request);
 		if (path === "/channels/detach" && request.method === "POST") return await this.detach(request);
 		if (path === "/interrupt" && request.method === "POST") return await this.interrupt(request);
+		if (path === "/approval" && request.method === "POST") return await this.approval(request);
+		if (path === "/consume" && request.method === "POST") return await this.consume(request);
 		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
 		if (path === "/messaging" && request.method === "POST") return await this.messaging();
 		if (path === "/messaging/discord" && request.method === "POST") return await this.setDiscord(request);
 		if (path === "/messaging/imessage" && request.method === "POST") return await this.setImessage(request);
+		if (path === "/policy" && request.method === "POST") return await this.getPolicy();
+		if (path === "/policy/set" && request.method === "POST") return await this.setPolicy(request);
+		if (path === "/discord/roles" && request.method === "POST") return await this.discordRoles(request);
 		if (path === "/webhook/sendblue" && request.method === "POST") return await this.sendblueWebhook(request);
 		if (path === "/discord/guilds" && request.method === "POST") return await this.discordGuilds();
 		if (path === "/discord/channels" && request.method === "POST") return await this.discordChannels(request);
@@ -266,12 +292,19 @@ export class Server extends DurableObject<Env> {
 
 		await this.store.putPlain(KEYS.server, ServerSettingsSchema, settings);
 		await seedServer(this.ctx.storage, this.serverId);
+
+		if (!(await this.store.plain(KEYS.policy, ServerPolicySchema))) {
+			await this.store.putPlain(KEYS.policy, ServerPolicySchema, defaultPolicy());
+		}
+
+		await this.pushPolicy();
 		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
 
 		return json({ server: settings });
 	}
 
 	private async wake(): Promise<Response> {
+		await this.pushPolicy().catch((error: unknown) => log("server", "could not push policy: " + describeError(error)));
 		await this.agent.wake().catch((error: unknown) => log("server", describeError(error)));
 		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
 
@@ -312,6 +345,14 @@ export class Server extends DurableObject<Env> {
 				this.origin + "/webhooks/sendblue/" + this.serverId + "?token=" + imessage.webhookSecret;
 		}
 
+		const policy = await this.policy();
+
+		this.ctx.waitUntil(
+			this.pushPolicy(policy).catch((error: unknown) =>
+				log("server", "could not push policy: " + describeError(error)),
+			),
+		);
+
 		return json({
 			server: settings,
 			ready: this.agent.hasHost(),
@@ -333,6 +374,7 @@ export class Server extends DurableObject<Env> {
 			channels,
 			messaging,
 			mcp,
+			policy,
 		});
 	}
 
@@ -600,6 +642,24 @@ export class Server extends DurableObject<Env> {
 		return json({ ok: await this.agent.interrupt(input.channelId) });
 	}
 
+	private async consume(request: Request): Promise<Response> {
+		const input = await body(request, ConsumeSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({ consumed: await this.agent.consumeText(input.channel, input.text) });
+	}
+
+	private async approval(request: Request): Promise<Response> {
+		const input = await body(request, ApprovalSchema);
+
+		if (input instanceof Response) return input;
+
+		return json({
+			ok: await this.agent.replyApproval(input.approvalId, input.decision, input.userId),
+		});
+	}
+
 	/** A Gateway or webhook nudge, so a cold object can catch the message. */
 	private async nudge(request: Request): Promise<Response> {
 		const input = await body(request, NudgeSchema);
@@ -621,6 +681,11 @@ export class Server extends DurableObject<Env> {
 		}
 
 		try {
+			// An approval or form answer is not a new request for the agent.
+			if (message.text && (await this.agent.consumeText(message.channel, message.text))) {
+				return json({ ok: true, prompted: false, consumed: true });
+			}
+
 			const prompted = await this.agent.prompt(message.channel, message);
 
 			return json({ ok: true, prompted });
@@ -654,7 +719,22 @@ export class Server extends DurableObject<Env> {
 			config: { kind: "discord", guildId: input.guildId, guildName: input.guildName },
 		});
 		const connected = await this.gateway("/register", { guildId: input.guildId, serverId: this.serverId });
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+		const guild = await rest.guildInfo(input.guildId).catch(() => undefined);
 
+		if (guild?.ownerId) {
+			const policy = await this.policy();
+
+			if (policy.ownerDiscordId !== guild.ownerId) {
+				await this.store.putPlain(KEYS.policy, ServerPolicySchema, {
+					...policy,
+					ownerDiscordId: guild.ownerId,
+					updatedAt: Date.now(),
+				});
+			}
+		}
+
+		await this.pushPolicy();
 		if (connected) this.track("discord_connected");
 
 		return json({ ok: true });
@@ -711,7 +791,13 @@ export class Server extends DurableObject<Env> {
 			channelName: group || from,
 		};
 
-		await this.hub("/ingest", { message });
+		if (message.text && (await this.agent.consumeText(message.channel, message.text))) {
+			return json({ ok: true, consumed: true });
+		}
+
+		const ingested = await this.hub("/ingest", { message });
+
+		if (ingested?.ignored === true) return json({ ok: true, ignored: true });
 		this.ctx.waitUntil(
 			this.agent.prompt(message.channel, message).catch((error: unknown) => {
 				log("server", "could not prompt from webhook: " + describeError(error));
@@ -719,6 +805,78 @@ export class Server extends DurableObject<Env> {
 		);
 
 		return json({ ok: true });
+	}
+
+	// --- Access policy --------------------------------------------------------
+
+	private async policy(): Promise<ServerPolicy> {
+		const stored = await this.store.plain(KEYS.policy, ServerPolicySchema);
+
+		if (stored) return stored;
+		const initial = defaultPolicy();
+
+		await this.store.putPlain(KEYS.policy, ServerPolicySchema, initial);
+
+		return initial;
+	}
+
+	private async pushPolicy(policy?: ServerPolicy): Promise<void> {
+		const value = policy ?? (await this.policy());
+
+		await this.hub("/policy", { policy: value });
+	}
+
+	private async getPolicy(): Promise<Response> {
+		return json({ policy: await this.policy() });
+	}
+
+	private async setPolicy(request: Request): Promise<Response> {
+		const input = await body(request, PolicySetSchema);
+
+		if (input instanceof Response) return input;
+		const current = await this.policy();
+		const profiles = input.profiles ?? current.profiles;
+		const ids = new Set(profiles.map((profile) => profile.id));
+		const roles = input.roles ?? current.roles;
+		const defaultProfileId = input.defaultProfileId ?? current.defaultProfileId;
+		const missing = roles.find((role) => !ids.has(role.profileId));
+
+		if (missing) return failure(`The profile "${missing.profileId}" does not exist.`);
+
+		if (!ids.has(defaultProfileId)) return failure(`The profile "${defaultProfileId}" does not exist.`);
+		const next: ServerPolicy = {
+			...current,
+			defaultProfileId,
+			profiles,
+			roles,
+			updatedAt: Date.now(),
+		};
+
+		await this.store.putPlain(KEYS.policy, ServerPolicySchema, next);
+		await this.pushPolicy(next);
+		this.track("permission_changed", {
+			roles: roles.length,
+			default_profile: defaultProfileId,
+		});
+
+		return json({ policy: next });
+	}
+
+	private async discordRoles(request: Request): Promise<Response> {
+		const input = await body(request, GuildSchema);
+
+		if (input instanceof Response) return input;
+		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
+
+		try {
+			const roles = await rest.guildRoles(input.guildId);
+
+			return json({
+				roles: roles.map((role) => ({ id: role.id, name: role.name, position: role.position })),
+			});
+		} catch (error) {
+			return failure("Discord could not be reached: " + describeError(error));
+		}
 	}
 
 	private async discordGuilds(): Promise<Response> {

@@ -81,6 +81,10 @@ export const KEYS = {
 	channelSession: "hub:session:",
 	/** One custom plugin, sealed (code plus metadata). */
 	plugin: "plugin:",
+	/** The server's Discord role policy, plain. */
+	policy: "config:policy",
+	/** The latest speaker and permissions for a conversation. */
+	principal: "hub:principal:",
 	/** The virtual filesystem, one key per absolute path. */
 	fs: "fs:",
 	/** The default files already written into the virtual filesystem. */

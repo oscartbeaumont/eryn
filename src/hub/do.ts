@@ -31,6 +31,15 @@ import {
 } from "../core/schema.ts";
 import type { Attachment, ChannelBinding, InboundMessage, MessagingConfig } from "../core/schema.ts";
 import { recordStore } from "../core/store.ts";
+import {
+	PrincipalRecordSchema,
+	ServerPolicySchema,
+	canUseChannel,
+	defaultPolicy,
+	ownerPermissions,
+	permissionsFor,
+} from "../core/policy.ts";
+import type { PrincipalRecord, ServerPolicy } from "../core/policy.ts";
 import type { RecordStore } from "../core/store.ts";
 import { discordProvider } from "../providers/discord.ts";
 import { imessageProvider } from "../providers/imessage.ts";
@@ -111,6 +120,8 @@ export class Hub extends DurableObject<Env> {
 			if (path === "/messaging" && request.method === "POST") return await this.putMessaging(request);
 			if (path === "/messaging/status" && request.method === "POST") return await this.messagingStatus();
 			if (path === "/remember-session" && request.method === "POST") return await this.rememberSession(request);
+			if (path === "/policy" && request.method === "POST") return await this.putPolicy(request);
+			if (path === "/context" && request.method === "POST") return await this.context(request);
 			return failure("Not found.", 404);
 		} catch (error) {
 			log("hub", `route ${path} failed: ${describeError(error)}`);
@@ -198,6 +209,38 @@ export class Hub extends DurableObject<Env> {
 		return json({ ok: true });
 	}
 
+	// --- Policy and turn context ----------------------------------------------
+
+	private async policy(): Promise<ServerPolicy> {
+		return (await this.store.plain(KEYS.policy, ServerPolicySchema)) ?? defaultPolicy();
+	}
+
+	private async putPolicy(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ policy: ServerPolicySchema }));
+
+		if (input instanceof Response) return input;
+		await this.store.putPlain(KEYS.policy, ServerPolicySchema, input.policy);
+
+		return json({ ok: true });
+	}
+
+	/** The latest speaker and permissions for a session's conversation. */
+	private async context(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ sessionID: Schema.String }));
+
+		if (input instanceof Response) return input;
+		const channel = await this.sessionChannel(input.sessionID);
+
+		if (!channel) return json({ context: null });
+		const principal = await this.store.plain(KEYS.principal + channel, PrincipalRecordSchema);
+
+		return json({ context: principal ?? null });
+	}
+
+	private async principal(channel: string): Promise<PrincipalRecord | undefined> {
+		return await this.store.plain(KEYS.principal + channel, PrincipalRecordSchema);
+	}
+
 	private async sessionChannel(sessionID: string | undefined): Promise<string | undefined> {
 		if (!sessionID) return undefined;
 		return await this.ctx.storage.get<string>(KEYS.channelSession + sessionID);
@@ -278,6 +321,29 @@ export class Hub extends DurableObject<Env> {
 		if (!binding.enabled) return json({ ok: true, ignored: true });
 		if (message.outbound === true) return json({ ok: true, ignored: true });
 
+		const policy = await this.policy();
+		const trusted = message.provider === "imessage" || message.author.id === policy.ownerDiscordId;
+		const permissions = trusted
+			? ownerPermissions()
+			: permissionsFor(policy, {
+					id: message.author.id,
+					name: message.author.name,
+					roles: message.author.roles ?? [],
+				});
+
+		if (!trusted && (!permissions.invoke || !canUseChannel(permissions, message.channel))) {
+			return json({ ok: true, ignored: true, denied: true });
+		}
+
+		await this.store.putPlain(KEYS.principal + message.channel, PrincipalRecordSchema, {
+			channel: message.channel,
+			authorId: message.author.id,
+			name: message.author.name,
+			roles: [...(message.author.roles ?? [])],
+			permissions,
+			updatedAt: Date.now(),
+		});
+
 		const stored = this.record(message);
 
 		this.publish({ ...stored, channel: message.channel });
@@ -334,9 +400,23 @@ export class Hub extends DurableObject<Env> {
 		const input = await body(request, SendMessageRequestSchema);
 
 		if (input instanceof Response) return input;
-		const channel = input.channel || (await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined)) || "";
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const channel = input.channel || sessionChannel || "";
 
 		if (!channel) return json(Schema.encodeSync(SendMessageResponseSchema)({ ok: false, error: "No channel to send to." }));
+
+		if (sessionChannel && channel !== sessionChannel) {
+			const speaker = await this.principal(sessionChannel);
+
+			if (speaker?.permissions.crossChannel === "block") {
+				return json(
+					Schema.encodeSync(SendMessageResponseSchema)({
+						ok: false,
+						error: "You do not have permission to send outside this conversation.",
+					}),
+				);
+			}
+		}
 
 		const binding = await this.binding(channel);
 
@@ -349,6 +429,7 @@ export class Hub extends DurableObject<Env> {
 				text: input.text,
 				attachments: input.attachments,
 				replyTo: input.replyTo,
+				components: input.components,
 			});
 
 			// Record the outbound message for history without feeding it to the agent.

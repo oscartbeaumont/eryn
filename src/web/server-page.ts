@@ -1,6 +1,7 @@
 /** The server settings page: messaging, inference, MCP, and plugins. */
 
 import { escapeHtml, errorBox, html, okBox, page, topBar } from "./pages.ts";
+import type { ServerPolicy } from "../core/policy.ts";
 
 export interface ServerPageData {
 	readonly email: string;
@@ -22,6 +23,8 @@ export interface ServerPageData {
 	readonly providers: ReadonlyArray<{ integrationID: string; method: string }>;
 	readonly links: ReadonlyArray<{ id: string; name: string; url: string }>;
 	readonly mcp: ReadonlyArray<{ name: string; status: string; error?: string }>;
+	readonly policy: ServerPolicy;
+	readonly discordRoles: ReadonlyArray<{ id: string; name: string }>;
 	readonly plugins: ReadonlyArray<{ id: string; name: string; version: string; enabled: boolean }>;
 	readonly guilds: ReadonlyArray<{ id: string; name: string }>;
 	readonly guild?: string;
@@ -181,6 +184,73 @@ export function serverPage(data: ServerPageData): Response {
 		].join(""),
 	);
 
+	const profiles = data.policy.profiles;
+	const allRoles = [
+		...data.discordRoles,
+		...data.policy.roles
+			.filter((role) => !data.discordRoles.some((discord) => discord.id === role.roleId))
+			.map((role) => ({ id: role.roleId, name: role.roleName })),
+	];
+	const access = section(
+		"Access",
+		[
+			'<p class="muted">The Discord guild owner always has full access. Every other role starts blocked until you map it to a profile. iMessage numbers are trusted.</p>',
+			'<form method="post" action="' + base + '/access/save">',
+			'<label for="defaultProfile">Default profile for unmapped roles</label>',
+			'<select id="defaultProfile" name="defaultProfile">',
+			profiles
+				.map((profile) => option(profile.id, profile.name, data.policy.defaultProfileId === profile.id))
+				.join(""),
+			"</select>",
+			allRoles.length
+				? '<div class="grid" style="margin-top:1rem">' +
+					allRoles
+						.map((role) => {
+							const mapping = data.policy.roles.find((entry) => entry.roleId === role.id);
+							const overrides = mapping?.overrides ? JSON.stringify(mapping.overrides, null, 2) : "";
+
+							return (
+								'<div class="card"><input type="hidden" name="rolename:' +
+								escapeHtml(role.id) +
+								'" value="' +
+								escapeHtml(role.name) +
+								'"><strong>' +
+								escapeHtml(role.name) +
+								'</strong><label for="role-' +
+								escapeHtml(role.id) +
+								'">Profile</label><select id="role-' +
+								escapeHtml(role.id) +
+								'" name="role:' +
+								escapeHtml(role.id) +
+								'"><option value="">Blocked</option>' +
+								profiles
+									.map((profile) =>
+										option(
+											profile.id,
+											profile.name,
+											mapping ? mapping.profileId === profile.id : false,
+										),
+									)
+									.join("") +
+								'</select><label for="overrides-' +
+								escapeHtml(role.id) +
+								'">Overrides (JSON, optional)</label><textarea id="overrides-' +
+								escapeHtml(role.id) +
+								'" name="overrides:' +
+								escapeHtml(role.id) +
+								'" placeholder="{&quot;invoke&quot;: true}">' +
+								escapeHtml(overrides) +
+								"</textarea></div>"
+							);
+						})
+						.join("") +
+					"</div>"
+				: '<p class="faint">Connect Discord and install the bot to see its roles.</p>',
+			'<button type="submit">Save access</button>',
+			"</form>",
+		].join(""),
+	);
+
 	const mcpState = data.mcp.length
 		? '<ul class="items">' +
 			data.mcp
@@ -296,6 +366,7 @@ export function serverPage(data: ServerPageData): Response {
 		discord,
 		imessage,
 		"</div>",
+		access,
 		section("Conversations", channelRows),
 		discordChannels ? section("Add a Discord channel", discordChannels) : "",
 		'<div class="grid" style="margin-top:1rem">',

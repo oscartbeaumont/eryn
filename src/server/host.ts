@@ -16,6 +16,8 @@ import { mintMcpToken } from "../mcp/token.ts";
 import { commandShellPlugin } from "../plugins/commands/index.ts";
 import { dynamicPluginsPlugin } from "../plugins/dynamic/index.ts";
 import { agentInstructionsPlugin } from "../plugins/instructions/index.ts";
+import { policyPlugin } from "../plugins/policy/index.ts";
+import type { PermissionSet, SessionGrants } from "../core/policy.ts";
 import { workspaceSkillsPlugin } from "../plugins/skills/index.ts";
 import { workspacePlugin } from "../plugins/workspace/index.ts";
 import { createHost } from "../agent/host.ts";
@@ -39,6 +41,12 @@ export interface HostOptions {
 	readonly origin: string;
 	/** The channel project root for a session, resolved at tool-call time. */
 	readonly rootForSession: (sessionID: string) => string;
+	/** The conversation and resolved permissions for a session. */
+	readonly contextFor: (
+		sessionID: string,
+	) => Promise<{ readonly channel: string; readonly permissions: PermissionSet } | undefined>;
+	/** Grants written by an `always` approval in this session. */
+	readonly grantFor: (sessionID: string) => SessionGrants | undefined;
 }
 
 interface McpConfigEntry {
@@ -114,6 +122,11 @@ export async function buildHost(config: HostConfig, options: HostOptions): Promi
 	const plugins = [
 		workspacePlugin({ storage, serverRoot: SERVER_ROOT, rootForSession, activeSkills }),
 		commandShellPlugin(storage, rootForSession),
+		policyPlugin({
+			contextFor: options.contextFor,
+			grantFor: options.grantFor,
+			mcpServers: config.links.map((link) => link.name),
+		}),
 		agentInstructionsPlugin(
 			() => workspace.instructions,
 			async (sessionID) => {

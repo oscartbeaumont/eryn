@@ -66,6 +66,11 @@ export default defineConfig({
 			// Runs custom agent plugins in isolated dynamic isolates.
 			PLUGIN_LOADER: bindings.workerLoader(),
 
+			// Discord. One application for the whole deployment; each Eryn server
+			// binds to one guild. Required to run the Discord provider; an
+			// iMessage-only deployment can set a placeholder value.
+			DISCORD_BOT_TOKEN: bindings.secret(),
+
 			// Base64url 32-byte key protecting every stored credential at rest.
 			ENCRYPTION_KEY: bindings.secret(),
 

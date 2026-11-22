@@ -15,6 +15,8 @@ export interface SendInput {
 	readonly text: string;
 	readonly attachments?: readonly Attachment[];
 	readonly replyTo?: string;
+	/** Chat-surface controls, such as Discord buttons. Providers without them ignore this. */
+	readonly components?: unknown;
 }
 
 export interface SendResult {

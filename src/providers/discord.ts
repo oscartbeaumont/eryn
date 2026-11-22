@@ -4,6 +4,7 @@ import { optional } from "../config.ts";
 import { toJsonObject, stringField } from "../json.ts";
 import { discordRest } from "../discord/api.ts";
 import type { DiscordUpload } from "../discord/api.ts";
+import type { DiscordComponent } from "../discord/components.ts";
 import type { MessagingProvider, SendInput, SendResult } from "./types.ts";
 
 async function filesOf(input: SendInput): Promise<DiscordUpload[]> {
@@ -37,6 +38,7 @@ export function discordProvider(env: Env): MessagingProvider {
 
 			const message = await rest.sendMessage(input.channel, input.text, {
 				replyTo: input.replyTo,
+				components: input.components as readonly DiscordComponent[] | undefined,
 				files: await filesOf(input),
 			});
 

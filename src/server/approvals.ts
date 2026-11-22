@@ -1,0 +1,471 @@
+/**
+ * Approval and elicitation messages on the chat surface.
+ *
+ * The broker owns the wait: OpenCode emits a permission or form event, the
+ * broker posts a message through Hub, and a Discord button or an iMessage text
+ * reply resolves it. It never stores message content; the only payload it
+ * keeps is the tool name and the form fields.
+ */
+
+import { newId } from "../core/ids.ts";
+import { log } from "../config.ts";
+import { describeError } from "../errors.ts";
+import { actionButton, buttonRow } from "../discord/components.ts";
+import type { DiscordComponent } from "../discord/components.ts";
+import { toJsonObject } from "../json.ts";
+
+const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+
+interface OutboundMessage {
+	channel: string;
+	text: string;
+	components?: readonly DiscordComponent[];
+}
+
+interface PendingPermission {
+	readonly kind: "permission";
+	readonly id: string;
+	readonly sessionID: string;
+	readonly requestID: string;
+	readonly channel: string;
+	readonly provider: string;
+	readonly action: string;
+	requesterId?: string;
+	readonly resolve: (decision: "once" | "always" | "block") => void;
+	readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface ApprovalField {
+	key: string;
+	title?: string;
+	description?: string;
+	type: string;
+	required: boolean;
+	options?: ReadonlyArray<{ readonly value: string; readonly label: string }>;
+}
+
+interface PendingForm {
+	readonly kind: "form";
+	readonly id: string;
+	readonly sessionID: string;
+	readonly formID: string;
+	readonly channel: string;
+	readonly provider: string;
+	readonly title: string;
+	readonly fields: readonly ApprovalField[];
+	values: Record<string, string>;
+	requesterId?: string;
+	readonly resolve: (answer: Record<string, string>) => void;
+	readonly timer: ReturnType<typeof setTimeout>;
+}
+
+type Pending = PendingPermission | PendingForm;
+
+export interface ApprovalBrokerOptions {
+	readonly send: (input: {
+		channel: string;
+		text: string;
+		components?: readonly DiscordComponent[];
+	}) => Promise<void>;
+	readonly replyPermission: (input: {
+		sessionID: string;
+		requestID: string;
+		decision: "once" | "always" | "reject";
+	}) => Promise<void>;
+	readonly replyForm: (input: {
+		sessionID: string;
+		formID: string;
+		answer: Record<string, string | number | boolean | ReadonlyArray<string>>;
+	}) => Promise<void>;
+	readonly cancelForm: (input: {
+		sessionID: string;
+		formID: string;
+		message: string;
+	}) => Promise<void>;
+	readonly grant: (sessionID: string, tool: string) => Promise<void>;
+	readonly timeoutMs?: number;
+}
+
+function fieldList(value: unknown): ApprovalField[] {
+	if (!Array.isArray(value)) return [];
+
+	return value.flatMap((entry) => {
+		const field = toJsonObject(entry as never);
+
+		if (!field || typeof field.key !== "string") return [];
+		const options = Array.isArray(field.options)
+			? field.options.flatMap((option) => {
+					const item = toJsonObject(option as never);
+
+					if (!item || typeof item.value !== "string") return [];
+
+					return [
+						{
+							value: item.value,
+							label: typeof item.label === "string" ? item.label : item.value,
+						},
+					];
+				})
+			: undefined;
+
+		const parsed: ApprovalField = {
+			key: field.key,
+			title: typeof field.title === "string" ? field.title : undefined,
+			description: typeof field.description === "string" ? field.description : undefined,
+			type: typeof field.type === "string" ? field.type : "string",
+			required: field.required !== false,
+		};
+
+		if (options) parsed.options = options;
+
+		return [parsed];
+	});
+}
+
+function fieldPrompt(field: ApprovalField): string {
+	const label = field.title ?? field.key;
+	const required = field.required ? "required" : "optional";
+	const options = field.options?.length
+		? ` — one of: ${field.options.map((option) => option.value).join(", ")}`
+		: "";
+	const description = field.description ? "\n  " + field.description : "";
+
+	return `- ${field.key} (${label}, ${required}${options})${description}`;
+}
+
+function formPrompt(title: string, fields: readonly ApprovalField[]): string {
+	return [
+		"**Input needed: " + title + "**",
+		"",
+		"Reply with one `key: value` line per field.",
+		"",
+		...fields.map(fieldPrompt),
+	].join("\n");
+}
+
+function coerce(field: ApprovalField, raw: string): string | number | boolean | string[] {
+	if (field.type === "boolean") return /^(true|yes|1|y)$/i.test(raw.trim());
+	if (field.type === "number" || field.type === "integer") {
+		const value = Number(raw.trim());
+
+		return Number.isFinite(value) ? value : raw;
+	}
+	if (field.type === "multiselect") {
+		const selected = raw
+			.split(",")
+			.map((part) => part.trim())
+			.filter(Boolean);
+
+		return selected.map((part) => {
+			const match = field.options?.find(
+				(option) => option.value === part || option.label.toLowerCase() === part.toLowerCase(),
+			);
+
+			return match?.value ?? part;
+		});
+	}
+
+	return raw;
+}
+
+function parseLines(fields: readonly ApprovalField[], text: string): Map<string, string> {
+	const values = new Map<string, string>();
+	const keys = new Set(fields.map((field) => field.key));
+
+	for (const line of text.split("\n")) {
+		const separator = line.indexOf(":");
+
+		if (separator <= 0) continue;
+		const key = line.slice(0, separator).trim();
+
+		if (!keys.has(key)) continue;
+		values.set(key, line.slice(separator + 1).trim());
+	}
+
+	return values;
+}
+
+export class ApprovalBroker {
+	private readonly pending = new Map<string, Pending>();
+
+	constructor(private readonly options: ApprovalBrokerOptions) {}
+
+	/** Ask the conversation to approve one tool call. */
+	async permission(input: {
+		sessionID: string;
+		channel: string;
+		provider: string;
+		action: string;
+		resources?: readonly string[];
+		message?: string;
+		requesterId?: string;
+		requesterName?: string;
+		requestID: string;
+	}): Promise<"once" | "always" | "block"> {
+		const id = newId("apr", 6);
+		const resources = input.resources?.filter(Boolean).join(", ") || "this action";
+		const who = input.requesterName ? " from " + input.requesterName : "";
+
+		return await new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				resolve("block");
+				void this.options
+					.replyPermission({
+						sessionID: input.sessionID,
+						requestID: input.requestID,
+						decision: "reject",
+					})
+					.catch(() => undefined);
+				void this.options
+					.send({ channel: input.channel, text: "The approval timed out." })
+					.catch(() => undefined);
+			}, this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+			const pending: PendingPermission = {
+				kind: "permission",
+				id,
+				sessionID: input.sessionID,
+				requestID: input.requestID,
+				channel: input.channel,
+				provider: input.provider,
+				action: input.action,
+				resolve: (decision) => {
+					clearTimeout(timer);
+					resolve(decision);
+				},
+				timer,
+			};
+
+			if (input.requesterId) pending.requesterId = input.requesterId;
+			this.pending.set(id, pending);
+
+			const text = [
+				"**Approval needed**",
+				"`" + input.action + "` on " + resources + who + ".",
+				input.message ? "\n" + input.message : "",
+				"",
+				"1. Allow once",
+				"2. Always in this session",
+				"3. Block",
+			]
+				.filter(Boolean)
+				.join("\n");
+			const components =
+				input.provider === "discord"
+					? [
+							buttonRow([
+								actionButton("Allow once", "approval:" + id + ":once", 1),
+								actionButton("Always (session)", "approval:" + id + ":always", 2),
+								actionButton("Block", "approval:" + id + ":block", 4),
+							]),
+						]
+					: undefined;
+
+			const message: OutboundMessage = { channel: input.channel, text };
+
+			if (components) message.components = components;
+			void this.options
+				.send(message)
+				.catch((error: unknown) => {
+					log("approvals", "could not post an approval: " + describeError(error));
+					const entry = this.pending.get(id);
+
+					if (entry) {
+						clearTimeout(entry.timer);
+						this.pending.delete(id);
+					}
+
+					void this.options
+						.replyPermission({
+							sessionID: input.sessionID,
+							requestID: input.requestID,
+							decision: "reject",
+						})
+						.catch(() => undefined);
+					resolve("block");
+				});
+		});
+	}
+
+	/** Ask the conversation to fill an OpenCode form. */
+	async form(input: {
+		sessionID: string;
+		channel: string;
+		provider: string;
+		formID: string;
+		title: string;
+		fields: unknown;
+		requesterId?: string;
+	}): Promise<void> {
+		const id = newId("frm", 6);
+		const fields = fieldList(input.fields);
+
+		if (fields.length === 0) return;
+		const timer = setTimeout(() => {
+			this.pending.delete(id);
+			void this.options
+				.cancelForm({
+					sessionID: input.sessionID,
+					formID: input.formID,
+					message: "The form timed out.",
+				})
+				.catch(() => undefined);
+			void this.options
+				.send({ channel: input.channel, text: "The form timed out." })
+				.catch(() => undefined);
+		}, this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+		const pendingForm: PendingForm = {
+			kind: "form",
+			id,
+			sessionID: input.sessionID,
+			formID: input.formID,
+			channel: input.channel,
+			provider: input.provider,
+			title: input.title,
+			fields,
+			values: {},
+			resolve: () => undefined,
+			timer,
+		};
+
+		if (input.requesterId) pendingForm.requesterId = input.requesterId;
+		this.pending.set(id, pendingForm);
+
+		await this.options
+			.send({ channel: input.channel, text: formPrompt(input.title, fields) })
+			.catch((error: unknown) => {
+				log("approvals", "could not post a form: " + describeError(error));
+				clearTimeout(timer);
+				this.pending.delete(id);
+			});
+	}
+
+	/** A Discord button or another caller that already knows the decision. */
+	async reply(
+		id: string,
+		decision: "once" | "always" | "block",
+		userId: string | undefined,
+	): Promise<boolean> {
+		const pending = this.pending.get(id);
+
+		if (!pending) return false;
+
+		if (pending.requesterId && userId && pending.requesterId !== userId) {
+			return false;
+		}
+
+		if (pending.kind === "form") return false;
+		clearTimeout(pending.timer);
+		this.pending.delete(id);
+
+		if (decision === "always") await this.options.grant(pending.sessionID, pending.action);
+
+		await this.options
+			.replyPermission({
+				sessionID: pending.sessionID,
+				requestID: pending.requestID,
+				decision: decision === "block" ? "reject" : decision,
+			})
+			.catch((error: unknown) =>
+				log("approvals", "could not answer the permission: " + describeError(error)),
+			);
+
+		const answer = decision === "block" ? "Blocked." : decision === "always" ? "Allowed for this session." : "Allowed once.";
+		await this.options
+			.send({ channel: pending.channel, text: answer })
+			.catch(() => undefined);
+
+		return true;
+	}
+
+	/**
+	 * Treat a chat message as an approval or form answer.
+	 *
+	 * Returns true when the message was consumed, so the caller must not start a
+	 * new agent turn with it.
+	 */
+	async consumeText(channel: string, text: string): Promise<boolean> {
+		const pending = [...this.pending.values()].find((entry) => entry.channel === channel);
+
+		if (!pending) return false;
+
+		if (pending.kind === "permission") {
+			const normalized = text.trim().toLowerCase();
+			const decision =
+				normalized === "1" || normalized === "once" || normalized === "yes" || normalized === "allow"
+					? "once"
+					: normalized === "2" || normalized === "always"
+						? "always"
+						: normalized === "3" || normalized === "no" || normalized === "block" || normalized === "deny"
+							? "block"
+							: undefined;
+
+			if (!decision) return false;
+			clearTimeout(pending.timer);
+			this.pending.delete(pending.id);
+
+			if (decision === "always") await this.options.grant(pending.sessionID, pending.action);
+			await this.options
+				.replyPermission({
+					sessionID: pending.sessionID,
+					requestID: pending.requestID,
+					decision: decision === "block" ? "reject" : decision,
+				})
+				.catch((error: unknown) =>
+					log("approvals", "could not answer the permission: " + describeError(error)),
+				);
+
+			return true;
+		}
+
+		for (const [key, value] of parseLines(pending.fields, text)) {
+			pending.values[key] = value;
+		}
+		const missing = pending.fields.filter(
+			(field) => field.required && pending.values[field.key] === undefined,
+		);
+
+		if (missing.length > 0) {
+			await this.options
+				.send({
+					channel,
+					text: "Still needed: " + missing.map((field) => field.key).join(", "),
+				})
+				.catch(() => undefined);
+
+			return true;
+		}
+
+		clearTimeout(pending.timer);
+		this.pending.delete(pending.id);
+		const answer: Record<string, string | number | boolean | ReadonlyArray<string>> = {};
+
+		for (const field of pending.fields) {
+			const value = pending.values[field.key];
+
+			if (value !== undefined) answer[field.key] = coerce(field, value);
+		}
+
+		await this.options
+			.replyForm({ sessionID: pending.sessionID, formID: pending.formID, answer })
+			.catch((error: unknown) => log("approvals", "could not answer the form: " + describeError(error)));
+
+		return true;
+	}
+
+	/** Drop every wait for a session that is going away. */
+	cancelSession(sessionID: string): void {
+		for (const [id, pending] of this.pending) {
+			if (pending.sessionID !== sessionID) continue;
+			clearTimeout(pending.timer);
+			this.pending.delete(id);
+		}
+	}
+
+	close(): void {
+		for (const pending of this.pending.values()) clearTimeout(pending.timer);
+		this.pending.clear();
+	}
+}

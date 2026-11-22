@@ -6,6 +6,8 @@
  * knows how a message is delivered: replies leave through the MCP server.
  */
 
+import { Schema } from "effect";
+
 import { log } from "../config.ts";
 import { SERVER_ROOT, channelRoot } from "../core/paths.ts";
 import type { InboundMessage } from "../core/schema.ts";
@@ -15,6 +17,11 @@ import type { HostConfig } from "./host.ts";
 import type { HostInterface } from "../agent/host.ts";
 import { seedChannel } from "./seed.ts";
 import type { ChannelRecord } from "./models.ts";
+import { PermissionSetSchema } from "../core/policy.ts";
+import type { PermissionSet, SessionGrants } from "../core/policy.ts";
+import { ApprovalBroker } from "./approvals.ts";
+import type { DiscordComponent } from "../discord/components.ts";
+import { stringField, toJsonObject } from "../json.ts";
 
 export interface AgentDeps {
 	readonly env: Env;
@@ -94,9 +101,36 @@ export class ServerAgent {
 	private readonly sessionChannel = new Map<string, string>();
 	private readonly attaching = new Map<string, Promise<ChannelRecord>>();
 	private readonly channelSession = new Map<string, string>();
+	private readonly grants = new Map<string, SessionGrants>();
+	private readonly approvals: ApprovalBroker;
+	private consuming: Promise<void> | undefined;
+	private abort: AbortController | undefined;
 	private readyAt = 0;
 
-	constructor(private readonly deps: AgentDeps) {}
+	constructor(private readonly deps: AgentDeps) {
+		this.approvals = new ApprovalBroker({
+			send: (input) => this.send(input),
+			replyPermission: async (input) => {
+				const host = await this.currentHost();
+
+				if (!host) return;
+				await host.permission.reply(input);
+			},
+			replyForm: async (input) => {
+				const host = await this.currentHost();
+
+				if (!host) return;
+				await host.session.form.reply(input);
+			},
+			cancelForm: async (input) => {
+				const host = await this.currentHost();
+
+				if (!host) return;
+				await host.session.form.cancel(input);
+			},
+			grant: (sessionID, tool) => this.grant(sessionID, tool),
+		});
+	}
 
 	rootForSession(sessionID: string): string {
 		const channel = this.sessionChannel.get(sessionID);
@@ -138,12 +172,20 @@ export class ServerAgent {
 		if (this.running?.signature === key) return await this.running.promise;
 
 		const previous = this.running?.promise;
+
+		// A rebuild replaces the event stream the old host was serving.
+		this.abort?.abort();
+		this.abort = undefined;
+		this.consuming = undefined;
+		this.approvals.close();
 		const promise = buildHost(config, {
 			env: this.deps.env,
 			storage: this.deps.storage,
 			serverId: this.deps.serverId,
 			origin,
 			rootForSession: (sessionID) => this.rootForSession(sessionID),
+			contextFor: (sessionID) => this.contextFor(sessionID),
+			grantFor: (sessionID) => this.grants.get(sessionID),
 		});
 
 		this.running = { promise, signature: key };
@@ -152,6 +194,7 @@ export class ServerAgent {
 		void promise
 			.then(async (host) => {
 				this.readyAt = Date.now() + 3_000;
+				this.startConsuming(host);
 				await this.attachAll(host);
 				await previous?.then((old) => old.close()).catch(() => undefined);
 			})
@@ -165,7 +208,9 @@ export class ServerAgent {
 
 	/** Ensure the host and every bound channel's session and automation. */
 	async wake(): Promise<void> {
-		await this.ensureHost();
+		const host = await this.ensureHost();
+
+		this.startConsuming(host);
 	}
 
 	private async attachAll(host: HostInterface): Promise<void> {
@@ -256,6 +301,182 @@ export class ServerAgent {
 		return record;
 	}
 
+	/** Send a message through Hub without going through the agent's tool list. */
+	private async send(input: {
+		channel: string;
+		text: string;
+		components?: readonly DiscordComponent[];
+	}): Promise<void> {
+		const response = await this.deps.hubs
+			.get(this.deps.hubs.idFromName(this.deps.serverId))
+			.fetch("https://hub.internal/send", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(input),
+			});
+
+		if (!response.ok) log("server", "hub returned HTTP " + response.status + " while sending an approval");
+	}
+
+	private async providerFor(channel: string): Promise<string> {
+		const record = (await this.deps.channels()).find((entry) => entry.channelId === channel);
+
+		return record?.provider ?? "discord";
+	}
+
+	private async currentHost(): Promise<HostInterface | undefined> {
+		return this.running ? await this.running.promise : undefined;
+	}
+
+	/** Follow permission and form events so they can be answered in chat. */
+	private startConsuming(host: HostInterface): void {
+		if (this.consuming) return;
+		const controller = new AbortController();
+
+		this.abort = controller;
+		const loop = (async () => {
+			for await (const event of host.events.subscribe({ signal: controller.signal })) {
+				try {
+					await this.handleEvent(event);
+				} catch (error) {
+					log("server", "could not handle a host event: " + describeError(error));
+				}
+			}
+		})();
+		const settled = loop
+			.catch((error: unknown) => log("server", "host event stream ended: " + describeError(error)))
+			.finally(() => {
+				if (this.consuming === settled) this.consuming = undefined;
+			});
+
+		this.consuming = settled;
+	}
+
+	private async handleEvent(raw: Schema.Json | undefined): Promise<void> {
+		const event = toJsonObject(raw);
+		const type = stringField(event, "type");
+		const data = toJsonObject(event?.data);
+
+		if (!type || !data) return;
+
+		if (type === "permission.asked") {
+			const sessionID = stringField(data, "sessionID");
+			const requestID = stringField(data, "id");
+			const channel = sessionID ? this.sessionChannel.get(sessionID) : undefined;
+
+			if (!sessionID || !requestID || !channel) return;
+			const [context, provider] = await Promise.all([this.contextFor(sessionID), this.providerFor(channel)]);
+
+			const approval: Parameters<ApprovalBroker["permission"]>[0] = {
+				sessionID,
+				channel,
+				provider,
+				requestID,
+				action: stringField(data, "action") ?? "tool",
+				resources: Array.isArray(data.resources)
+					? data.resources.filter((value): value is string => typeof value === "string")
+					: [],
+			};
+
+			if (context?.authorId) approval.requesterId = context.authorId;
+			if (context?.name) approval.requesterName = context.name;
+			await this.approvals.permission(approval);
+
+			return;
+		}
+
+		if (type === "form.created") {
+			const form = toJsonObject(data.form);
+			const sessionID = stringField(form, "sessionID") ?? stringField(data, "sessionID");
+
+			if (!form || !sessionID) return;
+			const channel = this.sessionChannel.get(sessionID);
+
+			if (!channel) return;
+			const [context, provider] = await Promise.all([this.contextFor(sessionID), this.providerFor(channel)]);
+			const formID = stringField(form, "id");
+			const title = stringField(form, "title") ?? "Input needed";
+
+			if (!formID) return;
+			const request: Parameters<ApprovalBroker["form"]>[0] = {
+				sessionID,
+				channel,
+				provider,
+				formID,
+				title,
+				fields: form.fields,
+			};
+
+			if (context?.authorId) request.requesterId = context.authorId;
+			await this.approvals.form(request);
+		}
+	}
+
+	/** Consume an approval or form answer before it becomes a new turn. */
+	async consumeText(channel: string, text: string): Promise<boolean> {
+		return await this.approvals.consumeText(channel, text);
+	}
+
+	/** Resolve an approval from a Discord button or another caller. */
+	async replyApproval(
+		approvalId: string,
+		decision: "once" | "always" | "block",
+		userId: string | undefined,
+	): Promise<boolean> {
+		return await this.approvals.reply(approvalId, decision, userId);
+	}
+
+	/** The conversation and permissions Hub resolved for a session. */
+	private async contextFor(
+		sessionID: string,
+	): Promise<
+		| {
+				channel: string;
+				authorId: string;
+				name: string;
+				permissions: PermissionSet;
+		  }
+		| undefined
+	> {
+		try {
+			const response = await this.deps.hubs
+				.get(this.deps.hubs.idFromName(this.deps.serverId))
+				.fetch("https://hub.internal/context", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ sessionID }),
+				});
+			const payload = toJsonObject((await response.json().catch(() => undefined)) as never);
+			const context = toJsonObject(payload?.context);
+			const channel = typeof context?.channel === "string" ? context.channel : undefined;
+			const authorId = typeof context?.authorId === "string" ? context.authorId : undefined;
+			const name = typeof context?.name === "string" ? context.name : undefined;
+			const permissions = context
+				? Schema.decodeUnknownOption(PermissionSetSchema)(context.permissions)
+				: undefined;
+
+			if (!channel || !authorId || !name || !permissions || permissions._tag !== "Some") return undefined;
+
+			return { channel, authorId, name, permissions: permissions.value };
+		} catch (error) {
+			log("server", "could not read the turn context: " + describeError(error));
+
+			return undefined;
+		}
+	}
+
+	/** Remember an `always` decision for the rest of this session. */
+	async grant(sessionID: string, tool: string): Promise<void> {
+		const links = await this.deps.links();
+		const server = links.find((link) => tool === link.name || tool.startsWith(link.name + "_"));
+		const grant = this.grants.get(sessionID) ?? { tools: {}, mcp: {} };
+
+		if (server) grant.mcp[tool] = "allow";
+		else grant.tools[tool] = "allow";
+
+		this.grants.set(sessionID, grant);
+	}
+
 	/** Attach a new channel, after Hub has bound it. */
 	async attachChannel(input: ChannelRecord): Promise<ChannelRecord> {
 		await this.deps.saveChannel(input);
@@ -315,6 +536,8 @@ export class ServerAgent {
 		await host.sessions.remove({ sessionID }).catch(() => undefined);
 		this.channelSession.delete(channel);
 		this.sessionChannel.delete(sessionID);
+		this.grants.delete(sessionID);
+		this.approvals.cancelSession(sessionID);
 	}
 
 	/** Point every open session at the server's current model. */
@@ -346,6 +569,10 @@ export class ServerAgent {
 	async close(): Promise<void> {
 		const running = this.running;
 
+		this.abort?.abort();
+		this.abort = undefined;
+		this.consuming = undefined;
+		this.approvals.close();
 		this.running = undefined;
 		this.sessionChannel.clear();
 		this.channelSession.clear();

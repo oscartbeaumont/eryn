@@ -85,6 +85,29 @@ While a conversation has no watch yet (for example before inference is
 configured), Hub's nudge prompts the session directly and tells the agent to
 create the watch. That is the bootstrap path, not the steady state.
 
+## Access and approvals
+
+The Discord guild owner has every permission. Everyone else starts blocked —
+not even `invoke`. The web app's **Access** section maps Discord roles to
+profiles (`Owner`, `Member`, `Guest`, `Blocked`) and lets a role override
+individual permissions. A member's roles are combined, and a block wins.
+
+The permission groups are:
+
+- `invoke` — may start an agent turn
+- `channels` — which conversations they may invoke in
+- `tools` — built-in tools such as `read`, `write`, `bash`, and `send_message`
+- `mcp` — external MCP servers, or individual server tools
+- `crossChannel` — may read or send outside the current conversation
+- `admin` — may configure the server
+
+iMessage numbers bound to a server are trusted and bypass the checks.
+
+When a tool needs approval, the question goes to the conversation: Discord
+buttons for once/always/block, numbered replies on iMessage. `always` applies
+only to the current session. Forms from MCP servers use the same chat surface:
+one `key: value` line per field.
+
 ## Workspaces
 
 Each server has one virtual filesystem:
@@ -172,7 +195,7 @@ Two secrets are enough to start:
 | Secret           | Value                                                   |
 | ---------------- | ------------------------------------------------------- |
 | `ENCRYPTION_KEY` | `openssl rand -base64 32 \| tr '+/' '-_' \| tr -d '='` |
-| `DISCORD_BOT_TOKEN` | Optional. The bot token from the Discord portal.      |
+| `DISCORD_BOT_TOKEN` | The bot token from the Discord portal. Set a placeholder for iMessage-only. |
 
 Set `RESEND_API_KEY` to receive login codes by email. Without it, the code is
 logged and sign-in is only usable from the deployment's own console.
@@ -203,7 +226,7 @@ Set `ERYN_DOMAIN=eryn.example.com` to attach a custom domain.
 | Variable             | Type   | Purpose                                                        |
 | -------------------- | ------ | -------------------------------------------------------------- |
 | `ENCRYPTION_KEY`     | secret | Required. Seals stored inference keys, MCP tokens, and plugin code |
-| `DISCORD_BOT_TOKEN`  | secret | Optional. Enables the Discord provider                         |
+| `DISCORD_BOT_TOKEN`  | secret | Required for Discord. An iMessage-only deployment can set a placeholder. |
 | `SESSION_SECRET`     | secret | Optional. Signs browser sessions and MCP bearers; derived from `ENCRYPTION_KEY` |
 | `RESEND_API_KEY`     | secret | Optional. Sends login codes                                   |
 | `EMAIL_FROM`         | var    | From address for login emails                                  |

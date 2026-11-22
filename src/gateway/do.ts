@@ -12,6 +12,7 @@ import { Schema } from "effect";
 import { KEYS, configuredOrigin, log, optional } from "../config.ts";
 import { newId } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
+import { toJsonObject } from "../json.ts";
 import { InboundMessageSchema } from "../core/schema.ts";
 import { ORIGIN_HEADER, withDeploy, withOrigin } from "../deploy.ts";
 import { describeError } from "../errors.ts";
@@ -235,6 +236,7 @@ export class Gateway extends DurableObject<Env> {
 				name: message.member?.nick ?? message.author?.global_name ?? message.author?.username ?? "unknown",
 				handle: message.author?.username,
 				bot: message.author?.bot === true,
+				roles: await this.rolesFor(message.guild_id, message.author?.id ?? ""),
 			},
 			text: mentioned ? text.replaceAll(new RegExp("<@!?" + this.botUserId + ">", "g"), "").trim() : text,
 			attachments: attachmentsOf(message),
@@ -250,11 +252,40 @@ export class Gateway extends DurableObject<Env> {
 			channelName,
 		});
 
-		await this.toHub(serverId, "/ingest", { message: outbound });
+		const consumed = await this.toServer(serverId, "/consume", {
+			channel: message.channel_id,
+			text: outbound.text,
+		});
+
+		if (consumed?.consumed === true) return;
+		const ingested = await this.toHub(serverId, "/ingest", { message: outbound });
+
+		if (ingested?.ignored === true) return;
 		await this.toServer(serverId, "/nudge", { message: outbound });
 	}
 
 	private channelNames = new Map<string, string>();
+
+	private readonly roleCache = new Map<string, { expires: number; roles: string[] }>();
+
+	/** The member's role ids, cached briefly so a conversation does not cost a REST call per message. */
+	private async rolesFor(guildId: string, userId: string): Promise<string[]> {
+		const key = guildId + ":" + userId;
+		const cached = this.roleCache.get(key);
+
+		if (cached && cached.expires > Date.now()) return cached.roles;
+
+		try {
+			const member = await this.rest.guildMember(guildId, userId);
+			const roles = member?.roles ?? [];
+
+			this.roleCache.set(key, { expires: Date.now() + 60_000, roles });
+
+			return roles;
+		} catch {
+			return [];
+		}
+	}
 
 	private async channelName(guildId: string, channelId: string): Promise<string | undefined> {
 		const cached = this.channelNames.get(channelId);
@@ -292,6 +323,7 @@ export class Gateway extends DurableObject<Env> {
 	}
 
 	private async onInteraction(interaction: DiscordInteraction): Promise<void> {
+		if (interaction.type === 3) return await this.onComponent(interaction);
 		if (interaction.type !== 2) return;
 		const guildId = interaction.guild_id;
 		const name = interaction.data?.name;
@@ -333,7 +365,33 @@ export class Gateway extends DurableObject<Env> {
 		);
 	}
 
-	private async toHub(serverId: string, path: string, payload: unknown): Promise<void> {
+	/** A button on an approval message. */
+	private async onComponent(interaction: DiscordInteraction): Promise<void> {
+		const customId = interaction.data?.custom_id ?? "";
+		const prefix = "approval:";
+
+		if (!customId.startsWith(prefix)) return;
+		const [, id, decision] = customId.slice(prefix.length).split(":");
+
+		if (!id || (decision !== "once" && decision !== "always" && decision !== "block")) return;
+
+		const guildId = interaction.guild_id;
+		const serverId = guildId
+			? await this.ctx.storage.get<string>(KEYS.guildIndex + guildId)
+			: undefined;
+		const userId = interaction.member?.user?.id ?? interaction.user?.id;
+
+		if (!serverId) {
+			await this.rest.interactionReply(interaction.id, interaction.token, "This approval is no longer connected.");
+
+			return;
+		}
+
+		await this.toServer(serverId, "/approval", { approvalId: id, decision, userId });
+		await this.rest.interactionDeferUpdate(interaction.id, interaction.token);
+	}
+
+	private async toHub(serverId: string, path: string, payload: unknown): Promise<Schema.JsonObject | undefined> {
 		const stub = this.env.HUB.get(this.env.HUB.idFromName(serverId));
 		const response = await stub.fetch("https://hub.internal" + path, withDeploy(this.env, {
 			method: "POST",
@@ -342,9 +400,11 @@ export class Gateway extends DurableObject<Env> {
 		}));
 
 		if (!response.ok) log("gateway", "hub returned HTTP " + response.status);
+
+		return toJsonObject((await response.json().catch(() => undefined)) as never);
 	}
 
-	private async toServer(serverId: string, path: string, payload: unknown): Promise<void> {
+	private async toServer(serverId: string, path: string, payload: unknown): Promise<Schema.JsonObject | undefined> {
 		const stub = this.env.SERVER.get(this.env.SERVER.idFromName(serverId));
 		const init = withDeploy(this.env, {
 			method: "POST",
@@ -357,6 +417,8 @@ export class Gateway extends DurableObject<Env> {
 		);
 
 		if (!response.ok) log("gateway", "server returned HTTP " + response.status);
+
+		return toJsonObject((await response.json().catch(() => undefined)) as never);
 	}
 }
 
