@@ -207,6 +207,7 @@ Set `ERYN_DOMAIN=eryn.example.com` to attach a custom domain.
 | `SESSION_SECRET`     | secret | Optional. Signs browser sessions and MCP bearers; derived from `ENCRYPTION_KEY` |
 | `RESEND_API_KEY`     | secret | Optional. Sends login codes                                   |
 | `EMAIL_FROM`         | var    | From address for login emails                                  |
+| `POSTHOG_KEY`        | secret | Optional. Coarse product analytics; unset disables them        |
 | `PUBLIC_ORIGIN`      | var    | Origin for links and the MCP endpoint; learned from requests when unset |
 | `ERYN_DOMAIN`        | build  | Custom domain attached by `cf deploy`                           |
 

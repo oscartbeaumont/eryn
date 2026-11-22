@@ -185,7 +185,7 @@ export async function handleWorkerRequest(request: Request, env: Env, ctx: Execu
 			return new Response("Unauthorized", { status: 401 });
 		}
 
-		return await handleMcp({ env, serverId }, request);
+		return await handleMcp({ env, serverId, ctx }, request);
 	}
 
 	if (path.startsWith("/webhooks/sendblue/")) {
@@ -194,7 +194,7 @@ export async function handleWorkerRequest(request: Request, env: Env, ctx: Execu
 		return await handleSendBlue(request, env, serverId, url.searchParams.get("token"));
 	}
 
-	const web = await handleWeb(request, env);
+	const web = await handleWeb(request, env, ctx);
 
 	if (web) return web;
 

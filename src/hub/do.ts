@@ -11,6 +11,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 
+import { capture } from "../analytics.ts";
+import type { AnalyticsValue } from "../analytics.ts";
 import { KEYS, log } from "../config.ts";
 import { cursor as newCursor } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
@@ -33,7 +35,7 @@ import type { RecordStore } from "../core/store.ts";
 import { discordProvider } from "../providers/discord.ts";
 import { imessageProvider } from "../providers/imessage.ts";
 import type { MessagingProvider } from "../providers/types.ts";
-import { describeError } from "../errors.ts";
+import { classifyError, describeError } from "../errors.ts";
 import { toJsonObject, stringField } from "../json.ts";
 
 /** A frame on the raw SSE stream Hub serves to the Worker's MCP route. */
@@ -74,11 +76,13 @@ function frameText(frame: Frame): Uint8Array {
 }
 
 export class Hub extends DurableObject<Env> {
+	private readonly serverId: string;
 	private readonly store: RecordStore;
 	private readonly subscribers = new Set<Subscriber>();
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
+		this.serverId = state.id.name ?? "";
 		this.store = recordStore(state.storage, env.ENCRYPTION_KEY);
 		state.storage.sql.exec(
 			`CREATE TABLE IF NOT EXISTS event (
@@ -116,6 +120,11 @@ export class Hub extends DurableObject<Env> {
 	}
 
 	// --- Channels -------------------------------------------------------------
+
+	/** Coarse product analytics for this server; never blocks the request. */
+	private track(event: string, properties: Record<string, AnalyticsValue> = {}): void {
+		this.ctx.waitUntil(capture(this.env, event, properties, { serverId: this.serverId }));
+	}
 
 	private channelKey(externalId: string): string {
 		return KEYS.channel + externalId;
@@ -272,6 +281,11 @@ export class Hub extends DurableObject<Env> {
 		const stored = this.record(message);
 
 		this.publish({ ...stored, channel: message.channel });
+		this.track("message_received", {
+			provider: message.provider,
+			attachments: message.attachments.length,
+			addressed: message.addressed === true,
+		});
 
 		return json({ ok: true, cursor: stored.cursor });
 	}
@@ -349,10 +363,20 @@ export class Hub extends DurableObject<Env> {
 				createdAt: Date.now(),
 				outbound: true,
 			});
+			this.track("message_sent", {
+				provider: binding.provider,
+				success: true,
+				attachments: input.attachments?.length ?? 0,
+			});
 
 			return json(Schema.encodeSync(SendMessageResponseSchema)({ ok: true, id: result.id }));
 		} catch (error) {
 			log("hub", `could not send to ${binding.externalId}: ${describeError(error)}`);
+			this.track("message_sent", {
+				provider: binding.provider,
+				success: false,
+				error_class: classifyError(error),
+			});
 
 			return json(Schema.encodeSync(SendMessageResponseSchema)({ ok: false, error: describeError(error) }));
 		}

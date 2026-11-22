@@ -7,6 +7,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 
+import { capture } from "../analytics.ts";
+import type { AnalyticsValue } from "../analytics.ts";
 import { DEFAULT_MODEL, KEYS, log, optional } from "../config.ts";
 import { newId } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
@@ -227,7 +229,7 @@ export class Server extends DurableObject<Env> {
 		return toJsonObject((await response.json().catch(() => undefined)) as never);
 	}
 
-	private async gateway(path: string, payload: unknown): Promise<void> {
+	private async gateway(path: string, payload: unknown): Promise<boolean> {
 		const response = await this.env.GATEWAY.get(this.env.GATEWAY.idFromName("gateway")).fetch(
 			"https://gateway.internal" + path,
 			{
@@ -238,6 +240,13 @@ export class Server extends DurableObject<Env> {
 		);
 
 		if (!response.ok) log("server", "gateway returned HTTP " + response.status);
+
+		return response.ok;
+	}
+
+	/** Coarse product analytics for this server; never blocks the request. */
+	private track(event: string, properties: Record<string, AnalyticsValue> = {}): void {
+		this.ctx.waitUntil(capture(this.env, event, properties, { serverId: this.serverId }));
 	}
 
 	private async init(request: Request): Promise<Response> {
@@ -335,6 +344,7 @@ export class Server extends DurableObject<Env> {
 		const next = { ...settings, name: input.name.trim().slice(0, 80) || settings.name, updatedAt: Date.now() };
 
 		await this.store.putPlain(KEYS.server, ServerSettingsSchema, next);
+		this.track("server_renamed");
 
 		return json({ server: next });
 	}
@@ -351,6 +361,12 @@ export class Server extends DurableObject<Env> {
 			updatedAt: Date.now(),
 		});
 		await this.agent.refreshModels().catch(() => undefined);
+		const slash = input.model.indexOf("/");
+
+		this.track("model_selected", {
+			provider: slash > 0 ? input.model.slice(0, slash) : undefined,
+			model: input.model,
+		});
 
 		return json({ ok: true });
 	}
@@ -392,6 +408,7 @@ export class Server extends DurableObject<Env> {
 			method: "key",
 			key: input.key,
 		});
+		this.track("inference_connected", { provider: input.integrationID });
 
 		return json({ ok: true });
 	}
@@ -401,6 +418,7 @@ export class Server extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 		await this.store.remove(KEYS.provider + input.integrationID);
+		this.track("inference_disconnected", { provider: input.integrationID });
 
 		return json({ ok: true });
 	}
@@ -444,6 +462,7 @@ export class Server extends DurableObject<Env> {
 		};
 
 		await this.store.putSealed(KEYS.link + link.id, McpLinkSchema, link);
+		this.track("mcp_link_added");
 
 		return json({ ok: true });
 	}
@@ -453,6 +472,7 @@ export class Server extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 		await this.store.remove(KEYS.link + input.id);
+		this.track("mcp_link_removed");
 
 		return json({ ok: true });
 	}
@@ -489,6 +509,7 @@ export class Server extends DurableObject<Env> {
 		};
 
 		await this.store.putSealed(KEYS.plugin + plugin.id, PluginRecordSchema, plugin);
+		this.track("plugin_added", { allow_network: plugin.allowNetwork });
 
 		return json({ ok: true, plugin: { ...plugin, code: undefined } });
 	}
@@ -498,6 +519,7 @@ export class Server extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 		await this.store.remove(KEYS.plugin + input.id);
+		this.track("plugin_removed");
 
 		return json({ ok: true });
 	}
@@ -515,6 +537,7 @@ export class Server extends DurableObject<Env> {
 			enabled: input.enabled,
 			updatedAt: Date.now(),
 		});
+		this.track("plugin_toggled", { enabled: input.enabled });
 
 		return json({ ok: true });
 	}
@@ -549,6 +572,7 @@ export class Server extends DurableObject<Env> {
 		});
 
 		await this.ctx.storage.setAlarm(Date.now() + AWAKE_MS);
+		this.track("channel_attached", { provider: input.provider });
 
 		return json({ ok: true, channel: record });
 	}
@@ -563,6 +587,7 @@ export class Server extends DurableObject<Env> {
 		await this.hub("/unbind", { id: input.channelId });
 
 		if (record) await this.agent.detach(record).catch(() => undefined);
+		this.track("channel_detached", { provider: record?.provider });
 
 		return json({ ok: true });
 	}
@@ -628,7 +653,9 @@ export class Server extends DurableObject<Env> {
 		await this.hub("/messaging", {
 			config: { kind: "discord", guildId: input.guildId, guildName: input.guildName },
 		});
-		await this.gateway("/register", { guildId: input.guildId, serverId: this.serverId });
+		const connected = await this.gateway("/register", { guildId: input.guildId, serverId: this.serverId });
+
+		if (connected) this.track("discord_connected");
 
 		return json({ ok: true });
 	}
@@ -649,6 +676,7 @@ export class Server extends DurableObject<Env> {
 			},
 		});
 		await this.ctx.storage.put("messaging:imessage", { webhookSecret: secret });
+		this.track("imessage_connected");
 
 		return json({ ok: true, webhookSecret: secret });
 	}
@@ -749,6 +777,7 @@ export class Server extends DurableObject<Env> {
 
 		for (const key of markers.keys()) await this.ctx.storage.delete(key);
 		await seedServer(this.ctx.storage, this.serverId);
+		this.track("files_reset", { files_removed: removed });
 
 		return json({ ok: true, files: removed });
 	}

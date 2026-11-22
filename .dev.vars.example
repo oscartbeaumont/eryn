@@ -20,3 +20,7 @@ RESEND_API_KEY=
 
 # Optional. The From address for login emails.
 EMAIL_FROM=Eryn <login@eryn.example>
+
+# Optional. A PostHog project key for coarse product analytics. Unset disables
+# analytics entirely; a self-hosted fork should normally leave this empty.
+POSTHOG_KEY=

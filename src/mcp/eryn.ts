@@ -13,6 +13,7 @@
 
 import type { Schema } from "effect";
 
+import { capture } from "../analytics.ts";
 import { log } from "../config.ts";
 import { describeError } from "../errors.ts";
 import { toJsonObject, stringField } from "../json.ts";
@@ -129,6 +130,8 @@ const EVENT_TYPES = [
 export interface McpOptions {
 	readonly env: Env;
 	readonly serverId: string;
+	/** The Worker's lifecycle, so analytics never delays the response. */
+	readonly ctx: ExecutionContext;
 }
 
 function hub(env: Env, serverId: string): DurableObjectStub {
@@ -382,6 +385,15 @@ async function streamEvents(options: McpOptions, body: RequestBody): Promise<Res
 		return error(body.id ?? null, -32603, "The event stream could not be opened.");
 	}
 
+	options.ctx.waitUntil(
+		capture(
+			options.env,
+			"mcp_event_stream_opened",
+			{ filtered: channel !== undefined },
+			{ serverId: options.serverId },
+		),
+	);
+
 	const id = body.id;
 	let stop: (() => void) | undefined;
 
@@ -465,12 +477,35 @@ export async function handleMcp(options: McpOptions, request: Request): Promise<
 			return result(message.id, {});
 		case "tools/list":
 			return result(message.id, { tools: TOOLS });
-		case "tools/call":
+		case "tools/call": {
+			const tool = stringField(message.params, "name") ?? "unknown";
+
 			try {
-				return result(message.id, await callTool(options, message.params));
+				const output = await callTool(options, message.params);
+
+				options.ctx.waitUntil(
+					capture(
+						options.env,
+						"mcp_tool_called",
+						{ tool, success: output.isError !== true },
+						{ serverId: options.serverId },
+					),
+				);
+
+				return result(message.id, output);
 			} catch (error_) {
+				options.ctx.waitUntil(
+					capture(
+						options.env,
+						"mcp_tool_called",
+						{ tool, success: false },
+						{ serverId: options.serverId },
+					),
+				);
+
 				return result(message.id, text(describeError(error_), true));
 			}
+		}
 		case "events/list":
 			return result(message.id, { events: EVENT_TYPES });
 		case "events/stream":

@@ -1,5 +1,6 @@
 /** The browser routes: sign-in, the server list, and server settings. */
 
+import { capture } from "../analytics.ts";
 import { log } from "../config.ts";
 import { describeError } from "../errors.ts";
 import { toJsonObject } from "../json.ts";
@@ -77,7 +78,7 @@ function sameOrigin(request: Request): boolean {
 	}
 }
 
-export async function handleWeb(request: Request, env: Env): Promise<Response | undefined> {
+export async function handleWeb(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | undefined> {
 	const url = new URL(request.url);
 	const path = url.pathname;
 
@@ -90,7 +91,7 @@ export async function handleWeb(request: Request, env: Env): Promise<Response | 
 	if (path === "/logout" && request.method === "POST") return await logout(request, env);
 
 	if (path === "/app" && request.method === "GET") return await dashboard(request, env);
-	if (path === "/app/servers" && request.method === "POST") return await createServer(request, env);
+	if (path === "/app/servers" && request.method === "POST") return await createServer(request, env, ctx);
 
 	if (path.startsWith("/app/servers/")) {
 		const parts = path.slice("/app/servers/".length).split("/");
@@ -160,7 +161,7 @@ async function dashboard(request: Request, env: Env): Promise<Response> {
 	return dashboardPage({ email: user.email, servers });
 }
 
-async function createServer(request: Request, env: Env): Promise<Response> {
+async function createServer(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	if (!sameOrigin(request)) return redirect("/app");
 	const user = await currentUser(env, request);
 
@@ -172,6 +173,8 @@ async function createServer(request: Request, env: Env): Promise<Response> {
 	const id = typeof server === "object" && server !== null && "id" in server ? String(server.id) : "";
 
 	if (!created.ok || !id) return dashboardPage({ email: user.email, servers: await ownedServers(env, user.id), error: "The server could not be created." });
+
+	ctx.waitUntil(capture(env, "server_created", {}, { serverId: id }));
 
 	await serverCall(env, id, "/init", { id, name, ownerId: user.id }, new URL(request.url).origin).catch((error: unknown) => {
 		log("web", "could not initialise " + id + ": " + describeError(error));

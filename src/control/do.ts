@@ -9,6 +9,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Schema } from "effect";
 
+import { capture, pseudonym } from "../analytics.ts";
 import { codeHash, emailKey, loginCode, normaliseEmail } from "../auth/crypto.ts";
 import { mailer } from "../auth/email.ts";
 import { KEYS, log, sessionSecret } from "../config.ts";
@@ -90,7 +91,8 @@ export class Control extends DurableObject<Env> {
 			return failure("Enter a valid email address.");
 		}
 
-		const key = KEYS.loginCode + (await emailKey(email));
+		const emailHash = await emailKey(email);
+		const key = KEYS.loginCode + emailHash;
 		const previous = await this.store.plain(key, LoginCodeSchema);
 
 		if (previous && Date.now() - previous.createdAt < CODE_COOLDOWN_MS) {
@@ -109,7 +111,22 @@ export class Control extends DurableObject<Env> {
 			createdAt: now,
 		});
 
+		const account = await this.store.plain(KEYS.user + emailHash, UserSchema);
 		const sent = await mailer(this.env).send({ to: email, code });
+		// A first-time address has no user id yet, so the request is attributed to
+		// a keyed pseudonym rather than the address itself.
+		const identity = account?.id ?? (await pseudonym(this.env, email));
+
+		if (identity) {
+			this.ctx.waitUntil(
+				capture(
+					this.env,
+					"login_code_requested",
+					{ delivered: sent.sent, existing_user: account !== undefined },
+					{ userId: identity },
+				),
+			);
+		}
 
 		return json({ ok: true, sent: sent.sent, error: sent.error });
 	}
@@ -165,6 +182,15 @@ export class Control extends DurableObject<Env> {
 		};
 
 		await this.store.putPlain(KEYS.authSession + session.id, AuthSessionSchema, session);
+
+		this.ctx.waitUntil(
+			capture(
+				this.env,
+				"login_completed",
+				{ new_user: existing === undefined },
+				{ userId: user.id },
+			),
+		);
 
 		return json({ ok: true, session: session.id, user });
 	}
