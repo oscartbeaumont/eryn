@@ -14,6 +14,7 @@ import { Schema } from "effect";
 import { capture } from "../analytics.ts";
 import type { AnalyticsValue } from "../analytics.ts";
 import { KEYS, log, optional } from "../config.ts";
+import { deployRestart } from "../deploy.ts";
 import { cursor as newCursor } from "../core/ids.ts";
 import { body, failure, json } from "../core/http.ts";
 import {
@@ -98,6 +99,7 @@ export class Hub extends DurableObject<Env> {
 	private readonly serverId: string;
 	private readonly store: RecordStore;
 	private readonly subscribers = new Set<Subscriber>();
+	private restartPending = false;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -149,6 +151,8 @@ export class Hub extends DurableObject<Env> {
 			log("hub", `route ${path} failed: ${describeError(error)}`);
 
 			return failure("The messaging hub could not answer.", 500);
+		} finally {
+			if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
 		}
 	}
 
@@ -971,6 +975,12 @@ export class Hub extends DurableObject<Env> {
 
 	/** Drop replay history past its retention window. */
 	async alarm(): Promise<void> {
+		if (this.restartPending) {
+			this.ctx.abort("deploy changed", { retryAlarm: true });
+
+			return;
+		}
+
 		const cutoff = Date.now() - RETENTION_MS;
 
 		this.ctx.storage.sql.exec("DELETE FROM event WHERE created < ?", cutoff);

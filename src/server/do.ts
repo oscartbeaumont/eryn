@@ -29,7 +29,7 @@ import {
 import type { ServerPolicy } from "../core/policy.ts";
 import { recordStore } from "../core/store.ts";
 import type { RecordStore } from "../core/store.ts";
-import { ORIGIN_HEADER } from "../deploy.ts";
+import { ORIGIN_HEADER, deployRestart } from "../deploy.ts";
 import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
 import { SERVER_ROOT } from "../core/paths.ts";
@@ -232,6 +232,9 @@ export class Server extends DurableObject<Env> {
 	private readonly store: RecordStore;
 	private readonly agent: ServerAgent;
 	private origin: string | undefined;
+	private restartPending = false;
+	private inFlight = 0;
+	private lastActivityAt = Date.now();
 	private readonly nudged = new Set<string>();
 
 	constructor(state: DurableObjectState, env: Env) {
@@ -267,12 +270,19 @@ export class Server extends DurableObject<Env> {
 			await this.ctx.storage.put("server:origin", this.origin);
 		}
 
+		this.inFlight += 1;
+
 		try {
 			return await this.route(path, request);
 		} catch (error) {
 			log("server", "route " + path + " failed: " + describeError(error));
 
 			return failure("The server could not answer.", 500);
+		} finally {
+			this.inFlight -= 1;
+			this.lastActivityAt = Date.now();
+
+			if (await deployRestart(this.ctx.storage, request, this.env)) this.restartPending = true;
 		}
 	}
 
@@ -336,6 +346,21 @@ export class Server extends DurableObject<Env> {
 
 	async alarm(): Promise<void> {
 		if (!this.origin) this.origin = await this.ctx.storage.get<string>("server:origin");
+
+		if (this.restartPending) {
+			// A turn may still be running inside the host. Wait for the object to
+			// be quiet before resetting into the new deploy.
+			if (this.inFlight > 0 || (this.agent.hasHost() && Date.now() - this.lastActivityAt < 5 * 60_000)) {
+				await this.ctx.storage.setAlarm(Date.now() + 5_000);
+
+				return;
+			}
+
+			await this.agent.close().catch(() => undefined);
+			this.ctx.abort("deploy changed", { retryAlarm: true });
+
+			return;
+		}
 
 		if ((await this.channels()).length > 0) {
 			await this.agent.wake().catch((error: unknown) =>
