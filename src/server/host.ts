@@ -19,6 +19,7 @@ import { dynamicPluginsPlugin } from "../plugins/dynamic/index.ts";
 import { filesPlugin } from "../plugins/files/index.ts";
 import { agentInstructionsPlugin } from "../plugins/instructions/index.ts";
 import { policyPlugin } from "../plugins/policy/index.ts";
+import { sessionPlugin } from "../plugins/session/index.ts";
 import type { PermissionSet, SessionGrants } from "../core/policy.ts";
 import { workspaceSkillsPlugin } from "../plugins/skills/index.ts";
 import { workspacePlugin } from "../plugins/workspace/index.ts";
@@ -138,6 +139,7 @@ export async function buildHost(config: HostConfig, options: HostOptions): Promi
 			grantFor: options.grantFor,
 			mcpServers: config.links.map((link) => link.name),
 		}),
+		sessionPlugin(new URL(origin).hostname),
 		agentInstructionsPlugin(
 			() => workspace.instructions,
 			async (sessionID) => {
