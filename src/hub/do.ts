@@ -188,6 +188,10 @@ export class Hub extends DurableObject<Env> {
 			return json({ ok: false, error: "Threads are only available on Discord conversations." });
 		}
 
+		if (!(await this.speakerAllows(request, binding.externalId, "createThread"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow creating threads here." });
+		}
+
 		try {
 			const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
 			const thread = await rest.startThread(binding.externalId, input.title.trim().slice(0, 100) || "Eryn");
@@ -265,6 +269,10 @@ export class Hub extends DurableObject<Env> {
 			return json({ ok: false, error: "Reactions are only available on Discord conversations." });
 		}
 
+		if (!(await this.speakerAllows(request, target.binding.externalId, "react"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow reacting here." });
+		}
+
 		try {
 			await this.discord().addReaction(target.binding.externalId, target.input.messageId, target.input.emoji);
 
@@ -293,6 +301,10 @@ export class Hub extends DurableObject<Env> {
 			return json({ ok: false, error: "Editing is only available on Discord conversations." });
 		}
 
+		if (!(await this.speakerAllows(request, binding.externalId, "manage"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow editing messages here." });
+		}
+
 		try {
 			await this.discord().editMessage(binding.externalId, input.messageId, input.text);
 
@@ -317,6 +329,10 @@ export class Hub extends DurableObject<Env> {
 			return json({ ok: false, error: "Deleting is only available on Discord conversations." });
 		}
 
+		if (!(await this.speakerAllows(request, binding.externalId, "manage"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow deleting messages here." });
+		}
+
 		try {
 			await this.discord().deleteMessage(binding.externalId, input.messageId);
 
@@ -339,6 +355,10 @@ export class Hub extends DurableObject<Env> {
 
 		if (!binding || binding.provider !== "discord") {
 			return json({ ok: false, error: "Pinning is only available on Discord conversations." });
+		}
+
+		if (!(await this.speakerAllows(request, binding.externalId, "manage"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow pinning here." });
 		}
 
 		try {
@@ -576,6 +596,21 @@ export class Hub extends DurableObject<Env> {
 		} catch {
 			return undefined;
 		}
+	}
+
+	private async speakerAllows(
+		request: Request,
+		channel: string,
+		capability: keyof DiscordCapabilities,
+	): Promise<boolean> {
+		const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+		const speaker = sessionChannel ? await this.principal(sessionChannel) : undefined;
+		const binding = await this.binding(channel);
+
+		if (!speaker || !binding?.containerId) return false;
+		const capabilities = await this.capabilities(binding.containerId, speaker.authorId, binding.externalId);
+
+		return capabilities?.[capability] === true;
 	}
 
 	private async principal(channel: string): Promise<PrincipalRecord | undefined> {
