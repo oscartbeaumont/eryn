@@ -39,7 +39,37 @@ const ListServersSchema = Schema.Struct({ userId: Schema.String });
 
 const ServerIdSchema = Schema.Struct({ id: Schema.String });
 
-const RenameServerSchema = Schema.Struct({ id: Schema.String, name: Schema.String });
+const RenameServerSchema = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	userId: Schema.String,
+});
+
+/** A short-lived code proving you can manage a Discord guild. */
+const ClaimSchema = Schema.Struct({
+	serverId: Schema.String,
+	guildId: Schema.String,
+	createdAt: Schema.Finite,
+});
+
+const ClaimPutSchema = Schema.Struct({ serverId: Schema.String, guildId: Schema.String });
+
+const ClaimLookupSchema = Schema.Struct({ code: Schema.String });
+
+const CLAIM_TTL_MS = 15 * 60 * 1000;
+
+const CLAIM = "claim:";
+
+/** Compare two hex digests without leaking how much of a prefix matched. */
+function sameHash(left: string, right: string): boolean {
+	let mismatch = left.length ^ right.length;
+
+	for (let index = 0; index < Math.max(left.length, right.length); index++) {
+		mismatch |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+	}
+
+	return mismatch === 0;
+}
 
 /** A user-facing name, trimmed and bounded. */
 function cleanName(value: string): string {
@@ -65,6 +95,9 @@ export class Control extends DurableObject<Env> {
 			if (path === "/servers/create" && request.method === "POST") return await this.createServer(request);
 			if (path === "/servers/list" && request.method === "POST") return await this.listServers(request);
 			if (path === "/servers/rename" && request.method === "POST") return await this.renameServer(request);
+			if (path === "/claim/put" && request.method === "POST") return await this.putClaim(request);
+			if (path === "/claim/get" && request.method === "POST") return await this.getClaim(request);
+			if (path === "/claim/drop" && request.method === "POST") return await this.dropClaim(request);
 			return failure("Not found.", 404);
 		} catch (error) {
 			log("control", `route ${path} failed: ${String(error)}`);
@@ -154,7 +187,8 @@ export class Control extends DurableObject<Env> {
 
 		const hash = await codeHash(email, input.code.trim(), this.secret());
 
-		if (hash !== pending.hash) {
+		// Constant-time: a length-aware comparison against the stored HMAC.
+		if (!sameHash(hash, pending.hash)) {
 			await this.store.putPlain(key, LoginCodeSchema, { ...pending, attempts: pending.attempts + 1 });
 
 			return failure("That code is not right.");
@@ -257,6 +291,9 @@ export class Control extends DurableObject<Env> {
 		const input = await body(request, RenameServerSchema);
 
 		if (input instanceof Response) return input;
+		const owned = await this.ctx.storage.get<boolean>(KEYS.ownerIndex + input.userId + ":" + input.id);
+
+		if (!owned) return failure("That server does not exist.", 404);
 		const key = KEYS.serverRef + input.id;
 		const server = await this.store.plain(key, ServerRefSchema);
 
@@ -266,6 +303,52 @@ export class Control extends DurableObject<Env> {
 		await this.store.putPlain(key, ServerRefSchema, next);
 
 		return json({ server: next });
+	}
+
+	// --- Guild claims ---------------------------------------------------------
+
+	/**
+	 * Issue a code the user types in Discord.
+	 *
+	 * Binding a guild is an assertion of authority over it, and the web app has
+	 * no Discord identity, so the claim has to be proven where Discord knows who
+	 * you are: a slash command, checked for Manage Server.
+	 */
+	private async putClaim(request: Request): Promise<Response> {
+		const input = await body(request, ClaimPutSchema);
+
+		if (input instanceof Response) return input;
+		const code = newId("clm", 4).replaceAll(/[^a-z0-9]/gi, "").slice(-6).toUpperCase();
+		const claim = { serverId: input.serverId, guildId: input.guildId, createdAt: Date.now() };
+
+		await this.store.putPlain(CLAIM + code, ClaimSchema, claim);
+
+		return json({ code, expiresAt: claim.createdAt + CLAIM_TTL_MS });
+	}
+
+	private async getClaim(request: Request): Promise<Response> {
+		const input = await body(request, ClaimLookupSchema);
+
+		if (input instanceof Response) return input;
+		const claim = await this.store.plain(CLAIM + input.code.trim().toUpperCase(), ClaimSchema);
+
+		if (!claim) return failure("That code is not valid.", 404);
+		if (Date.now() - claim.createdAt > CLAIM_TTL_MS) {
+			await this.store.remove(CLAIM + input.code.trim().toUpperCase());
+
+			return failure("That code has expired.", 410);
+		}
+
+		return json({ serverId: claim.serverId, guildId: claim.guildId });
+	}
+
+	private async dropClaim(request: Request): Promise<Response> {
+		const input = await body(request, ClaimLookupSchema);
+
+		if (input instanceof Response) return input;
+		await this.store.remove(CLAIM + input.code.trim().toUpperCase());
+
+		return json({ ok: true });
 	}
 }
 

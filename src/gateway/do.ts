@@ -17,6 +17,7 @@ import { InboundMessageSchema } from "../core/schema.ts";
 import { ORIGIN_HEADER, deployRestart, withDeploy, withOrigin } from "../deploy.ts";
 import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
+import { controlCall } from "../platform/clients.ts";
 import { DiscordAuthority } from "../discord/authority.ts";
 import { DiscordSocket } from "../discord/socket.ts";
 import type { DiscordModal } from "../discord/components.ts";
@@ -59,6 +60,12 @@ const COMMANDS = [
 		description: "Eryn",
 		options: [
 			{ type: 1, name: "setup", description: "Open this server's settings" },
+			{
+				type: 1,
+				name: "claim",
+				description: "Bind this Discord server to an Eryn server with a code",
+				options: [{ type: 3, name: "code", description: "The code from the Eryn settings page", required: true }],
+			},
 			{ type: 1, name: "stop", description: "Stop the current run" },
 			{ type: 1, name: "compact", description: "Compact this conversation" },
 			{
@@ -96,18 +103,19 @@ function isBot(message: DiscordMessage): boolean {
 }
 
 function attachmentsOf(message: DiscordMessage) {
-	return (message.attachments ?? []).flatMap((file) =>
-		file.url
-			? [
-					{
-						url: file.url,
-						name: file.filename,
-						contentType: file.content_type,
-						size: file.size,
-					},
-				]
-			: [],
-	);
+	// A reply often asks about the screenshot in the message above, so the
+	// referenced files count too.
+	const files = [...(message.attachments ?? []), ...(message.referenced_message?.attachments ?? [])];
+	const seen = new Set<string>();
+
+	return files.flatMap((file) => {
+		const url = file.url ?? file.proxy_url;
+
+		if (!url || seen.has(url)) return [];
+		seen.add(url);
+
+		return [{ url, name: file.filename, contentType: file.content_type, size: file.size }];
+	});
 }
 
 export class Gateway extends DurableObject<Env> {
@@ -238,6 +246,89 @@ export class Gateway extends DurableObject<Env> {
 		return json({ ok: true, capabilities: await authority.scopeCapabilities(input.userId, channel) });
 	}
 
+	/** Whether the person who ran a slash command holds a capability here. */
+	private async mayManage(
+		interaction: DiscordInteraction,
+		guildId: string,
+		capability: "manage" | "send",
+	): Promise<boolean> {
+		const actor = interaction.member?.user?.id ?? interaction.user?.id;
+		const channelId = interaction.channel_id;
+
+		if (!actor || !channelId) return false;
+		let authority = this.authorities.get(guildId);
+
+		if (!authority) {
+			authority = new DiscordAuthority(this.rest, guildId);
+			this.authorities.set(guildId, authority);
+		}
+
+		const channel = await this.rest.channel(channelId).catch(() => undefined);
+
+		if (!channel) return false;
+		const capabilities = await authority.scopeCapabilities(actor, channel);
+
+		return capabilities[capability];
+	}
+
+	/**
+	 * Bind this guild to an Eryn server.
+	 *
+	 * A deployment-wide bot token is in every guild, so which guild is not proof
+	 * of anything. The code comes from the settings page and the claim is
+	 * accepted only from someone with Manage Server here, which is the one place
+	 * Discord can vouch for the person asking.
+	 */
+	private async claim(interaction: DiscordInteraction, guildId: string): Promise<void> {
+		const code = optionValue(subOptions(interaction), "code") ?? "";
+		const actor = interaction.member?.user?.id ?? interaction.user?.id;
+		const reply = async (text: string) =>
+			await this.rest.interactionReply(interaction.id, interaction.token, text);
+
+		if (!actor) return await reply("Could not identify you.");
+		if (!code.trim()) return await reply("Include the code from the Eryn settings page.");
+
+		const claim = await controlCall(this.env, "/claim/get", { code: code.trim() });
+
+		if (!claim.ok) {
+			return await reply(
+				typeof claim.data.error === "string" ? claim.data.error : "That code is not valid.",
+			);
+		}
+
+		if (claim.data.guildId !== guildId) {
+			return await reply("That code belongs to a different Discord server.");
+		}
+
+		let authority = this.authorities.get(guildId);
+
+		if (!authority) {
+			authority = new DiscordAuthority(this.rest, guildId);
+			this.authorities.set(guildId, authority);
+		}
+
+		if (!(await authority.canManageGuild(actor))) {
+			return await reply("You need Manage Server here to connect Eryn.");
+		}
+
+		const serverId = String(claim.data.serverId ?? "");
+		const confirmed = await this.toServer(serverId, "/messaging/discord/confirm", {
+			guildId,
+			code: code.trim(),
+			ownerDiscordId: actor,
+		}).catch(() => undefined);
+
+		if (confirmed?.ok !== true) {
+			return await reply(
+				typeof confirmed?.error === "string"
+					? confirmed.error
+					: "That Eryn server could not be connected.",
+			);
+		}
+
+		await reply("Eryn is connected to this Discord server.");
+	}
+
 	private async keepAlive(): Promise<void> {
 		if (this.restartPending) return;
 		if (!this.token) return;
@@ -256,11 +347,15 @@ export class Gateway extends DurableObject<Env> {
 				log("gateway", "could not start: " + describeError(error));
 			}
 		} else {
-			this.socket.ensure();
+			// Cloudflare drops an outbound WebSocket after 15 minutes, and the
+			// object becomes evictable with it. Recycle on our own schedule so
+			// no message falls into the gap.
+			if (this.socket.stale) this.socket.recycle();
+			else this.socket.ensure();
 		}
 
 		await this.ensureCommands();
-		await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_MS);
+		await this.ctx.storage.setAlarm(Date.now() + (this.socket?.open ? KEEPALIVE_MS : 10_000));
 	}
 
 	private async ensureCommands(): Promise<void> {
@@ -329,6 +424,7 @@ export class Gateway extends DurableObject<Env> {
 		const consumed = await this.toServer(serverId, "/consume", {
 			channel: message.channel_id,
 			text: outbound.text,
+			userId: message.author?.id,
 		});
 
 		if (consumed?.consumed === true) return;
@@ -409,6 +505,12 @@ export class Gateway extends DurableObject<Env> {
 		const serverId = await this.ctx.storage.get<string>(KEYS.guildIndex + guildId);
 		const origin = configuredOrigin(this.env) ?? this.origin;
 
+		if (sub === "claim") {
+			await this.claim(interaction, guildId);
+
+			return;
+		}
+
 		if (sub === "setup") {
 			const target = serverId
 				? (origin ? origin + "/app/servers/" + serverId : "(Open the Eryn site to finish setup.)")
@@ -428,6 +530,14 @@ export class Gateway extends DurableObject<Env> {
 		}
 
 		if (sub === "compact") {
+			if (!(await this.mayManage(interaction, guildId, "manage"))) {
+				return await this.rest.interactionReply(
+					interaction.id,
+					interaction.token,
+					"Your Discord permissions do not allow compacting this conversation.",
+				);
+			}
+
 			if (serverId) await this.toServer(serverId, "/compact", { channelId: interaction.channel_id });
 			await this.rest.interactionReply(interaction.id, interaction.token, "Compacting this conversation.");
 
@@ -435,6 +545,14 @@ export class Gateway extends DurableObject<Env> {
 		}
 
 		if (sub === "command") {
+			if (!(await this.mayManage(interaction, guildId, "manage"))) {
+				return await this.rest.interactionReply(
+					interaction.id,
+					interaction.token,
+					"Your Discord permissions do not allow running commands here.",
+				);
+			}
+
 			const commandName = optionValue(subOptions(interaction), "name");
 			const argumentsText = optionValue(subOptions(interaction), "arguments") ?? "";
 
@@ -496,6 +614,14 @@ export class Gateway extends DurableObject<Env> {
 		}
 
 		if (sub === "stop") {
+			if (!(await this.mayManage(interaction, guildId, "send"))) {
+				return await this.rest.interactionReply(
+					interaction.id,
+					interaction.token,
+					"Your Discord permissions do not allow stopping runs here.",
+				);
+			}
+
 			if (serverId) await this.toServer(serverId, "/interrupt", { channelId: interaction.channel_id });
 			await this.rest.interactionReply(interaction.id, interaction.token, "Stopped.");
 

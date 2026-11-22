@@ -13,6 +13,7 @@ import type { Schema } from "effect";
 
 import { capture } from "../../analytics.ts";
 import { newId } from "../../core/ids.ts";
+import { externalFetch } from "../../http.ts";
 import { declaredInput, objectSchema, toolRun } from "../tool.ts";
 import type { ToolCall, ToolSpec } from "../tool.ts";
 import { base64ToBytes, bytesToBase64 } from "../workspace/bytes.ts";
@@ -21,6 +22,8 @@ import { fileStore } from "../workspace/store.ts";
 import { mintFileToken } from "../../files/token.ts";
 
 const MAX_BYTES = 25 * 1024 * 1024;
+
+const fetchExternal = externalFetch(30_000);
 
 const MIME = new Map([
 	[".png", "image/png"],
@@ -33,7 +36,9 @@ const MIME = new Map([
 	[".md", "text/markdown"],
 	[".txt", "text/plain"],
 	[".csv", "text/csv"],
-	[".html", "text/html"],
+	// There is deliberately no `.html`, `.htm`, or `.svg` entry: markup is
+	// stored as `application/octet-stream`, so `/files` never serves it as a
+	// document that would run on this origin.
 	[".zip", "application/zip"],
 ]);
 
@@ -41,6 +46,51 @@ function mimeOf(name: string): string {
 	const dot = name.lastIndexOf(".");
 
 	return dot >= 0 ? (MIME.get(name.slice(dot).toLowerCase()) ?? "application/octet-stream") : "application/octet-stream";
+}
+
+/**
+ * Read a response body, refusing to buffer past `limit` bytes.
+ *
+ * The declared length is checked first so an obviously oversized attachment is
+ * never read at all; the stream is then cancelled as soon as it passes the cap,
+ * which covers a server that declares nothing or lies.
+ */
+async function readCapped(response: Response, limit: number): Promise<Uint8Array | undefined> {
+	const declared = response.headers.get("content-length");
+
+	if (declared !== null && Number(declared) > limit) return undefined;
+
+	const reader: ReadableStreamDefaultReader<Uint8Array> | undefined = response.body?.getReader();
+
+	// A body-less response has nothing to cap; it was empty before this check too.
+	if (!reader) return new Uint8Array();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+
+	for (;;) {
+		const chunk = await reader.read();
+
+		if (chunk.done) break;
+		total += chunk.value.byteLength;
+
+		if (total > limit) {
+			await reader.cancel().catch(() => undefined);
+
+			return undefined;
+		}
+
+		chunks.push(chunk.value);
+	}
+
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	return bytes;
 }
 
 function fileName(url: string): string {
@@ -122,12 +172,12 @@ export function filesPlugin(options: FilesPluginOptions) {
 				const { url, path } = declaredInput<{ url: string; path?: string }>(rawInput);
 
 				if (!url.startsWith("https://")) throw new Error("An HTTPS attachment URL is required.");
-				const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+				const response = await fetchExternal(url);
 
 				if (!response.ok) throw new Error("The attachment returned HTTP " + response.status);
-				const bytes = new Uint8Array(await response.arrayBuffer());
+				const bytes = await readCapped(response, MAX_BYTES);
 
-				if (bytes.byteLength > MAX_BYTES) throw new Error("That attachment is larger than 25 MB.");
+				if (!bytes) throw new Error("That attachment is larger than 25 MB.");
 				const root = options.rootForSession(call.sessionID);
 				const target = await resolveToolPath({
 					store,

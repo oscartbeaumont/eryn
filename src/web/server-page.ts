@@ -41,6 +41,7 @@ export interface ServerPageData {
 		readonly instructions: string;
 		readonly mode: string;
 	};
+	readonly claim?: string;
 	readonly plugins: ReadonlyArray<{ id: string; name: string; version: string; enabled: boolean }>;
 	readonly guilds: ReadonlyArray<{ id: string; name: string }>;
 	readonly guild?: string;
@@ -147,6 +148,9 @@ export function serverPage(data: ServerPageData): Response {
 			'<input id="apiSecret" name="apiSecret" type="password" required autocomplete="off">',
 			'<label for="fromNumber">SendBlue number</label>',
 			'<input id="fromNumber" name="fromNumber" placeholder="+15551234567" required>',
+			'<label for="ownerNumber">Your number (owner)</label>',
+			'<input id="ownerNumber" name="ownerNumber" placeholder="+15557654321" required>',
+			'<p class="faint">Only this number acts with owner permissions. Every other number is blocked until you grant it a role.</p>',
 			'<button type="submit">Save SendBlue keys</button>',
 			"</form>",
 			imessageConfigured ? okBox("iMessage is configured.") : "",
@@ -346,6 +350,17 @@ export function serverPage(data: ServerPageData): Response {
 			"</ul>"
 		: '<p class="muted">No automations. Ask Eryn to schedule something in a conversation.</p>';
 
+	const claimCard = data.claim
+		? section(
+				"Finish in Discord",
+				[
+					'<p class="muted">Binding a Discord server proves you can manage it, and only Discord can say that. Run this in the server:</p>',
+					'<pre><code>/eryn claim ' + escapeHtml(data.claim) + "</code></pre>",
+					'<p class="faint">The code expires in fifteen minutes. Anyone with Manage Server can run it.</p>',
+				].join(""),
+			)
+		: "";
+
 	const oauthCard = data.oauth
 		? section(
 				"Finish provider sign-in",
@@ -489,6 +504,7 @@ export function serverPage(data: ServerPageData): Response {
 		errorBox(data.error),
 		okBox(data.ok),
 		'<div class="grid" style="margin-top:1rem">',
+		claimCard,
 		discord,
 		imessage,
 		"</div>",

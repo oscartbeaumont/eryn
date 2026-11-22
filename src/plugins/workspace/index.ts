@@ -13,7 +13,8 @@ import type { Schema } from "effect";
 import { declaredInput, objectSchema, toolRun } from "../tool.ts";
 import type { ToolCall, ToolSpec } from "../tool.ts";
 import { base64ToBytes, bytesToBase64, bytesToText, textToBytes } from "./bytes.ts";
-import { resolvePath, resolveToolPath } from "./paths.ts";
+import { pathDenial, resolvePath, resolveToolPath } from "./paths.ts";
+import type { PathAccess } from "./paths.ts";
 import { runShell } from "./shell.ts";
 import { fileStore } from "./store.ts";
 import type { FileStore, StoredFile } from "./store.ts";
@@ -44,19 +45,30 @@ type FileInput = { filePath: string };
 type ReadInput = FileInput & { offset?: number; limit?: number };
 type EditInput = FileInput & { oldString: string; newString: string; replaceAll?: boolean };
 
+/** A confined path, or the message to hand back to the model. */
+type Resolution =
+	| { readonly ok: true; readonly path: string }
+	| { readonly ok: false; readonly error: string };
+
 function toolPath(store: FileStore, options: WorkspaceOptions) {
-	return (
+	return async (
 		input: { filePath?: string; path?: string },
 		call: ToolCall | undefined,
+		access: PathAccess,
 		kind: "file" | "dir" = "file",
-	): Promise<string> =>
-		resolveToolPath({
+	): Promise<Resolution> => {
+		const root = options.rootForSession(call?.sessionID ?? "");
+		const path = await resolveToolPath({
 			store,
-			root: options.rootForSession(call?.sessionID ?? ""),
+			root,
 			skillDirectory: call && options.activeSkills ? options.activeSkills.get(call.sessionID) : undefined,
 			input: input.filePath ?? input.path ?? ".",
 			kind,
 		});
+		const denial = pathDenial({ serverRoot: options.serverRoot, root, path, access });
+
+		return denial === undefined ? { ok: true, path } : { ok: false, error: denial };
+	};
 }
 
 export function workspacePlugin(options: WorkspaceOptions) {
@@ -77,7 +89,10 @@ export function workspacePlugin(options: WorkspaceOptions) {
 			),
 			async run(rawInput, call) {
 				const { filePath, offset, limit } = declaredInput<ReadInput>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
+				const resolved = await resolve({ filePath }, call, "read");
+
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
 				const content = await readText(store, path);
 
 				if (content === undefined) return "Error: " + path + " does not exist";
@@ -103,7 +118,10 @@ export function workspacePlugin(options: WorkspaceOptions) {
 			),
 			async run(rawInput, call) {
 				const { filePath, content } = declaredInput<FileInput & { content: string }>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
+				const resolved = await resolve({ filePath }, call, "write");
+
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
 
 				await writeText(store, path, content);
 
@@ -124,7 +142,10 @@ export function workspacePlugin(options: WorkspaceOptions) {
 			),
 			async run(rawInput, call) {
 				const { filePath, oldString, newString, replaceAll } = declaredInput<EditInput>(rawInput);
-				const path = await resolve({ filePath }, call, "file");
+				const resolved = await resolve({ filePath }, call, "write");
+
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const path = resolved.path;
 				const content = await readText(store, path);
 
 				if (content === undefined) return "Error: " + path + " does not exist";
@@ -151,8 +172,17 @@ export function workspacePlugin(options: WorkspaceOptions) {
 			}),
 			async run(rawInput, call) {
 				const { path: directory } = declaredInput<{ path?: string }>(rawInput);
-				const prefix = await resolve({ path: directory }, call, "dir");
-				const files = (await store.list(prefix)).map((entry) => entry.path);
+				const resolved = await resolve({ path: directory }, call, "read", "dir");
+
+				if (!resolved.ok) return "Error: " + resolved.error;
+				const prefix = resolved.path;
+				const root = options.rootForSession(call.sessionID);
+				const files = (await store.list(prefix))
+					.map((entry) => entry.path)
+					.filter(
+						(entry) =>
+							pathDenial({ serverRoot: options.serverRoot, root, path: entry, access: "read" }) === undefined,
+					);
 
 				return files.length ? files.sort().join("\n") : "(empty: " + prefix + ")";
 			},

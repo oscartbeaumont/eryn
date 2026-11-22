@@ -30,6 +30,7 @@ import type { ServerPolicy } from "../core/policy.ts";
 import { recordStore } from "../core/store.ts";
 import type { RecordStore } from "../core/store.ts";
 import { ORIGIN_HEADER, deployRestart } from "../deploy.ts";
+import { controlCall } from "../platform/clients.ts";
 import { describeError } from "../errors.ts";
 import { discordRest } from "../discord/api.ts";
 import { SERVER_ROOT } from "../core/paths.ts";
@@ -135,11 +136,23 @@ const ImessageSchema = Schema.Struct({
 	apiKeyId: Schema.String,
 	apiSecret: Schema.String,
 	fromNumber: Schema.String,
+	ownerNumber: Schema.String,
 });
 
 const GuildSchema = Schema.Struct({ guildId: Schema.String });
 
-const ConsumeSchema = Schema.Struct({ channel: Schema.String, text: Schema.String });
+const DiscordConfirmSchema = Schema.Struct({
+	guildId: Schema.String,
+	guildName: Schema.optional(Schema.String),
+	code: Schema.String,
+	ownerDiscordId: Schema.String,
+});
+
+const ConsumeSchema = Schema.Struct({
+	channel: Schema.String,
+	text: Schema.String,
+	userId: Schema.optional(Schema.String),
+});
 
 const OAuthStartSchema = Schema.Struct({
 	integrationID: Schema.String,
@@ -332,6 +345,8 @@ export class Server extends DurableObject<Env> {
 		if (path === "/nudge" && request.method === "POST") return await this.nudge(request);
 		if (path === "/messaging" && request.method === "POST") return await this.messaging();
 		if (path === "/messaging/discord" && request.method === "POST") return await this.setDiscord(request);
+		if (path === "/messaging/discord/confirm" && request.method === "POST")
+			return await this.confirmDiscord(request);
 		if (path === "/messaging/imessage" && request.method === "POST") return await this.setImessage(request);
 		if (path === "/policy" && request.method === "POST") return await this.getPolicy();
 		if (path === "/policy/set" && request.method === "POST") return await this.setPolicy(request);
@@ -629,6 +644,11 @@ export class Server extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 		await this.store.remove(KEYS.provider + input.integrationID);
+		// Remove the credential from the host too. Disconnecting has to revoke,
+		// not just forget: the sealed key otherwise keeps working.
+		await this.agent.forgetCredential(input.integrationID).catch((error: unknown) => {
+			log("server", "could not forget the credential: " + describeError(error));
+		});
 		this.track("inference_disconnected", { provider: input.integrationID });
 
 		return json({ ok: true });
@@ -1178,7 +1198,7 @@ export class Server extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 
-		return json({ consumed: await this.agent.consumeText(input.channel, input.text) });
+		return json({ consumed: await this.agent.consumeText(input.channel, input.text, input.userId) });
 	}
 
 	private async approval(request: Request): Promise<Response> {
@@ -1213,7 +1233,7 @@ export class Server extends DurableObject<Env> {
 
 		try {
 			// An approval or form answer is not a new request for the agent.
-			if (message.text && (await this.agent.consumeText(message.channel, message.text))) {
+			if (message.text && (await this.agent.consumeText(message.channel, message.text, message.author?.id))) {
 				return json({ ok: true, prompted: false, consumed: true });
 			}
 
@@ -1242,10 +1262,40 @@ export class Server extends DurableObject<Env> {
 		return json(response);
 	}
 
+	/**
+	 * Start binding a guild.
+	 *
+	 * The bot token is deployment-wide, so "which guild" is not proof of
+	 * anything. Hand back a code instead; the guild is bound only once someone
+	 * with Manage Server runs `/eryn claim` inside it.
+	 */
 	private async setDiscord(request: Request): Promise<Response> {
 		const input = await body(request, DiscordSchema);
 
 		if (input instanceof Response) return input;
+		const claim = await controlCall(this.env, "/claim/put", {
+			serverId: this.serverId,
+			guildId: input.guildId,
+		});
+
+		if (!claim.ok || typeof claim.data.code !== "string") {
+			return failure("Could not start the Discord claim.", 502);
+		}
+
+		return json({ ok: true, claim: claim.data.code, guildId: input.guildId });
+	}
+
+	private async confirmDiscord(request: Request): Promise<Response> {
+		const input = await body(request, DiscordConfirmSchema);
+
+		if (input instanceof Response) return input;
+		const claim = await controlCall(this.env, "/claim/get", { code: input.code });
+
+		if (!claim.ok || claim.data.guildId !== input.guildId) {
+			return failure("That claim is not valid for this server.", 400);
+		}
+
+		await controlCall(this.env, "/claim/drop", { code: input.code }).catch(() => undefined);
 		await this.hub("/messaging", {
 			config: { kind: "discord", guildId: input.guildId, guildName: input.guildName },
 		});
@@ -1253,16 +1303,20 @@ export class Server extends DurableObject<Env> {
 		const rest = discordRest(optional(this.env, "DISCORD_BOT_TOKEN") ?? "");
 		const guild = await rest.guildInfo(input.guildId).catch(() => undefined);
 
-		if (guild?.ownerId) {
-			const policy = await this.policy();
+		// The person who ran the claim is the authority, not whoever happens to
+		// own the guild: a manager setting Eryn up is the intended case.
+		const policy = await this.policy();
 
-			if (policy.ownerDiscordId !== guild.ownerId) {
-				await this.store.putPlain(KEYS.policy, ServerPolicySchema, {
-					...policy,
-					ownerDiscordId: guild.ownerId,
-					updatedAt: Date.now(),
-				});
-			}
+		if (policy.ownerDiscordId !== input.ownerDiscordId) {
+			await this.store.putPlain(KEYS.policy, ServerPolicySchema, {
+				...policy,
+				ownerDiscordId: input.ownerDiscordId,
+				updatedAt: Date.now(),
+			});
+		}
+		// Keep the guild owner too, so an ownership change is visible.
+		if (guild?.ownerId && guild.ownerId !== input.ownerDiscordId) {
+			log("server", "guild owner is " + guild.ownerId + ", bound by " + input.ownerDiscordId);
 		}
 
 		await this.pushPolicy();
@@ -1275,7 +1329,10 @@ export class Server extends DurableObject<Env> {
 		const input = await body(request, ImessageSchema);
 
 		if (input instanceof Response) return input;
-		const secret = newId("whk", 24);
+		// Keep the existing secret: rotating it would break the webhook already
+		// registered with SendBlue, and the agent would silently stop receiving.
+		const stored = await this.ctx.storage.get<{ webhookSecret?: string }>("messaging:imessage");
+		const secret = stored?.webhookSecret ?? newId("whk", 24);
 
 		await this.hub("/messaging", {
 			config: {
@@ -1283,6 +1340,7 @@ export class Server extends DurableObject<Env> {
 				apiKeyId: input.apiKeyId,
 				apiSecret: input.apiSecret,
 				fromNumber: input.fromNumber,
+				ownerNumber: input.ownerNumber,
 				webhookSecret: secret,
 			},
 		});
@@ -1313,7 +1371,8 @@ export class Server extends DurableObject<Env> {
 		const message: InboundMessage = {
 			id: typeof payload.message_handle === "string" ? payload.message_handle : newId("msg"),
 			provider: "imessage",
-			channel: group || from,
+			// A group is a different send endpoint, so keep the distinction.
+			channel: group ? "group:" + group : from,
 			author: { id: from || "unknown", name: from || "unknown" },
 			text: content,
 			attachments: media ? [{ url: media }] : [],
@@ -1322,7 +1381,7 @@ export class Server extends DurableObject<Env> {
 			channelName: group || from,
 		};
 
-		if (message.text && (await this.agent.consumeText(message.channel, message.text))) {
+		if (message.text && (await this.agent.consumeText(message.channel, message.text, message.author.id))) {
 			return json({ ok: true, consumed: true });
 		}
 

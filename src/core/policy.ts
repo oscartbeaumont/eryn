@@ -202,15 +202,20 @@ export function profileFor(policy: ServerPolicy, id: string): RoleProfile {
 	);
 }
 
-/** Apply a sparse override to a permission set. */
+/**
+ * Apply a sparse override to a permission set.
+ *
+ * Tool and MCP maps merge key by key: naming one tool keeps every other entry
+ * from the base map, and the override wins where the same key appears twice.
+ */
 export function applyOverrides(base: PermissionSet, overrides: PermissionOverrides | undefined): PermissionSet {
 	if (!overrides) return base;
 
 	return {
 		invoke: overrides.invoke ?? base.invoke,
 		channels: overrides.channels ?? base.channels,
-		tools: overrides.tools ?? base.tools,
-		mcp: overrides.mcp ?? base.mcp,
+		tools: { ...base.tools, ...overrides.tools },
+		mcp: { ...base.mcp, ...overrides.mcp },
 		crossChannel: overrides.crossChannel ?? base.crossChannel,
 		admin: overrides.admin ?? base.admin,
 	};
@@ -224,6 +229,17 @@ export function stricter(a: PolicyEffect, b: PolicyEffect): PolicyEffect {
 	return "allow";
 }
 
+/**
+ * Merge two permission maps so a wildcard block stays authoritative.
+ *
+ * Exact entries are a map's deliberate exception to its own wildcard, so a
+ * profile that blocks everything keeps the tools it names (the guest
+ * allowlist). That exception does not travel: when one side's wildcard is
+ * `"block"`, the other side's exact entries are blocked too, and only the
+ * blocking side's own exact entries survive. Blocking both sides therefore
+ * unions their allowlists, while a wildcard block anywhere beats an unrelated
+ * role's exact allow.
+ */
 function mergeMaps(
 	left: Readonly<Record<string, PolicyEffect>>,
 	right: Readonly<Record<string, PolicyEffect>>,
@@ -234,6 +250,18 @@ function mergeMaps(
 		const previous = merged[key];
 
 		merged[key] = previous === undefined ? effect : stricter(previous, effect);
+	}
+
+	const leftBlocked = left["*"] === "block";
+	const rightBlocked = right["*"] === "block";
+
+	if (leftBlocked !== rightBlocked) {
+		const blocked = leftBlocked ? left : right;
+		const loose = leftBlocked ? right : left;
+
+		for (const key of Object.keys(loose)) {
+			if (key !== "*" && blocked[key] === undefined) merged[key] = "block";
+		}
 	}
 
 	return merged;
@@ -300,6 +328,13 @@ export function canUseChannel(permissions: PermissionSet, channel: string): bool
 
 /**
  * The decision for one tool call.
+ *
+ * Resolution rule: an exact key wins over the wildcard, and the wildcard falls
+ * back to `"block"`. An exact `"allow"` is only ever a deliberate exception
+ * (a guest allowlist, an admin override, or a session grant) because
+ * `mergeMaps` already turns any unrelated role's exact entries into blocks
+ * when another role carries `"*": "block"`. So a merged permission set cannot
+ * smuggle an exact allow past a wildcard block.
  *
  * `mcpServers` is the server names linked to this Eryn server, so an MCP tool
  * `github_create_issue` can match the `github` and `github_create_issue` keys

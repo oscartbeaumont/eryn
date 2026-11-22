@@ -60,6 +60,58 @@ test("multiple roles are additive and a block wins", () => {
 	assert.equal(toolDecision(permissions, "bash"), "block");
 });
 
+test("a wildcard block beats another role's exact allow", () => {
+	const allow: RoleMapping = {
+		roleId: "allow",
+		roleName: "Allow",
+		profileId: "member",
+		overrides: { tools: { bash: "allow" } },
+	};
+	const block: RoleMapping = {
+		roleId: "block",
+		roleName: "Block",
+		profileId: "guest",
+		overrides: { tools: { "*": "block" } },
+	};
+	const principal = { id: "u", roles: ["allow", "block"] };
+
+	const merged = permissionsFor(policyWithRoles([allow, block]), principal);
+
+	assert.equal(toolDecision(merged, "bash"), "block");
+	assert.equal(toolDecision(merged, "write"), "block");
+	// The blocking role keeps its own explicit allowlist.
+	assert.equal(toolDecision(merged, "send_message"), "allow");
+
+	const reversed = permissionsFor(policyWithRoles([block, allow]), principal);
+
+	assert.equal(toolDecision(reversed, "bash"), "block");
+});
+
+test("role overrides merge tool maps key by key", () => {
+	const policy = policyWithRoles([
+		{ roleId: "m", roleName: "M", profileId: "member", overrides: { tools: { bash: "allow" } } },
+	]);
+	const permissions = permissionsFor(policy, { id: "u", roles: ["m"] });
+
+	assert.equal(toolDecision(permissions, "bash"), "allow");
+	assert.equal(permissions.tools["*"], "allow");
+	assert.equal(toolDecision(permissions, "write"), "allow");
+	assert.equal(permissions.mcp["*"], "ask");
+});
+
+test("a channel override still applies after the role merge", () => {
+	const policy: TestPolicy = {
+		...policyWithRoles([{ roleId: "m", roleName: "M", profileId: "member" }]),
+		channelOverrides: { c1: { tools: { bash: "block" } } },
+	};
+
+	const principal = { id: "u", roles: ["m"] };
+
+	assert.equal(toolDecision(permissionsFor(policy, principal, "c1"), "bash"), "block");
+	assert.equal(toolDecision(permissionsFor(policy, principal, "c1"), "write"), "allow");
+	assert.equal(toolDecision(permissionsFor(policy, principal, "c2"), "bash"), "ask");
+});
+
 test("channel access and cross-channel sends use the permission set", () => {
 	const policy = policyWithRoles();
 

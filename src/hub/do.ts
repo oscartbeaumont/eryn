@@ -91,6 +91,20 @@ const HEARTBEAT_MS = 20_000;
 
 const encoder = new TextEncoder();
 
+/** Whether two phone numbers are the same, tolerating formatting differences. */
+function digitsOf(value: string): string {
+	return value.replaceAll(/\D/g, "");
+}
+
+function sameNumber(left: string, right: string): boolean {
+	const a = digitsOf(left);
+	const b = digitsOf(right);
+	const shorter = a.length < b.length ? a : b;
+
+	// Compare the subscriber part so "+1 555 010 4477" matches "5550104477".
+	return shorter.length >= 7 && (a.endsWith(shorter) || b.endsWith(shorter));
+}
+
 function frameText(frame: Frame): Uint8Array {
 	return encoder.encode(`data: ${JSON.stringify(frame)}\n\n`);
 }
@@ -115,7 +129,11 @@ export class Hub extends DurableObject<Env> {
 			)`,
 		);
 		state.storage.sql.exec("CREATE INDEX IF NOT EXISTS event_channel ON event (channel, seq)");
-		void state.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000);
+		// Only arm when nothing is scheduled. Re-arming on every cold start
+		// pushes the retention sweep into the future forever.
+		void state.storage
+			.getAlarm()
+			.then((at) => (at === null ? state.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000) : undefined));
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -134,6 +152,8 @@ export class Hub extends DurableObject<Env> {
 			if (path === "/remember-session" && request.method === "POST") return await this.rememberSession(request);
 			if (path === "/policy" && request.method === "POST") return await this.putPolicy(request);
 			if (path === "/context" && request.method === "POST") return await this.context(request);
+			if (path === "/principal/bind" && request.method === "POST")
+				return await this.bindPrincipal(request);
 			if (path === "/thread" && request.method === "POST") return await this.startThread(request);
 			if (path === "/threads" && request.method === "POST") return await this.listThreads(request);
 			if (path === "/react" && request.method === "POST") return await this.react(request);
@@ -417,9 +437,41 @@ export class Hub extends DurableObject<Env> {
 		if (input instanceof Response) return input;
 
 		try {
-			if (action === "archive") await this.discord().setThreadArchived(input.threadId, true);
-			else if (action === "join") await this.discord().joinThread(input.threadId);
-			else await this.discord().leaveThread(input.threadId);
+			// A thread id is a channel id. Check the speaker against its guild
+			// before the bot acts on it, exactly like a top-level channel.
+			const rest = this.discord();
+			const thread = await rest.channel(input.threadId);
+
+			if (!thread) return json({ ok: false, error: "That thread does not exist." });
+			const guildId =
+				(thread as { guild_id?: string }).guild_id ??
+				(await rest.channel((thread as { parent_id?: string }).parent_id ?? ""))?.guild_id;
+
+			if (!guildId) return json({ ok: false, error: "That thread has no guild." });
+			const sessionChannel = await this.sessionChannel(request.headers.get("x-eryn-session") ?? undefined);
+			const speaker = sessionChannel ? await this.principal(sessionChannel) : undefined;
+
+			if (!speaker) return json({ ok: false, error: "Eryn could not verify your access to that thread." });
+
+			const capabilities = await this.capabilities(
+				guildId,
+				speaker.authorId,
+				(thread as { parent_id?: string }).parent_id ?? input.threadId,
+			);
+
+			if (action === "archive" ? !capabilities?.manage : !capabilities?.read) {
+				return json({
+					ok: false,
+					error:
+						action === "archive"
+							? "Your Discord permissions do not allow archiving that thread."
+							: "Your Discord permissions do not allow reading that thread.",
+				});
+			}
+
+			if (action === "archive") await rest.setThreadArchived(input.threadId, true);
+			else if (action === "join") await rest.joinThread(input.threadId);
+			else await rest.leaveThread(input.threadId);
 
 			return json({ ok: true });
 		} catch (error) {
@@ -470,6 +522,12 @@ export class Hub extends DurableObject<Env> {
 		const input = await body(request, Schema.Struct({ channel: Schema.String }));
 
 		if (input instanceof Response) return input;
+		// Unbinding is destructive: it stops the agent watching a channel, so it
+		// takes the same permission as the other management actions.
+		if (!(await this.speakerAllows(request, input.channel, "manage"))) {
+			return json({ ok: false, error: "Your Discord permissions do not allow leaving that channel." });
+		}
+
 		await this.unbindChannel(input.channel);
 
 		return json({ ok: true });
@@ -564,9 +622,27 @@ export class Hub extends DurableObject<Env> {
 		const channel = await this.sessionChannel(input.sessionID);
 
 		if (!channel) return json({ context: null });
-		const principal = await this.store.plain(KEYS.principal + channel, PrincipalRecordSchema);
+		// The principal is frozen when the turn starts. Reading the channel's
+		// latest speaker instead would let whoever posts next in the channel
+		// change the permissions of a turn already running.
+		const frozen = await this.store.plain(KEYS.sessionPrincipal + input.sessionID, PrincipalRecordSchema);
+		const principal =
+			frozen ?? (await this.store.plain(KEYS.principal + channel, PrincipalRecordSchema));
 
 		return json({ context: principal ?? null });
+	}
+
+	/** Freeze the current speaker as the principal for this session's turn. */
+	private async bindPrincipal(request: Request): Promise<Response> {
+		const input = await body(request, Schema.Struct({ sessionID: Schema.String, channel: Schema.String }));
+
+		if (input instanceof Response) return input;
+		const principal = await this.store.plain(KEYS.principal + input.channel, PrincipalRecordSchema);
+
+		if (!principal) return json({ ok: false });
+		await this.store.putPlain(KEYS.sessionPrincipal + input.sessionID, PrincipalRecordSchema, principal);
+
+		return json({ ok: true });
 	}
 
 	private async capabilities(guildId: string, userId: string, channelId: string): Promise<DiscordCapabilities | undefined> {
@@ -675,11 +751,36 @@ export class Hub extends DurableObject<Env> {
 
 		if (input instanceof Response) return input;
 		const message = input.message;
+		const policy = await this.policy();
+		// iMessage has no roles, so the owner's own number is the only identity
+		// that may act with owner authority. Anyone else is an ordinary
+		// principal and has to be granted access like a Discord member.
+		const config = await this.messagingConfig("imessage").catch(() => undefined);
+		const ownerNumber = config?.kind === "imessage" ? config.ownerNumber : undefined;
+		const fromOwner =
+			message.provider === "imessage" && ownerNumber !== undefined && sameNumber(message.author.id, ownerNumber);
+		const trusted = fromOwner || message.author.id === policy.ownerDiscordId;
+		const permissions = trusted
+			? ownerPermissions()
+			: permissionsFor(
+					policy,
+					{
+						id: message.author.id,
+						name: message.author.name,
+						roles: message.author.roles ?? [],
+					},
+					message.channel,
+				);
+
+		if (!trusted && (!permissions.invoke || !canUseChannel(permissions, message.channel))) {
+			return json({ ok: true, ignored: true, denied: true });
+		}
+
 		let binding = await this.binding(message.channel);
 
 		if (!binding) {
 			// A mention in a channel opens a binding; an iMessage conversation
-			// always does, because the phone number is the conversation.
+			// opens once its sender is allowed to speak.
 			const opens = message.addressed === true || message.provider === "imessage";
 
 			if (!opens) return json({ ok: true, ignored: true });
@@ -698,24 +799,6 @@ export class Hub extends DurableObject<Env> {
 		if (!binding.enabled) return json({ ok: true, ignored: true });
 		if (message.outbound === true) return json({ ok: true, ignored: true });
 
-		const policy = await this.policy();
-		const trusted = message.provider === "imessage" || message.author.id === policy.ownerDiscordId;
-		const permissions = trusted
-			? ownerPermissions()
-			: permissionsFor(
-					policy,
-					{
-						id: message.author.id,
-						name: message.author.name,
-						roles: message.author.roles ?? [],
-					},
-					message.channel,
-				);
-
-		if (!trusted && (!permissions.invoke || !canUseChannel(permissions, message.channel))) {
-			return json({ ok: true, ignored: true, denied: true });
-		}
-
 		await this.store.putPlain(KEYS.principal + message.channel, PrincipalRecordSchema, {
 			channel: message.channel,
 			authorId: message.author.id,
@@ -724,6 +807,18 @@ export class Hub extends DurableObject<Env> {
 			permissions,
 			updatedAt: Date.now(),
 		});
+
+		// SendBlue explicitly redelivers, and a gateway replay can repeat an
+		// event. The same provider message must not start a second turn. A
+		// bounded ring is enough: retries arrive within minutes, not days.
+		const key = message.provider + ":" + message.id;
+		const recent = (await this.ctx.storage.get<string[]>("recent:events")) ?? [];
+
+		if (recent.includes(key)) return json({ ok: true, ignored: true, duplicate: true });
+
+		recent.push(key);
+		if (recent.length > 500) recent.splice(0, recent.length - 500);
+		await this.ctx.storage.put("recent:events", recent);
 
 		const stored = this.record(message);
 

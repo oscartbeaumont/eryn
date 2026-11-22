@@ -46,6 +46,7 @@ interface ServerQuery {
 	guild?: string;
 	oauth?: string;
 	integration?: string;
+	claim?: string;
 }
 
 interface LinkBody {
@@ -74,6 +75,7 @@ function serverUrl(id: string, query: ServerQuery = {}): string {
 	if (query.guild) params.set("guild", query.guild);
 	if (query.oauth) params.set("oauth", query.oauth);
 	if (query.integration) params.set("integration", query.integration);
+	if (query.claim) params.set("claim", query.claim);
 	const suffix = params.toString() ? "?" + params.toString() : "";
 
 	return "/app/servers/" + encodeURIComponent(id) + suffix;
@@ -314,9 +316,11 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 		};
 	}
 
+	const claim = url.searchParams.get("claim");
 	const error = url.searchParams.get("error");
 	const ok = url.searchParams.get("ok");
 
+	if (claim) data.claim = claim;
 	if (error) data.error = error;
 	if (ok) data.ok = ok;
 
@@ -338,6 +342,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 	let oauth: string | undefined;
 	let integration: string | undefined;
 	let external: string | undefined;
+	let claim: string | undefined;
 
 	switch (action) {
 		case "rename":
@@ -587,6 +592,13 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 			guild = field(fields, "guildId");
 			result = await serverCall(env, id, "/messaging/discord", { guildId: guild }, origin);
 			ok = "Discord server connected.";
+
+			// Binding needs proof from inside Discord, so the page hands back a code.
+			if (typeof result.data.claim === "string") {
+				claim = result.data.claim;
+				ok = "Run /eryn claim " + claim + " in Discord to finish.";
+			}
+
 			break;
 		case "messaging/imessage":
 			result = await serverCall(
@@ -597,6 +609,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 					apiKeyId: field(fields, "apiKeyId"),
 					apiSecret: field(fields, "apiSecret"),
 					fromNumber: field(fields, "fromNumber"),
+					ownerNumber: field(fields, "ownerNumber"),
 				},
 				origin,
 			);
@@ -637,6 +650,7 @@ async function serverAction(request: Request, env: Env, id: string, action: stri
 		query.ok = ok;
 		if (guild) query.guild = guild;
 		if (oauth) query.oauth = oauth;
+		if (claim) query.claim = claim;
 		if (integration) query.integration = integration;
 	} else {
 		query.error =

@@ -154,6 +154,8 @@ export const SendBlueConfigSchema = Schema.Struct({
 	apiKeyId: Schema.String,
 	apiSecret: Schema.String,
 	fromNumber: Schema.String,
+	/** The one number that speaks with the owner's authority. */
+	ownerNumber: Schema.optional(Schema.String),
 	/** Per-server secret in the webhook URL. */
 	webhookSecret: Schema.String,
 });

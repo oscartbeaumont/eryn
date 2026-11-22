@@ -282,12 +282,14 @@ export class ServerAgent {
 		const name = automationName(input.channelId);
 
 		// The agent creates the watch itself through `watch_mcp_event`; this only
-		// discovers one it has already made, so a restart keeps using it.
+		// discovers one it has already made, so a restart keeps using it. The id
+		// is taken from the host rather than memory: a watch deleted from the UI
+		// must not keep suppressing prompts forever.
 		try {
 			const automations = await host.experimental.automation.list({ sessionID });
 			const existing = automations.find((entry) => entry.name === name);
 
-			if (existing) automationID = existing.id;
+			automationID = existing?.id;
 		} catch (error) {
 			log("server", "could not list automations: " + describeError(error));
 		}
@@ -335,6 +337,21 @@ export class ServerAgent {
 	}
 
 	/** Follow permission and form events so they can be answered in chat. */
+	private readonly handling = new Set<Promise<void>>();
+
+	private trackEvent(event: unknown): void {
+		const run = (async () => {
+			try {
+				await this.handleEvent(event as never);
+			} catch (error) {
+				log("server", "could not handle a host event: " + describeError(error));
+			}
+		})();
+
+		this.handling.add(run);
+		void run.finally(() => this.handling.delete(run));
+	}
+
 	private startConsuming(host: HostInterface): void {
 		if (this.consuming) return;
 		const controller = new AbortController();
@@ -342,11 +359,10 @@ export class ServerAgent {
 		this.abort = controller;
 		const loop = (async () => {
 			for await (const event of host.events.subscribe({ signal: controller.signal })) {
-				try {
-					await this.handleEvent(event);
-				} catch (error) {
-					log("server", "could not handle a host event: " + describeError(error));
-				}
+				// An approval waits for a person, sometimes for minutes. Awaiting it
+				// here would stall every other event until the SDK's buffer overflows
+				// and the stream ends, so each event runs on its own.
+				this.trackEvent(event);
 			}
 		})();
 		const settled = loop
@@ -433,8 +449,8 @@ export class ServerAgent {
 	}
 
 	/** Consume an approval or form answer before it becomes a new turn. */
-	async consumeText(channel: string, text: string): Promise<boolean> {
-		return await this.approvals.consumeText(channel, text);
+	async consumeText(channel: string, text: string, userId?: string): Promise<boolean> {
+		return await this.approvals.consumeText(channel, text, userId);
 	}
 
 	/** The fields of a pending form, for a Discord modal. */
@@ -495,6 +511,19 @@ export class ServerAgent {
 		}
 	}
 
+	/** Revoke every credential an integration was given, so a disconnect really disconnects. */
+	async forgetCredential(integrationID: string): Promise<void> {
+		const host = this.running ? await this.running.promise.catch(() => undefined) : undefined;
+
+		if (!host) return;
+		const credentials = await host.credential.list().catch(() => []);
+
+		for (const entry of credentials) {
+			if (entry.integrationID !== integrationID) continue;
+			await host.credential.remove({ credentialID: entry.id }).catch(() => undefined);
+		}
+	}
+
 	/** Remember an `always` decision for the rest of this session. */
 	async grant(sessionID: string, tool: string): Promise<void> {
 		const links = await this.deps.links();
@@ -548,6 +577,10 @@ export class ServerAgent {
 
 		const record = await this.attach(host, existing);
 
+		// Freeze who is asking before the turn starts, so a message arriving
+		// mid-turn cannot change the permissions this turn runs with.
+		if (record.sessionID) await this.freezePrincipal(record.sessionID, channel);
+
 		// Once the agent has created its watch and the MCP stream is open, the
 		// event drives the turn and prompting here would run it twice.
 		if (record.automationID && this.ready()) return false;
@@ -562,6 +595,18 @@ export class ServerAgent {
 		});
 
 		return true;
+	}
+
+	/** Snapshot the speaker as this session's principal. */
+	private async freezePrincipal(sessionID: string, channel: string): Promise<void> {
+		await this.deps.hubs
+			.get(this.deps.hubs.idFromName(this.deps.serverId))
+			.fetch("https://hub.internal/principal/bind", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ sessionID, channel }),
+			})
+			.catch((error: unknown) => log("server", "could not freeze the principal: " + describeError(error)));
 	}
 
 	/** Remove a channel's watch and session when it is detached. */

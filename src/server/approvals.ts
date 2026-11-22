@@ -339,7 +339,11 @@ export class ApprovalBroker {
 		for (const field of pending.fields) {
 			const value = pending.values[field.key];
 
-			if (value !== undefined) answer[field.key] = coerce(field, value);
+			if (value === undefined) continue;
+			// A modal submits every input, so an untouched optional field arrives
+			// as "". Only a string field can mean it.
+			if (value === "" && field.type !== "string") continue;
+			answer[field.key] = coerce(field, value);
 		}
 
 		await this.options
@@ -412,10 +416,17 @@ export class ApprovalBroker {
 					text: "**Input needed: " + input.title + "**",
 					components: [buttonRow([actionButton("Fill form", "form:" + id, 1)])],
 				})
-				.catch((error: unknown) => {
+				.catch(async (error: unknown) => {
 					log("approvals", "could not post a form: " + describeError(error));
 					clearTimeout(timer);
 					this.pending.delete(id);
+					await this.options
+						.cancelForm({
+							sessionID: input.sessionID,
+							formID: input.formID,
+							message: "The form could not be delivered.",
+						})
+						.catch(() => undefined);
 				});
 
 			return;
@@ -423,10 +434,17 @@ export class ApprovalBroker {
 
 		await this.options
 			.send({ channel: input.channel, text: formPrompt(input.title, fields) })
-			.catch((error: unknown) => {
+			.catch(async (error: unknown) => {
 				log("approvals", "could not post a form: " + describeError(error));
 				clearTimeout(timer);
 				this.pending.delete(id);
+				await this.options
+					.cancelForm({
+						sessionID: input.sessionID,
+						formID: input.formID,
+						message: "The form could not be delivered.",
+					})
+					.catch(() => undefined);
 			});
 	}
 
@@ -475,8 +493,12 @@ export class ApprovalBroker {
 	 * Returns true when the message was consumed, so the caller must not start a
 	 * new agent turn with it.
 	 */
-	async consumeText(channel: string, text: string): Promise<boolean> {
-		const pending = [...this.pending.values()].find((entry) => entry.channel === channel);
+	async consumeText(channel: string, text: string, userId?: string): Promise<boolean> {
+		// An approval belongs to the person whose turn opened it. Someone else
+		// in the channel answering "1" must not decide it for them.
+		const pending = [...this.pending.values()]
+			.filter((entry) => entry.channel === channel && entry.requesterId === userId)
+			.at(-1);
 
 		if (!pending) return false;
 
@@ -514,6 +536,10 @@ export class ApprovalBroker {
 
 		for (const [key, value] of parseLines(pending.fields, text)) values[key] = value;
 
+		// A message that answers no field is ordinary conversation, not a form
+		// reply, so let it reach the agent instead of swallowing it.
+		if (Object.keys(values).length === 0) return false;
+
 		return await this.answerForm(pending, values);
 	}
 
@@ -523,11 +549,20 @@ export class ApprovalBroker {
 			if (pending.sessionID !== sessionID) continue;
 			clearTimeout(pending.timer);
 			this.pending.delete(id);
+
+			// Never leave a caller awaiting a decision that can no longer arrive.
+			if (pending.kind === "permission") pending.resolve("block");
+			else pending.resolve({});
 		}
 	}
 
 	close(): void {
-		for (const pending of this.pending.values()) clearTimeout(pending.timer);
+		for (const [id, pending] of this.pending) {
+			clearTimeout(pending.timer);
+			if (pending.kind === "permission") pending.resolve("block");
+			else pending.resolve({});
+			this.pending.delete(id);
+		}
 		this.pending.clear();
 	}
 }

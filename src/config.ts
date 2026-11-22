@@ -85,6 +85,8 @@ export const KEYS = {
 	policy: "config:policy",
 	/** The latest speaker and permissions for a conversation. */
 	principal: "hub:principal:",
+	/** The speaker whose turn is running, frozen per session. */
+	sessionPrincipal: "hub:turn:",
 	/** The virtual filesystem, one key per absolute path. */
 	fs: "fs:",
 	/** The default files already written into the virtual filesystem. */

@@ -38,7 +38,9 @@ export function mailer(env: Env): Mailer {
 	return {
 		async send({ to, code }) {
 			if (!apiKey) {
-				log("auth", `login code for ${to}: ${code} (RESEND_API_KEY is unset)`);
+				// Never log the code: Worker logs are widely readable, and the code
+				// alone is an account.
+				log("auth", "RESEND_API_KEY is unset, so no sign-in code was sent");
 
 				return { sent: false };
 			}

@@ -16,11 +16,17 @@ import type { Schema } from "effect";
 import { capture } from "../analytics.ts";
 import { log } from "../config.ts";
 import { describeError } from "../errors.ts";
+import { externalFetch } from "../http.ts";
 import { toJsonObject, stringField } from "../json.ts";
 import type { Attachment } from "../core/schema.ts";
 
 const EVENTS_EXTENSION = "io.modelcontextprotocol/events";
 const SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
+
+/** The largest attachment `read_attachment` will return, in bytes. */
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+const fetchExternal = externalFetch(30_000);
 
 type Json = Schema.JsonObject;
 
@@ -45,6 +51,51 @@ function text(value: string, isError = false): Json {
 
 function media(data: string, mimeType: string): Json {
 	return { content: [{ type: "media", data, mimeType }], isError: false };
+}
+
+/**
+ * Read a response body, refusing to buffer past `limit` bytes.
+ *
+ * The declared length is checked first so an obviously oversized attachment is
+ * never read at all; the stream is then cancelled as soon as it passes the cap,
+ * which covers a server that declares nothing or lies.
+ */
+async function readCapped(response: Response, limit: number): Promise<Uint8Array | undefined> {
+	const declared = response.headers.get("content-length");
+
+	if (declared !== null && Number(declared) > limit) return undefined;
+
+	const reader: ReadableStreamDefaultReader<Uint8Array> | undefined = response.body?.getReader();
+
+	// A body-less response has nothing to cap; it was empty before this check too.
+	if (!reader) return new Uint8Array();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+
+	for (;;) {
+		const chunk = await reader.read();
+
+		if (chunk.done) break;
+		total += chunk.value.byteLength;
+
+		if (total > limit) {
+			await reader.cancel().catch(() => undefined);
+
+			return undefined;
+		}
+
+		chunks.push(chunk.value);
+	}
+
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	return bytes;
 }
 
 function base64(bytes: Uint8Array): string {
@@ -368,12 +419,12 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 		if (!url || !url.startsWith("https://")) return text("An HTTPS attachment URL is required.", true);
 
 		try {
-			const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+			const response = await fetchExternal(url);
 
 			if (!response.ok) return text("The attachment returned HTTP " + response.status, true);
-			const bytes = new Uint8Array(await response.arrayBuffer());
+			const bytes = await readCapped(response, MAX_ATTACHMENT_BYTES);
 
-			if (bytes.byteLength > 20 * 1024 * 1024) return text("That attachment is larger than 20 MB.", true);
+			if (!bytes) return text("That attachment is larger than 20 MB.", true);
 			const mime = response.headers.get("content-type") ?? "application/octet-stream";
 
 			options.ctx.waitUntil(
