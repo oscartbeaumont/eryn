@@ -488,9 +488,34 @@ export class ServerAgent {
 	/** Prompt a channel directly while its agent-owned message watch is absent. */
 	async prompt(channel: string, message: InboundMessage): Promise<boolean> {
 		const host = await this.ensureHost();
-		const existing = (await this.deps.channels()).find((entry) => entry.channelId === channel);
+		let existing = (await this.deps.channels()).find((entry) => entry.channelId === channel);
 
-		if (!existing) return false;
+		if (!existing) {
+			// A thread is created by Hub with a binding but no channel record yet.
+			// Its first message starts a new conversation for it.
+			const response = await this.deps.hubs
+				.get(this.deps.hubs.idFromName(this.deps.serverId))
+				.fetch("https://hub.internal/channels", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({}),
+				});
+			const payload = toJsonObject((await response.json().catch(() => undefined)) as never);
+			const bindings = Array.isArray(payload?.channels) ? payload.channels : [];
+			const binding = bindings
+				.map((entry) => toJsonObject(entry as Schema.Json))
+				.find((entry) => entry?.externalId === channel && entry.source === "thread");
+
+			if (!binding) return false;
+			existing = {
+				channelId: channel,
+				provider: typeof binding.provider === "string" ? binding.provider : "discord",
+				name: typeof binding.name === "string" ? binding.name : undefined,
+				containerId: typeof binding.containerId === "string" ? binding.containerId : undefined,
+				createdAt: Date.now(),
+			};
+		}
+
 		const record = await this.attach(host, existing);
 
 		// Once the agent has created its watch and the MCP stream is open, the

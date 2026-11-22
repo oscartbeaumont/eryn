@@ -275,11 +275,9 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 		return text(
 			"Started thread " +
 				id +
-				'. To follow it, create a watch with watch_mcp_event: server "eryn", event "message", arguments {"channel":"' +
+				". It is a new conversation: use send_message with channel \"" +
 				id +
-				'"}, named "messages:' +
-				id +
-				'".',
+				"\" to work there. The first message in the thread starts its own session; do not create a watch for it in this conversation.",
 		);
 	}
 

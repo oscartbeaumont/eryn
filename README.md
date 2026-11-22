@@ -117,8 +117,8 @@ image or file to the model without storing it. Configure an R2 lifecycle rule
 on the `eryn-artifacts` bucket so shared files expire.
 
 On Discord, the agent can call `start_thread` to move a long request into a
-thread. The thread is bound as another conversation; the agent creates a watch
-for it with `watch_mcp_event`. iMessage reports threads as unsupported.
+thread. The thread is bound as another conversation, and its first message
+starts its own session. iMessage reports threads as unsupported.
 
 ## Workspaces
 
