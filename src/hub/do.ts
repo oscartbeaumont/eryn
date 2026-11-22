@@ -360,11 +360,26 @@ export class Hub extends DurableObject<Env> {
 
 		try {
 			const channels = await this.discord().guildChannels(binding.containerId);
+			const speaker = sessionChannel ? await this.principal(sessionChannel) : undefined;
+			const visible = await Promise.all(
+				channels
+					.filter((entry) => (entry.type ?? 0) === 0 || (entry.type ?? 0) === 5)
+					.map(async (entry) => {
+						if (!speaker) return undefined;
+						const capabilities = await this.capabilities(
+							binding.containerId as string,
+							speaker.authorId,
+							entry.id,
+						);
+
+						return capabilities?.read ? entry : undefined;
+					}),
+			);
 
 			return json({
 				ok: true,
-				channels: channels
-					.filter((entry) => (entry.type ?? 0) === 0 || (entry.type ?? 0) === 5)
+				channels: visible
+					.filter((entry) => entry !== undefined)
 					.map((entry) => ({ id: entry.id, name: entry.name, type: entry.type })),
 			});
 		} catch (error) {
