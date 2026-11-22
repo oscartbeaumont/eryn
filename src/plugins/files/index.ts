@@ -113,6 +113,8 @@ export function filesPlugin(options: FilesPluginOptions) {
 			),
 			async run(rawInput, call: ToolCall) {
 				const { url, path } = declaredInput<{ url: string; path?: string }>(rawInput);
+
+				if (!url.startsWith("https://")) throw new Error("An HTTPS attachment URL is required.");
 				const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
 
 				if (!response.ok) throw new Error("The attachment returned HTTP " + response.status);

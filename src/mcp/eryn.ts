@@ -245,7 +245,7 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 	if (name === "read_attachment") {
 		const url = stringField(args, "url");
 
-		if (!url) return text("An attachment URL is required.", true);
+		if (!url || !url.startsWith("https://")) return text("An HTTPS attachment URL is required.", true);
 
 		try {
 			const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
