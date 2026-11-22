@@ -570,7 +570,7 @@ export class Server extends DurableObject<Env> {
 		const host = await this.agent.ensureHost();
 		const listed = await host.model.list({ location: { directory: SERVER_ROOT } });
 
-		return json({ models: Array.isArray(listed) ? listed : [] });
+		return json({ models: Array.isArray(listed.data) ? listed.data : [] });
 	}
 
 	private async connectProvider(request: Request): Promise<Response> {

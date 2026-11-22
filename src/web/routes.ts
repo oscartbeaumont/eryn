@@ -225,6 +225,7 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 	const links = await serverCall(env, id, "/links", {}, origin);
 	const plugins = await serverCall(env, id, "/plugins", {}, origin);
 	const automationsResult = await serverCall(env, id, "/automations", {}, origin);
+	const modelsResult = await serverCall(env, id, "/models", {}, origin);
 	const mcp = Array.isArray(status.data.mcp) ? status.data.mcp : [];
 	const policy = Schema.decodeUnknownOption(ServerPolicySchema)(status.data.policy);
 	const currentPolicy = policy._tag === "Some" ? policy.value : defaultPolicy();
@@ -255,6 +256,11 @@ async function serverSettings(request: Request, env: Env, id: string): Promise<R
 			: [],
 		policy: currentPolicy,
 		discordRoles,
+		models: Array.isArray(modelsResult.data.models)
+			? (modelsResult.data.models as Array<{ providerID: string; modelID: string; name: string }>).map(
+					(model) => ({ id: model.providerID + "/" + model.modelID, name: model.name }),
+				)
+			: [],
 		mcp: mcp.flatMap((entry) => {
 			const server = toJsonObject(entry as Schema.Json);
 			const state = toJsonObject(server?.status);

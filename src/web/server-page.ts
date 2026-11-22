@@ -25,6 +25,7 @@ export interface ServerPageData {
 	readonly mcp: ReadonlyArray<{ name: string; status: string; error?: string }>;
 	readonly policy: ServerPolicy;
 	readonly discordRoles: ReadonlyArray<{ id: string; name: string }>;
+	readonly models: ReadonlyArray<{ id: string; name: string }>;
 	readonly automations: ReadonlyArray<{
 		channelId: string;
 		channelName?: string;
@@ -202,7 +203,15 @@ export function serverPage(data: ServerPageData): Response {
 			"</form>",
 			'<form method="post" action="' + base + '/inference/model">',
 			'<label for="model">Model</label>',
-			'<input id="model" name="model" value="' + escapeHtml(data.model) + '" required>',
+			data.models.length
+				? '<select id="model" name="model">' +
+						data.models
+							.map((model) =>
+								option(model.id, model.name + " (" + model.id + ")", data.model === model.id),
+							)
+							.join("") +
+						"</select>"
+				: '<input id="model" name="model" value="' + escapeHtml(data.model) + '" required>',
 			'<button type="submit">Save model</button>',
 			"</form>",
 		].join(""),
