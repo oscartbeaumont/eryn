@@ -132,6 +132,8 @@ export async function buildHost(config: HostConfig, options: HostOptions): Promi
 			rootForSession,
 		}),
 		policyPlugin({
+			env,
+			serverId,
 			contextFor: options.contextFor,
 			grantFor: options.grantFor,
 			mcpServers: config.links.map((link) => link.name),

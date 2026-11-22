@@ -108,8 +108,8 @@ export function serverPage(data: ServerPageData): Response {
 					discordConfigured
 						? '<p class="faint">Connected to guild <code>' +
 							escapeHtml(data.messaging.discord?.guildId ?? "") +
-							"</code>.</p>"
-						: '<p class="faint">Install the bot in a guild, then choose it here.</p>',
+							'</code>. <a href="/install">Add to another guild</a></p>'
+						: '<p class="faint">Install the bot in a guild, then choose it here. <a href="/install">Add to Discord</a></p>',
 				].join(""),
 			)
 		: '<section class="card"><h2>Discord</h2><p class="muted">Discord is not reachable. Check DISCORD_BOT_TOKEN.</p></section>';

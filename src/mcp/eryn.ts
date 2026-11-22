@@ -376,6 +376,15 @@ async function callTool(options: McpOptions, params: Json | undefined): Promise<
 			if (bytes.byteLength > 20 * 1024 * 1024) return text("That attachment is larger than 20 MB.", true);
 			const mime = response.headers.get("content-type") ?? "application/octet-stream";
 
+			options.ctx.waitUntil(
+				capture(
+					options.env,
+					"file_downloaded",
+					{ success: true, mime },
+					{ serverId: options.serverId },
+				),
+			);
+
 			return media(base64(bytes), mime);
 		} catch (error) {
 			return text(describeError(error), true);

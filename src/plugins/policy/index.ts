@@ -10,6 +10,7 @@
 
 import { Plugin } from "@opencode/plugin";
 
+import { capture } from "../../analytics.ts";
 import { log } from "../../config.ts";
 import { describeError } from "../../errors.ts";
 import { stringField, toJsonObject } from "../../json.ts";
@@ -22,6 +23,8 @@ export interface PolicyContext {
 }
 
 export interface PolicyPluginOptions {
+	readonly env: Env;
+	readonly serverId: string;
 	/** The conversation and resolved permissions for a session. */
 	readonly contextFor: (sessionID: string) => Promise<PolicyContext | undefined>;
 	/** Grants written by `always` in this session. */
@@ -57,7 +60,15 @@ export function policyPlugin(options: PolicyPluginOptions) {
 					});
 
 					event.effect = decision === "block" ? "deny" : decision;
-					if (decision === "block") event.message = "This tool is not allowed in this conversation.";
+					if (decision === "block") {
+						event.message = "This tool is not allowed in this conversation.";
+						void capture(
+							options.env,
+							"tool_denied",
+							{ tool: event.action },
+							{ serverId: options.serverId },
+						);
+					}
 					if (decision === "ask") event.message = "This tool needs approval.";
 				} catch (error) {
 					log("policy", "permission evaluation failed: " + describeError(error));

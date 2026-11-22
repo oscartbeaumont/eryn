@@ -8,6 +8,7 @@
 
 import { Schema } from "effect";
 
+import { capture } from "../analytics.ts";
 import { log } from "../config.ts";
 import { SERVER_ROOT, channelRoot } from "../core/paths.ts";
 import type { InboundMessage } from "../core/schema.ts";
@@ -385,7 +386,20 @@ export class ServerAgent {
 
 			if (context?.authorId) approval.requesterId = context.authorId;
 			if (context?.name) approval.requesterName = context.name;
-			await this.approvals.permission(approval);
+			void capture(
+				this.deps.env,
+				"approval_requested",
+				{ tool: approval.action, provider },
+				{ serverId: this.deps.serverId },
+			);
+			const decision = await this.approvals.permission(approval);
+
+			void capture(
+				this.deps.env,
+				"approval_answered",
+				{ tool: approval.action, decision },
+				{ serverId: this.deps.serverId },
+			);
 
 			return;
 		}
@@ -413,6 +427,7 @@ export class ServerAgent {
 			};
 
 			if (context?.authorId) request.requesterId = context.authorId;
+			void capture(this.deps.env, "form_requested", { provider }, { serverId: this.deps.serverId });
 			await this.approvals.form(request);
 		}
 	}

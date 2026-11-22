@@ -11,6 +11,7 @@
 import { Plugin } from "@opencode/plugin";
 import type { Schema } from "effect";
 
+import { capture } from "../../analytics.ts";
 import { newId } from "../../core/ids.ts";
 import { declaredInput, objectSchema, toolRun } from "../tool.ts";
 import type { ToolCall, ToolSpec } from "../tool.ts";
@@ -94,6 +95,12 @@ export function filesPlugin(options: FilesPluginOptions) {
 				await options.env.ARTIFACTS.put(key, bytes, {
 					httpMetadata: { contentType: mimeOf(name) },
 				});
+				void capture(
+					options.env,
+					"file_shared",
+					{ mime: mimeOf(name), size: bytes.byteLength },
+					{ serverId: options.serverId },
+				);
 				const token = await mintFileToken(options.env, key);
 
 				if (!token) throw new Error("File links are not configured.");

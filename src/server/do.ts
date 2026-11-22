@@ -762,6 +762,8 @@ export class Server extends DurableObject<Env> {
 				if (probe.scope) request.scope = probe.scope;
 				const started = await beginAuthorization(request);
 
+				this.track("mcp_oauth_started");
+
 				return json({ ok: true, oauth: started });
 			} catch (error) {
 				return failure(describeError(error));
@@ -832,6 +834,8 @@ export class Server extends DurableObject<Env> {
 			if (input.scope) request.scope = input.scope;
 			const started = await beginAuthorization(request);
 
+			this.track("mcp_oauth_started");
+
 			return json(started);
 		} catch (error) {
 			return failure(describeError(error));
@@ -880,7 +884,10 @@ export class Server extends DurableObject<Env> {
 		if (input.error) completion.error = input.error;
 		const result = await finishAuthorization(this.linkStore(), attempt, completion);
 
-		if (result.link) this.track("mcp_link_added");
+		if (result.link) {
+			this.track("mcp_link_added");
+			this.track("mcp_oauth_completed");
+		}
 		const payload: LinkOauthCompleteBody = { status: result.status };
 
 		if (result.message) payload.message = result.message;
